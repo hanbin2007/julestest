@@ -44,10 +44,12 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-# 转发给上游时要去掉的逐跳 / 会被自动重设的头
+# 转发给上游时要去掉的逐跳 / 会被自动重设的头。
+# 注意：故意保留 "url" —— 解密 key 的接口(live.ydshengxue.com)要求 Url 头始终指向
+# m3u8 地址（App 对 m3u8 / ts / key 三种请求都带同一个 Url=<m3u8>），改写它会导致 key 返回失败。
 _DROP_HEADERS = {
     "host", "connection", "proxy-connection", "content-length",
-    "accept-encoding", "range", "te", "upgrade", "url",
+    "accept-encoding", "range", "te", "upgrade",
 }
 
 _REQUEST_LINE_RE = re.compile(r"^(GET|POST|HEAD|PUT|DELETE|OPTIONS)\s+(\S+)\s+HTTP/", re.I)
@@ -88,21 +90,14 @@ def parse_request(text):
     return url, headers
 
 
-def forward_headers(headers, target, range_header=None):
-    """构造转发给上游的头：保留鉴权 / 自定义头，去掉逐跳头。"""
+def forward_headers(headers, range_header=None):
+    """构造转发给上游的头：原样保留鉴权 / 自定义头（含 Url），去掉逐跳头。"""
     out = {}
-    had_url_header = False
     for key, val in headers.items():
-        low = key.lower()
-        if low == "url":
-            had_url_header = True
-            continue
-        if low in _DROP_HEADERS:
+        if key.lower() in _DROP_HEADERS:
             continue
         out[key] = val
     out["Accept-Encoding"] = "identity"
-    if had_url_header:
-        out["Url"] = target
     if range_header:
         out["Range"] = range_header
     return out
@@ -160,11 +155,12 @@ PLAYER_HTML = """<!doctype html>
 </head>
 <body>
 <h1>有道课程播放器（本地代理）</h1>
-<input id="url" placeholder="把抓到的 .m3u8 地址粘进来，例如 https://stream.youdao.com/.../xxx.m3u8">
+<input id="url" value="__DEFAULT_URL__" placeholder="把抓到的 .m3u8 地址粘进来，例如 https://stream.youdao.com/.../xxx.m3u8">
 <button onclick="play()">播放</button>
 <div class="hint">
   播放器只跟本地代理通信，鉴权头由代理自动补上。支持倍速（右键 / 控制条）和拖动进度。<br>
-  想存成文件：终端运行 <code>python3 youdao_course.py download --request req.txt --url &lt;地址&gt; -o out.mp4</code>
+  地址已按 req.txt 自动填好。注意：解密 key 绑定该视频的 Videoid/Cardpackageid，<b>一份 req.txt 只对应它抓的那个视频</b>；换视频请重新抓一条请求。<br>
+  想存成文件：终端运行 <code>python3 youdao_course.py download --request req.txt -o out.mp4</code>
 </div>
 <video id="v" controls playsinline></video>
 <script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>
@@ -194,7 +190,11 @@ function play() {
 """
 
 
-def make_handler(headers):
+def make_handler(headers, default_url=""):
+    page = PLAYER_HTML.replace(
+        "__DEFAULT_URL__",
+        default_url.replace("&", "&amp;").replace('"', "&quot;"))
+
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -214,7 +214,7 @@ def make_handler(headers):
         def do_GET(self):
             parsed = urllib.parse.urlparse(self.path)
             if parsed.path == "/" or parsed.path == "/index.html":
-                self._send_bytes(200, PLAYER_HTML.encode("utf-8"),
+                self._send_bytes(200, page.encode("utf-8"),
                                  "text/html; charset=utf-8")
                 return
             if parsed.path != "/p":
@@ -227,7 +227,7 @@ def make_handler(headers):
                 return
             target = qs["u"][0]
 
-            fwd = forward_headers(headers, target, self.headers.get("Range"))
+            fwd = forward_headers(headers, self.headers.get("Range"))
             req = urllib.request.Request(target, headers=fwd, method="GET")
             try:
                 resp = urllib.request.urlopen(req, timeout=60)
@@ -257,8 +257,9 @@ def make_handler(headers):
     return Handler
 
 
-def start_proxy(headers, port):
-    server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(headers))
+def start_proxy(headers, port, default_url=""):
+    server = ThreadingHTTPServer(("127.0.0.1", port),
+                                 make_handler(headers, default_url))
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     return server
@@ -287,10 +288,10 @@ def cmd_parse(args):
 
 
 def cmd_serve(args):
-    _, headers = load_session(args)
-    server = start_proxy(headers, args.port)
+    url, headers = load_session(args)
+    server = start_proxy(headers, args.port, url)
     print("代理已启动。浏览器打开： http://127.0.0.1:%d" % args.port)
-    print("把 m3u8 地址粘进页面即可播放。Ctrl-C 退出。")
+    print("地址已自动填好（来自 req.txt），点“播放”即可。Ctrl-C 退出。")
     try:
         while True:
             time.sleep(3600)
