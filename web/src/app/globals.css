@@ -1,0 +1,19 @@
+html,
+body {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+* {
+  box-sizing: border-box;
+}
+a {
+  color: inherit;
+  text-decoration: none;
+}
+/* Artplayer 容器铺满其包裹盒 */
+.art-host,
+.art-host .art-video-player {
+  width: 100%;
+  height: 100%;
+}

@@ -1,5 +1,7 @@
 __pycache__/
 *.pyc
 *.mp4
-*.ts
+# downloaded HLS video segments (scoped so it doesn't catch TypeScript source under web/)
+/*.ts
+*.m3u8
 req.txt
