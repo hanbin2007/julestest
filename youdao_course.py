@@ -104,12 +104,15 @@ def forward_headers(headers, range_header=None):
     return out
 
 
-def _proxify(abs_url):
-    return "/p?u=" + urllib.parse.quote(abs_url, safe="")
+def _proxify(abs_url, vid=None):
+    s = "/p?u=" + urllib.parse.quote(abs_url, safe="")
+    if vid:
+        s += "&vid=" + urllib.parse.quote(str(vid), safe="")
+    return s
 
 
-def rewrite_m3u8(body_text, base_url):
-    """把 m3u8 里的分片 / 子播放列表 / 密钥地址改写成走本地代理。"""
+def rewrite_m3u8(body_text, base_url, vid=None):
+    """把 m3u8 里的分片 / 子播放列表 / 密钥地址改写成走本地代理（带上 vid 以便选对鉴权头）。"""
     out_lines = []
     for raw in body_text.splitlines():
         line = raw.strip()
@@ -119,12 +122,12 @@ def rewrite_m3u8(body_text, base_url):
             if "URI=" in raw:
                 def _sub(m):
                     abs_u = urllib.parse.urljoin(base_url, m.group(1))
-                    return 'URI="%s"' % _proxify(abs_u)
+                    return 'URI="%s"' % _proxify(abs_u, vid)
                 raw = _URI_ATTR_RE.sub(_sub, raw)
             out_lines.append(raw)
         else:
             abs_u = urllib.parse.urljoin(base_url, line)
-            out_lines.append(_proxify(abs_u))
+            out_lines.append(_proxify(abs_u, vid))
     return "\n".join(out_lines) + "\n"
 
 
@@ -135,67 +138,317 @@ def _looks_like_m3u8(url, content_type):
     return path.endswith(".m3u8") or path.endswith(".m3u")
 
 
-PLAYER_HTML = """<!doctype html>
+APP_HTML = r"""<!doctype html>
 <html lang="zh">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>有道课程播放器</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>课程</title>
 <style>
-  body { font-family: -apple-system, system-ui, sans-serif; max-width: 960px;
-         margin: 24px auto; padding: 0 16px; background:#111; color:#eee; }
-  h1 { font-size: 18px; }
-  input { width: 100%; box-sizing: border-box; padding: 10px; font-size: 14px;
-          border-radius: 8px; border: 1px solid #444; background:#1c1c1c; color:#eee; }
-  button { margin-top: 10px; padding: 10px 18px; font-size: 14px; border-radius: 8px;
-           border: none; background:#2d6cdf; color:#fff; cursor: pointer; }
-  video { width: 100%; margin-top: 16px; background:#000; border-radius: 8px; }
-  .hint { color:#888; font-size: 12px; margin-top: 6px; line-height: 1.6; }
-  code { color:#9cf; }
+:root{
+  --bg:#0e1116; --panel:#151a22; --panel2:#1b212b; --line:#262d39;
+  --txt:#e6e9ef; --mut:#8b94a3; --accent:#4f8cff; --accent2:#6ea2ff;
+  --ok:#3ecf8e; --lock:#5a6473; --shadow:0 6px 24px rgba(0,0,0,.35);
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--txt);
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  -webkit-font-smoothing:antialiased}
+.app{display:grid;grid-template-columns:340px 1fr;height:100vh;overflow:hidden}
+/* sidebar */
+.side{background:var(--panel);border-right:1px solid var(--line);display:flex;flex-direction:column;min-width:0}
+.side-head{padding:16px 16px 10px;border-bottom:1px solid var(--line)}
+.brand{font-size:15px;font-weight:700;letter-spacing:.3px;display:flex;align-items:center;gap:8px}
+.brand .dot{width:9px;height:9px;border-radius:50%;background:var(--accent);box-shadow:0 0 10px var(--accent)}
+.brand .cnt{margin-left:auto;font-size:12px;color:var(--mut);font-weight:500}
+.search{margin-top:10px;position:relative}
+.search input{width:100%;padding:9px 12px 9px 32px;border-radius:10px;border:1px solid var(--line);
+  background:var(--panel2);color:var(--txt);font-size:13px;outline:none}
+.search input:focus{border-color:var(--accent)}
+.search svg{position:absolute;left:10px;top:9px;color:var(--mut)}
+.list{flex:1;overflow-y:auto;padding:8px}
+.list::-webkit-scrollbar{width:9px}
+.list::-webkit-scrollbar-thumb{background:#2b3340;border-radius:8px;border:2px solid var(--panel)}
+.course{margin-bottom:4px;border-radius:10px}
+.course>.row{display:flex;align-items:center;gap:8px;padding:10px 10px;cursor:pointer;border-radius:10px;
+  font-size:13.5px;font-weight:600;color:var(--txt);user-select:none}
+.course>.row:hover{background:var(--panel2)}
+.course .chev{transition:transform .18s;color:var(--mut);flex:0 0 auto}
+.course.open .chev{transform:rotate(90deg)}
+.course .ctitle{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.badge{font-size:11px;color:var(--mut);background:var(--panel2);padding:2px 7px;border-radius:20px;flex:0 0 auto}
+.kids{display:none;padding:2px 0 6px 6px}
+.course.open>.kids{display:block}
+.grp{margin:2px 0}
+.grp>.ghead{display:flex;align-items:center;gap:6px;padding:6px 8px;cursor:pointer;border-radius:8px;
+  font-size:12px;color:var(--mut);font-weight:600;user-select:none}
+.grp>.ghead:hover{color:var(--txt)}
+.grp .chev{transition:transform .18s;flex:0 0 auto}
+.grp.open>.ghead .chev{transform:rotate(90deg)}
+.grp>.gkids{display:none;padding-left:10px;border-left:1px solid var(--line);margin-left:11px}
+.grp.open>.gkids{display:block}
+.vid{display:flex;align-items:center;gap:9px;padding:8px 10px;margin:1px 0;border-radius:8px;cursor:pointer;
+  font-size:13px;color:#cfd6e0;line-height:1.35}
+.vid:hover{background:var(--panel2)}
+.vid.active{background:linear-gradient(90deg,rgba(79,140,255,.18),rgba(79,140,255,.04));
+  color:#fff;box-shadow:inset 3px 0 0 var(--accent)}
+.vid .ic{flex:0 0 auto;color:var(--accent2)}
+.vid.active .ic{color:var(--accent)}
+.vid .vt{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.vid .dur{flex:0 0 auto;font-size:11px;color:var(--mut);font-variant-numeric:tabular-nums}
+.vid.locked{color:var(--lock);cursor:not-allowed}
+.vid.locked .ic{color:var(--lock)}
+.loading,.empty{padding:14px 10px;color:var(--mut);font-size:12px}
+.spin{display:inline-block;width:13px;height:13px;border:2px solid var(--line);border-top-color:var(--accent);
+  border-radius:50%;animation:sp .7s linear infinite;vertical-align:-2px;margin-right:7px}
+@keyframes sp{to{transform:rotate(360deg)}}
+/* main */
+.main{display:flex;flex-direction:column;min-width:0;background:var(--bg)}
+.topbar{display:flex;align-items:center;gap:10px;padding:12px 18px;border-bottom:1px solid var(--line)}
+.hamb{display:none;background:none;border:none;color:var(--txt);cursor:pointer;padding:4px}
+.crumb{font-size:12px;color:var(--mut);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.crumb b{color:var(--txt);font-weight:600}
+.stage{flex:1;overflow-y:auto;padding:18px;display:flex;flex-direction:column;align-items:center}
+.player-wrap{width:100%;max-width:1100px}
+.frame{position:relative;width:100%;aspect-ratio:16/9;background:#000;border-radius:14px;overflow:hidden;
+  box-shadow:var(--shadow)}
+video{width:100%;height:100%;display:block;background:#000}
+.placeholder{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;
+  color:var(--mut);gap:10px;text-align:center;padding:20px}
+.placeholder svg{opacity:.5}
+.meta{max-width:1100px;width:100%;margin-top:16px}
+.vtitle{font-size:19px;font-weight:700;line-height:1.4}
+.vsub{margin-top:6px;color:var(--mut);font-size:13px}
+.actions{display:flex;gap:10px;margin-top:14px;flex-wrap:wrap}
+.btn{display:inline-flex;align-items:center;gap:7px;padding:9px 15px;border-radius:10px;border:1px solid var(--line);
+  background:var(--panel2);color:var(--txt);font-size:13px;cursor:pointer;transition:.15s}
+.btn:hover:not(:disabled){border-color:var(--accent);color:#fff}
+.btn:disabled{opacity:.4;cursor:not-allowed}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn.primary:hover{background:var(--accent2)}
+.toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%) translateY(20px);opacity:0;
+  background:#222b38;color:#fff;padding:10px 16px;border-radius:10px;font-size:13px;box-shadow:var(--shadow);
+  transition:.25s;pointer-events:none;z-index:50;border:1px solid var(--line)}
+.toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+.scrim{display:none}
+@media(max-width:860px){
+  .app{grid-template-columns:1fr}
+  .side{position:fixed;z-index:40;top:0;bottom:0;left:0;width:86%;max-width:360px;
+    transform:translateX(-100%);transition:transform .25s;box-shadow:var(--shadow)}
+  .app.drawer .side{transform:none}
+  .hamb{display:inline-flex}
+  .scrim{display:block;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:39;opacity:0;pointer-events:none;
+    transition:.25s}
+  .app.drawer .scrim{opacity:1;pointer-events:auto}
+  .stage{padding:12px}
+  .vtitle{font-size:17px}
+}
 </style>
 </head>
 <body>
-<h1>有道课程播放器（本地代理）</h1>
-<input id="url" value="__DEFAULT_URL__" placeholder="把抓到的 .m3u8 地址粘进来，例如 https://stream.youdao.com/.../xxx.m3u8">
-<button onclick="play()">播放</button>
-<div class="hint">
-  播放器只跟本地代理通信，鉴权头由代理自动补上。支持倍速（右键 / 控制条）和拖动进度。<br>
-  列出全部课程：<code>python3 youdao_course.py list -r req.txt</code>，
-  再 <code>serve -r req.txt --video &lt;videoId&gt;</code> 换视频，无需重新抓包。<br>
-  想存成文件：<code>python3 youdao_course.py download -r req.txt --video &lt;videoId&gt; -o out.mp4</code>
+<div class="app" id="app">
+  <aside class="side" id="side">
+    <div class="side-head">
+      <div class="brand"><span class="dot"></span>我的课程<span class="cnt" id="cnt"></span></div>
+      <div class="search">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+        <input id="q" placeholder="搜索讲次 / 课程…" autocomplete="off">
+      </div>
+    </div>
+    <div class="list" id="list"><div class="loading"><span class="spin"></span>加载课程…</div></div>
+  </aside>
+  <div class="scrim" id="scrim"></div>
+  <main class="main">
+    <div class="topbar">
+      <button class="hamb" id="hamb" aria-label="menu"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M3 12h18M3 18h18"/></svg></button>
+      <div class="crumb" id="crumb">选择左侧任意一讲开始</div>
+    </div>
+    <div class="stage">
+      <div class="player-wrap">
+        <div class="frame">
+          <video id="v" controls playsinline></video>
+          <div class="placeholder" id="ph">
+            <svg width="46" height="46" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m10 8 6 4-6 4V8z"/><rect x="3" y="4" width="18" height="16" rx="3"/></svg>
+            <div>从左侧选择一讲开始播放</div>
+          </div>
+        </div>
+        <div class="meta">
+          <div class="vtitle" id="vtitle">—</div>
+          <div class="vsub" id="vsub"></div>
+          <div class="actions">
+            <button class="btn" id="prev" disabled>← 上一讲</button>
+            <button class="btn primary" id="next" disabled>下一讲 →</button>
+            <button class="btn" id="dl">复制下载命令</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
 </div>
-<video id="v" controls playsinline></video>
+<div class="toast" id="toast"></div>
 <script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>
 <script>
-function play() {
-  var raw = document.getElementById('url').value.trim();
-  if (!raw) return;
-  var proxied = '/p?u=' + encodeURIComponent(raw);
-  var v = document.getElementById('v');
-  if (window.Hls && Hls.isSupported()) {
-    if (window._hls) { window._hls.destroy(); }
-    var hls = new Hls();
-    window._hls = hls;
-    hls.loadSource(proxied);
-    hls.attachMedia(v);
-    hls.on(Hls.Events.MANIFEST_PARSED, function(){ v.play(); });
-    hls.on(Hls.Events.ERROR, function(e, d){ if (d.fatal) console.error('HLS error', d); });
-  } else {
-    // Safari 原生支持 HLS（含 AES 解密）
-    v.src = proxied;
-    v.play();
-  }
+const AUTO = __AUTO__;
+const $ = s => document.querySelector(s);
+const el = (t,c)=>{const e=document.createElement(t);if(c)e.className=c;return e;};
+const fmtDur = s => { s=parseInt(s||0); if(!s)return''; const m=Math.floor(s/60),x=s%60; return m+':'+String(x).padStart(2,'0'); };
+const esc = s => (s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+let courses=[], byId={}, curList=[], activeVid=null, hls=null;
+
+function toast(m){const t=$('#toast');t.textContent=m;t.classList.add('show');clearTimeout(t._t);t._t=setTimeout(()=>t.classList.remove('show'),2200);}
+function closeDrawer(){$('#app').classList.remove('drawer');}
+
+async function api(u){const r=await fetch(u);if(!r.ok)throw new Error('HTTP '+r.status);return r.json();}
+
+async function init(){
+  try{ const d=await api('/api/courses'); courses=d.courses||[]; }
+  catch(e){ $('#list').innerHTML='<div class="empty">加载课程失败：'+esc(e.message)+'<br>会话可能过期，请重新抓一条请求覆盖 req.txt。</div>'; return; }
+  $('#cnt').textContent=courses.length+' 门';
+  const list=$('#list'); list.innerHTML='';
+  courses.forEach(c=>{ byId[c.id]=c; list.appendChild(courseEl(c)); });
+  if(AUTO && AUTO.productId){ openCourse(AUTO.productId, AUTO.videoId); }
 }
+
+function courseEl(c){
+  const wrap=el('div','course'); wrap.dataset.pid=c.id;
+  const row=el('div','row');
+  row.innerHTML='<svg class="chev" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m9 6 6 6-6 6"/></svg>'
+    +'<span class="ctitle">'+esc(c.name)+'</span><span class="badge">'+(c.cardType||'课程')+'</span>';
+  const kids=el('div','kids'); kids.innerHTML='';
+  row.onclick=()=>toggleCourse(wrap,kids,c.id);
+  wrap.appendChild(row); wrap.appendChild(kids);
+  return wrap;
+}
+
+async function toggleCourse(wrap,kids,pid){
+  if(wrap.classList.contains('open')){ wrap.classList.remove('open'); return; }
+  wrap.classList.add('open');
+  if(kids.dataset.loaded) return;
+  kids.innerHTML='<div class="loading"><span class="spin"></span>加载讲次…</div>';
+  try{
+    const d=await api('/api/course?productId='+encodeURIComponent(pid));
+    kids.dataset.loaded='1';
+    renderVideos(kids, d.videos||[], pid);
+  }catch(e){ kids.innerHTML='<div class="empty">加载失败：'+esc(e.message)+'</div>'; }
+}
+
+function renderVideos(kids, vids, pid){
+  byId[pid]._vids=vids;
+  if(!vids.length){ kids.innerHTML='<div class="empty">这门课暂无视频</div>'; return; }
+  kids.innerHTML='';
+  // 按 module → topic → examKey 分组，保持顺序
+  const tree=[], idx={}, rootVids=[];
+  vids.forEach(v=>{
+    const path=[v.module,v.topic,v.examKey].filter(x=>x);
+    if(!path.length){ rootVids.push(v); return; }
+    let level=tree, key='', node=null;
+    path.forEach(p=>{ key+='|'+p;
+      if(!idx[key]){ node={name:p,kids:[],vids:[]}; idx[key]=node; level.push(node); }
+      node=idx[key]; level=node.kids; });
+    node.vids.push(v);
+  });
+  rootVids.forEach(v=>kids.appendChild(vidEl(v,pid)));
+  tree.forEach(n=>kids.appendChild(groupEl(n,pid)));
+}
+
+function groupEl(n,pid){
+  const g=el('div','grp open');
+  const h=el('div','ghead');
+  h.innerHTML='<svg class="chev" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m9 6 6 6-6 6"/></svg><span>'+esc(n.name)+'</span>';
+  const gk=el('div','gkids');
+  n.kids.forEach(c=>gk.appendChild(groupEl(c,pid)));
+  n.vids.forEach(v=>gk.appendChild(vidEl(v,pid)));
+  h.onclick=()=>g.classList.toggle('open');
+  g.appendChild(h); g.appendChild(gk); return g;
+}
+
+function vidEl(v,pid){
+  const d=el('div','vid'+(v.locked?' locked':'')); d.dataset.vid=v.videoId;
+  const ic=v.locked
+    ? '<svg class="ic" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>'
+    : '<svg class="ic" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>';
+  d.innerHTML=ic+'<span class="vt">'+esc(v.title||('视频'+v.videoId))+'</span><span class="dur">'+fmtDur(v.duration)+'</span>';
+  if(!v.locked) d.onclick=()=>play(v,pid);
+  return d;
+}
+
+async function openCourse(pid, vid){
+  const wrap=document.querySelector('.course[data-pid="'+pid+'"]'); if(!wrap)return;
+  const kids=wrap.querySelector('.kids');
+  await toggleCourse(wrap,kids,pid);
+  wrap.scrollIntoView({block:'nearest'});
+  if(vid){ const v=(byId[pid]._vids||[]).find(x=>x.videoId==vid); if(v)play(v,pid); }
+}
+
+async function play(v,pid){
+  curList=(byId[pid]._vids||[]).filter(x=>!x.locked);
+  activeVid=v.videoId;
+  document.querySelectorAll('.vid.active').forEach(e=>e.classList.remove('active'));
+  const node=document.querySelector('.vid[data-vid="'+v.videoId+'"]'); if(node)node.classList.add('active');
+  $('#crumb').innerHTML='<b>'+esc(byId[pid].name)+'</b>'+[v.module,v.topic,v.examKey].filter(x=>x).map(x=>' › '+esc(x)).join('');
+  $('#vtitle').textContent=v.title||('视频 '+v.videoId);
+  $('#vsub').textContent=[v.examKey,fmtDur(v.duration)&&('时长 '+fmtDur(v.duration))].filter(x=>x).join(' · ');
+  $('#ph').style.display='none';
+  updNav(); closeDrawer(); localStorage.setItem('last',JSON.stringify({pid,vid:v.videoId}));
+  $('#dl').onclick=()=>{const c='python3 youdao_course.py download -r req.txt --video '+v.videoId+' -o "'+(v.title||v.videoId)+'.mp4"';navigator.clipboard&&navigator.clipboard.writeText(c);toast('下载命令已复制');};
+  try{
+    const r=await api('/api/play?videoId='+v.videoId+'&contentId='+v.contentId+'&cardPackageId='+v.cardPackageId+'&productId='+v.productId);
+    loadSrc(r.url);
+  }catch(e){ toast('取流失败：'+e.message); }
+}
+
+function loadSrc(url){
+  const vd=$('#v');
+  if(window.Hls&&Hls.isSupported()){
+    if(!hls){ hls=new Hls({maxBufferLength:30}); hls.attachMedia(vd);
+      hls.on(Hls.Events.MANIFEST_PARSED,()=>vd.play().catch(()=>{}));
+      hls.on(Hls.Events.ERROR,(e,d)=>{ if(d.fatal)toast('播放错误，可能未解锁或会话过期'); }); }
+    hls.loadSource(url);
+  }else{ vd.src=url; vd.play().catch(()=>{}); }
+}
+
+function updNav(){
+  const i=curList.findIndex(x=>x.videoId===activeVid);
+  $('#prev').disabled=!(i>0); $('#next').disabled=!(i>=0&&i<curList.length-1);
+  $('#prev').onclick=()=>{ if(i>0)play(curList[i-1],curList[i-1].productId); };
+  $('#next').onclick=()=>{ if(i<curList.length-1)play(curList[i+1],curList[i+1].productId); };
+}
+$('#v').addEventListener('ended',()=>{ const b=$('#next'); if(!b.disabled)b.click(); });
+
+// search filter
+$('#q').addEventListener('input',e=>{
+  const q=e.target.value.trim().toLowerCase();
+  document.querySelectorAll('.course').forEach(c=>{
+    const name=(byId[c.dataset.pid]||{}).name||'';
+    let any=!q||name.toLowerCase().includes(q);
+    c.querySelectorAll('.vid').forEach(v=>{
+      const t=v.querySelector('.vt').textContent.toLowerCase();
+      const hit=!q||t.includes(q)||name.toLowerCase().includes(q);
+      v.style.display=hit?'':'none'; if(hit)any=true;
+    });
+    c.style.display=any?'':'none';
+    c.querySelectorAll('.grp').forEach(g=>{
+      const vis=[...g.querySelectorAll('.vid')].some(v=>v.style.display!=='none');
+      g.style.display=vis?'':'none';
+    });
+    if(q&&any)c.classList.add('open');
+  });
+});
+$('#hamb').onclick=()=>$('#app').classList.toggle('drawer');
+$('#scrim').onclick=closeDrawer;
+init();
 </script>
 </body>
 </html>
 """
 
 
-def make_handler(headers, default_url=""):
-    page = PLAYER_HTML.replace(
-        "__DEFAULT_URL__",
-        default_url.replace("&", "&amp;").replace('"', "&quot;"))
+def make_handler(base_headers, default_url="", session=None, auto=None):
+    session = session if session is not None else base_headers
+    page = APP_HTML.replace("__AUTO__", json.dumps(auto) if auto else "null")
+    video_headers = {}
+    vh_lock = threading.Lock()
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -213,55 +466,108 @@ def make_handler(headers, default_url=""):
             self.end_headers()
             self.wfile.write(body)
 
+        def _send_json(self, obj, status=200):
+            self._send_bytes(status, json.dumps(obj, ensure_ascii=False).encode("utf-8"),
+                             "application/json; charset=utf-8")
+
         def do_GET(self):
             parsed = urllib.parse.urlparse(self.path)
-            if parsed.path == "/" or parsed.path == "/index.html":
-                self._send_bytes(200, page.encode("utf-8"),
-                                 "text/html; charset=utf-8")
-                return
-            if parsed.path != "/p":
-                self._send_bytes(404, b"not found", "text/plain")
-                return
-
+            path = parsed.path
             qs = urllib.parse.parse_qs(parsed.query)
+            if path in ("/", "/index.html"):
+                self._send_bytes(200, page.encode("utf-8"), "text/html; charset=utf-8")
+            elif path == "/api/courses":
+                self._api_courses()
+            elif path == "/api/course":
+                self._api_course(qs)
+            elif path == "/api/play":
+                self._api_play(qs)
+            elif path == "/p":
+                self._proxy(qs)
+            else:
+                self._send_bytes(404, b"not found", "text/plain")
+
+        def _api_courses(self):
+            try:
+                prods = list_products(session)
+            except Exception as e:  # noqa: BLE001
+                self._send_json({"error": str(e)}, 502)
+                return
+            courses = [{
+                "id": p.get("id"), "name": p.get("name"),
+                "cardType": p.get("cardType"),
+                "authors": [a.get("name") if isinstance(a, dict) else a
+                            for a in (p.get("authors") or [])],
+            } for p in prods]
+            self._send_json({"courses": courses})
+
+        def _api_course(self, qs):
+            pid = (qs.get("productId") or [None])[0]
+            if not pid:
+                self._send_json({"error": "missing productId"}, 400)
+                return
+            try:
+                self._send_json({"videos": get_product_videos(session, pid)})
+            except Exception as e:  # noqa: BLE001
+                self._send_json({"error": str(e)}, 502)
+
+        def _api_play(self, qs):
+            try:
+                video = {
+                    "videoId": int(qs["videoId"][0]),
+                    "contentId": int(qs["contentId"][0]),
+                    "cardPackageId": int(qs["cardPackageId"][0]),
+                    "productId": int(qs["productId"][0]),
+                }
+            except (KeyError, ValueError):
+                self._send_json({"error": "bad params"}, 400)
+                return
+            m3u8 = resolve_m3u8(session, video)
+            if not m3u8:
+                self._send_json({"error": "no m3u8 (locked?)"}, 502)
+                return
+            hdrs = play_headers(session, video, m3u8)
+            with vh_lock:
+                video_headers[str(video["videoId"])] = hdrs
+            self._send_json({"url": _proxify(m3u8, video["videoId"]), "m3u8": m3u8})
+
+        def _proxy(self, qs):
             if "u" not in qs:
-                self._send_bytes(400, b"missing u param", "text/plain")
+                self._send_bytes(400, b"missing u", "text/plain")
                 return
             target = qs["u"][0]
-
-            fwd = forward_headers(headers, self.headers.get("Range"))
+            vid = (qs.get("vid") or [None])[0]
+            with vh_lock:
+                hdrs = video_headers.get(vid, base_headers) if vid else base_headers
+            fwd = forward_headers(hdrs, self.headers.get("Range"))
             req = urllib.request.Request(target, headers=fwd, method="GET")
             try:
                 resp = urllib.request.urlopen(req, timeout=60)
             except urllib.error.HTTPError as e:
-                body = e.read()
-                self._send_bytes(e.code, body or b"",
+                self._send_bytes(e.code, e.read() or b"",
                                  e.headers.get("Content-Type", "text/plain"))
                 return
             except Exception as e:  # noqa: BLE001
                 self._send_bytes(502, str(e).encode("utf-8"), "text/plain")
                 return
-
             with resp:
                 ctype = resp.headers.get("Content-Type", "")
                 data = resp.read()
                 status = resp.status
-
             if _looks_like_m3u8(target, ctype):
-                rewritten = rewrite_m3u8(data.decode("utf-8", "replace"), target)
+                rewritten = rewrite_m3u8(data.decode("utf-8", "replace"), target, vid)
                 self._send_bytes(200, rewritten.encode("utf-8"),
                                  "application/vnd.apple.mpegurl")
                 return
-
-            extra = {"Accept-Ranges": "bytes"}
-            self._send_bytes(status, data, ctype or "application/octet-stream", extra)
+            self._send_bytes(status, data, ctype or "application/octet-stream",
+                             {"Accept-Ranges": "bytes"})
 
     return Handler
 
 
-def start_proxy(headers, port, default_url=""):
+def start_proxy(headers, port, default_url="", session=None, auto=None):
     server = ThreadingHTTPServer(("127.0.0.1", port),
-                                 make_handler(headers, default_url))
+                                 make_handler(headers, default_url, session, auto))
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     return server
@@ -291,10 +597,17 @@ def api_headers(session):
     return out
 
 
-def api_get_json(session, url):
-    req = urllib.request.Request(url, headers=api_headers(session))
-    with urllib.request.urlopen(req, timeout=30) as r:
-        return json.loads(r.read().decode("utf-8"))
+def api_get_json(session, url, retries=3):
+    last = None
+    for attempt in range(retries):
+        try:
+            req = urllib.request.Request(url, headers=api_headers(session))
+            with urllib.request.urlopen(req, timeout=30) as r:
+                return json.loads(r.read().decode("utf-8"))
+        except Exception as e:  # noqa: BLE001  (上游偶发抖动，退避重试)
+            last = e
+            time.sleep(0.6 * (attempt + 1))
+    raise last
 
 
 def list_products(session):
@@ -321,7 +634,9 @@ def _walk_outline(node, pkg_id, product_id, out):
             "downloadUrl": v.get("downloadUrl"),
             "locked": not v.get("downloadUrl"),
             "module": (v.get("moduleInfo") or {}).get("title"),
+            "topic": (v.get("topicInfo") or {}).get("title"),
             "examKey": (v.get("examKeyInfo") or {}).get("title"),
+            "duration": v.get("duration"),
         })
     for key in ("subOutlines", "outlines"):
         if node.get(key):
@@ -444,12 +759,18 @@ def _resolve_video(args, session):
 
 
 def cmd_serve(args):
-    url, headers = load_session(args)
+    _, session = load_session(args)
+    auto = None
     if getattr(args, "video", None):
-        headers, url = _resolve_video(args, headers)
-    server = start_proxy(headers, args.port, url)
-    print("代理已启动。浏览器打开： http://127.0.0.1:%d" % args.port)
-    print("地址已自动填好，点“播放”即可。Ctrl-C 退出。")
+        print("正在定位 videoId=%s 以便自动播放……" % args.video)
+        v = find_video(session, args.video)
+        if v:
+            auto = {"productId": v["productId"], "videoId": v["videoId"]}
+        else:
+            print("没找到该 videoId，将正常打开课程列表。")
+    server = start_proxy(session, args.port, "", session, auto)
+    print("课程网页已启动： http://127.0.0.1:%d" % args.port)
+    print("左侧选课、选讲即可播放，支持搜索 / 倍速 / 上下一讲。Ctrl-C 退出。")
     try:
         while True:
             time.sleep(3600)
