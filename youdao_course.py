@@ -526,6 +526,37 @@ function pickM3u8(v){
 let art=null, curUrl=null, curVideo=null;
 const thumbState={};
 
+// 拖动时大画面实时跟手：拖动中暂停、按指针位置追帧、松手续播。
+// 缓冲区内的位置 seek 是即时的，所以看起来就是画面随手滑动。
+const _scrub={on:false,want:null,busy:false,prog:null,wasPlaying:false};
+function _scrubTime(e){
+  const p=_scrub.prog; if(!p||!art)return 0;
+  const r=p.getBoundingClientRect();
+  const n=Math.min(Math.max(e.clientX-r.left,0),p.clientWidth);  // 用 clientWidth，与 Artplayer 一致
+  return n/p.clientWidth*(art.video.duration||0);
+}
+function _scrubChase(t){
+  if(!art)return; _scrub.want=t; if(_scrub.busy)return; _scrub.busy=true;
+  const v=art.video;
+  const done=()=>{ v.removeEventListener('seeked',done); _scrub.busy=false;
+    if(_scrub.want!=null && Math.abs(_scrub.want-t)>0.05){ const n=_scrub.want; _scrub.want=null; _scrubChase(n); }
+    else _scrub.want=null; };
+  v.addEventListener('seeked',done);
+  try{ v.currentTime=t; }catch(_){ _scrub.busy=false; }
+}
+window.addEventListener('pointermove',e=>{ if(_scrub.on)_scrubChase(_scrubTime(e)); });
+window.addEventListener('pointerup',()=>{ if(!_scrub.on)return; _scrub.on=false;
+  if(_scrub.wasPlaying&&art)art.video.play().catch(()=>{}); });
+function enableLiveScrub(a){
+  const root=a.template&&a.template.$player; if(!root)return;
+  const prog=root.querySelector('.art-control-progress-inner')
+    ||root.querySelector('.art-control-progress');
+  if(!prog)return; _scrub.prog=prog;
+  prog.addEventListener('pointerdown',e=>{ if(!art)return;
+    _scrub.on=true; _scrub.wasPlaying=!art.video.paused;
+    if(_scrub.wasPlaying)art.video.pause(); _scrubChase(_scrubTime(e)); });
+}
+
 function hlsAttach(video,url){
   if(window.Hls&&Hls.isSupported()){
     const h=new Hls({
@@ -558,7 +589,7 @@ function mountArt(url, v, startTime){
   if(art){ try{ if(art._hls)art._hls.destroy(); art.destroy(true); }catch(_){}; art=null; }
   art=new Artplayer(opt);
   art.on('video:ended',()=>{ const b=$('#next'); if(b&&!b.disabled)b.click(); });
-  if(startTime){ art.once('ready',()=>{ try{art.currentTime=startTime;}catch(_){} }); }
+  art.once('ready',()=>{ enableLiveScrub(art); if(startTime){ try{art.currentTime=startTime;}catch(_){} } });
   ensureThumbs(v);
 }
 
