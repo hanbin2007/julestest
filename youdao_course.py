@@ -34,9 +34,11 @@ youdao_course.py
 
 import argparse
 import atexit
+import concurrent.futures
 import hashlib
 import json
 import os
+import queue
 import re
 import shutil
 import subprocess
@@ -322,11 +324,12 @@ body{margin:0;background:var(--bg);color:var(--txt);
 .crumb b{color:var(--txt);font-weight:600}
 .stage{flex:1;overflow-y:auto;padding:18px;display:flex;flex-direction:column;align-items:center}
 .player-wrap{width:100%;max-width:1100px}
-.frame{position:relative;width:100%;aspect-ratio:16/9;background:#000;border-radius:14px;overflow:hidden;
+.artwrap{position:relative;width:100%;aspect-ratio:16/9;background:#000;border-radius:14px;overflow:hidden;
   box-shadow:var(--shadow)}
-video{width:100%;height:100%;display:block;background:#000}
+#art{width:100%;height:100%}
+.artwrap .art-video-player{border-radius:14px}
 .placeholder{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;
-  color:var(--mut);gap:10px;text-align:center;padding:20px}
+  color:var(--mut);gap:10px;text-align:center;padding:20px;z-index:2;background:#000}
 .placeholder svg{opacity:.5}
 .meta{max-width:1100px;width:100%;margin-top:16px}
 .vtitle{font-size:19px;font-weight:700;line-height:1.4}
@@ -377,8 +380,8 @@ video{width:100%;height:100%;display:block;background:#000}
     </div>
     <div class="stage">
       <div class="player-wrap">
-        <div class="frame">
-          <video id="v" controls playsinline></video>
+        <div class="artwrap">
+          <div id="art"></div>
           <div class="placeholder" id="ph">
             <svg width="46" height="46" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m10 8 6 4-6 4V8z"/><rect x="3" y="4" width="18" height="16" rx="3"/></svg>
             <div>从左侧选择一讲开始播放</div>
@@ -399,6 +402,7 @@ video{width:100%;height:100%;display:block;background:#000}
 </div>
 <div class="toast" id="toast"></div>
 <script src="/hls.js"></script>
+<script src="/artplayer.js"></script>
 <script>
 const AUTO = __AUTO__;
 const $ = s => document.querySelector(s);
@@ -509,7 +513,7 @@ async function play(v,pid){
     const r=await api('/api/play?videoId='+v.videoId+'&contentId='+v.contentId
       +'&cardPackageId='+v.cardPackageId+'&productId='+v.productId
       +'&m3u8='+encodeURIComponent(m3u8));
-    loadSrc(r.url);
+    curVideo=v; mountArt(r.url, v);
   }catch(e){ toast('取流失败：'+e.message); }
 }
 
@@ -518,36 +522,70 @@ function pickM3u8(v){
   return c.length?c[0].url:(v.downloadUrl||null);
 }
 
-function loadSrc(url){
-  const vd=$('#v');
+// ---- Artplayer 播放器 + 服务端缩略图（拖动预览）----
+let art=null, curUrl=null, curVideo=null;
+const thumbState={};
+
+function hlsAttach(video,url){
   if(window.Hls&&Hls.isSupported()){
-    if(!hls){
-      hls=new Hls({
-        // 客户端内存只放前后几分钟；整集由本地服务端缓存兜底
-        maxBufferLength:120,                // 向前约 2 分钟
-        maxMaxBufferLength:300,             // 上限 5 分钟，避免浏览器吃太多内存
-        backBufferLength:180,               // 向后保留 3 分钟，往回拖秒回
-        maxBufferSize:200*1000*1000,        // 200MB 上限
-        maxBufferHole:0.5,
-        startFragPrefetch:true,             // 预取首片
-        testBandwidth:false,                // 单清晰度，免去 ABR 探测
-        fragLoadingMaxRetry:8,
-        fragLoadingMaxRetryTimeout:8000,
-        maxFragLookUpTolerance:0.2,
-        nudgeMaxRetry:10,
-        lowLatencyMode:false
-      });
-      hls.attachMedia(vd);
-      hls.on(Hls.Events.MANIFEST_PARSED,()=>vd.play().catch(()=>{}));
-      hls.on(Hls.Events.ERROR,(e,d)=>{
-        if(!d.fatal) return;
-        if(d.type===Hls.ErrorTypes.NETWORK_ERROR){ hls.startLoad(); }
-        else if(d.type===Hls.ErrorTypes.MEDIA_ERROR){ hls.recoverMediaError(); }
-        else { toast('播放错误，可能未解锁或会话过期'); }
-      });
-    }
-    hls.loadSource(url);
-  }else{ vd.src=url; vd.play().catch(()=>{}); }
+    const h=new Hls({
+      maxBufferLength:120, maxMaxBufferLength:300, backBufferLength:180,
+      maxBufferSize:200*1000*1000, maxBufferHole:0.5, startFragPrefetch:true,
+      testBandwidth:false, fragLoadingMaxRetry:8, nudgeMaxRetry:10, lowLatencyMode:false
+    });
+    h.loadSource(url); h.attachMedia(video);
+    h.on(Hls.Events.ERROR,(e,d)=>{ if(!d.fatal)return;
+      if(d.type===Hls.ErrorTypes.NETWORK_ERROR)h.startLoad();
+      else if(d.type===Hls.ErrorTypes.MEDIA_ERROR)h.recoverMediaError();
+      else toast('播放错误，可能未解锁或会话过期'); });
+    return h;
+  } else if(video.canPlayType('application/vnd.apple.mpegurl')){ video.src=url; }
+  return null;
+}
+
+function mountArt(url, v, startTime){
+  $('#ph').style.display='none';
+  curUrl=url;
+  const opt={
+    container:'#art', url:url, type:'m3u8', autoplay:true, theme:'#4f8cff',
+    volume:1, playbackRate:true, setting:true, fullscreen:true, fullscreenWeb:true,
+    pip:true, miniProgressBar:true, fastForward:true, autoOrientation:true,
+    playsInline:true, hotkey:true, lock:true,
+    customType:{ m3u8:(video,u,a)=>{ if(a._hls)try{a._hls.destroy();}catch(_){}; a._hls=hlsAttach(video,u); } },
+  };
+  const tb=thumbState[v.videoId];
+  if(tb && tb.state==='ready') opt.thumbnails={url:tb.url,number:tb.number,column:tb.column,width:tb.width,height:tb.height};
+  if(art){ try{ if(art._hls)art._hls.destroy(); art.destroy(true); }catch(_){}; art=null; }
+  art=new Artplayer(opt);
+  art.on('video:ended',()=>{ const b=$('#next'); if(b&&!b.disabled)b.click(); });
+  if(startTime){ art.once('ready',()=>{ try{art.currentTime=startTime;}catch(_){} }); }
+  ensureThumbs(v);
+}
+
+function pickLow(v){
+  const c=(v.clarity||[]).filter(x=>x&&x.url).sort((a,b)=>(a.type||0)-(b.type||0));
+  return c.length?c[0].url:'';
+}
+async function ensureThumbs(v){
+  const cur=thumbState[v.videoId];
+  if(cur && cur.state==='ready'){ applyThumbs(v.videoId); return; }
+  const low=pickLow(v);
+  for(let i=0;i<90;i++){
+    if(activeVid!==v.videoId) return;     // 切走了就不再等它的缩略图
+    let r; try{ r=await api('/api/thumb?videoId='+v.videoId+'&duration='+(v.duration||0)+(low?'&src='+encodeURIComponent(low):'')); }catch(e){ return; }
+    thumbState[v.videoId]=r;
+    if(r.state==='ready'){ applyThumbs(v.videoId); return; }
+    if(r.state==='error'){ return; }
+    await new Promise(z=>setTimeout(z,2000));
+  }
+}
+
+function applyThumbs(vid){
+  const tb=thumbState[vid];
+  if(!tb || tb.state!=='ready' || activeVid!==vid || !art) return;
+  if(art.option.thumbnails && art.option.thumbnails.url) return;  // 已有
+  // 当前实例没带缩略图：带着进度无缝重建一次（之后再看这节就直接带上了）
+  const t=art.currentTime||0; mountArt(curUrl, curVideo, t);
 }
 
 function updNav(){
@@ -556,8 +594,6 @@ function updNav(){
   $('#prev').onclick=()=>{ if(i>0)play(curList[i-1],curList[i-1].productId); };
   $('#next').onclick=()=>{ if(i<curList.length-1)play(curList[i+1],curList[i+1].productId); };
 }
-$('#v').addEventListener('ended',()=>{ const b=$('#next'); if(!b.disabled)b.click(); });
-
 // search filter
 $('#q').addEventListener('input',e=>{
   const q=e.target.value.trim().toLowerCase();
@@ -586,29 +622,122 @@ init();
 """
 
 
-HLS_JS_CDN = "https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js"
-_HLS_JS_CACHE = {}
+_ASSET_CDN = {
+    "hls.js": "https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js",
+    "artplayer.js": "https://cdn.jsdelivr.net/npm/artplayer@5.1.7/dist/artplayer.js",
+}
+_ASSET_CACHE = {}
 
 
-def hls_js_bytes():
-    """本地代理自带 hls.js（首次从 CDN 取一次并缓存），避免浏览器直连 CDN 失败。"""
-    if "data" not in _HLS_JS_CACHE:
+def asset_bytes(name):
+    """本地代理自带前端依赖（hls.js / artplayer.js），首次从 CDN 取一次并缓存。"""
+    if name not in _ASSET_CACHE:
         try:
-            req = urllib.request.Request(HLS_JS_CDN, headers={"User-Agent": "youdao_course"})
+            req = urllib.request.Request(_ASSET_CDN[name],
+                                         headers={"User-Agent": "youdao_course"})
             with urllib.request.urlopen(req, timeout=30) as r:
-                _HLS_JS_CACHE["data"] = r.read()
+                _ASSET_CACHE[name] = r.read()
         except Exception:  # noqa: BLE001
-            _HLS_JS_CACHE["data"] = b""
-    return _HLS_JS_CACHE["data"]
+            _ASSET_CACHE[name] = b""
+    return _ASSET_CACHE[name]
+
+
+# 缩略图雪碧图参数
+THUMB_INTERVAL = 10   # 每 10 秒一帧
+THUMB_W = 160
+THUMB_H = 90
+THUMB_COLS = 10
 
 
 def make_handler(base_headers, default_url="", session=None, auto=None,
-                 prefetch=True, cache_bytes=SEG_CACHE_BYTES):
+                 prefetch=True, cache_bytes=SEG_CACHE_BYTES, port=8808):
     session = session if session is not None else base_headers
     page = APP_HTML.replace("__AUTO__", json.dumps(auto) if auto else "null")
     video_headers = {}
     vh_lock = threading.Lock()
     seg_cache = _DiskLRU(cache_bytes)
+
+    # 缩略图雪碧图：服务端用 ffmpeg 生成（复用已缓存分片），供 Artplayer 拖动预览
+    thumb_dir = tempfile.mkdtemp(prefix="ydcourse_thumbs_")
+    atexit.register(lambda: shutil.rmtree(thumb_dir, ignore_errors=True))
+    thumb_meta = {}  # vid -> {"state": "gen"/"ready"/"error", ...}
+    thumb_lock = threading.Lock()
+    thumb_q = queue.Queue()
+    have_ffmpeg = _which("ffmpeg") is not None
+
+    def _thumb_worker():
+        while True:
+            vid, m3u8, duration = thumb_q.get()
+            try:
+                _gen_thumbs(vid, m3u8, duration)
+            except Exception as e:  # noqa: BLE001
+                with thumb_lock:
+                    thumb_meta[vid] = {"state": "error", "reason": str(e)}
+
+    def _gen_thumbs(vid, m3u8, duration):
+        if duration <= 0:
+            duration = 600
+        number = max(1, int(duration // THUMB_INTERVAL))
+        rows = (number + THUMB_COLS - 1) // THUMB_COLS
+        out = os.path.join(thumb_dir, "%s.jpg" % vid)
+        # key 是按清晰度绑定 Url 的：缩略图流要用它自己的 Url 头才能解密
+        tvid = "t_" + vid
+        with vh_lock:
+            th = dict(video_headers.get(vid) or {})
+            th["Url"] = m3u8
+            video_headers[tvid] = th
+        # 先并行把低清分片+密钥灌进缓存，ffmpeg 再顺序读缓存就很快
+        try:
+            pl, _, _ = upstream_fetch(th, m3u8)
+            text = pl.decode("utf-8", "replace")
+            urls = [urllib.parse.urljoin(m3u8, ln.strip())
+                    for ln in text.splitlines() if ln.strip() and not ln.startswith("#")]
+            for ln in text.splitlines():
+                if ln.startswith("#EXT-X-KEY") and 'URI="' in ln:
+                    urls.insert(0, urllib.parse.urljoin(m3u8, re.search(r'URI="([^"]+)"', ln).group(1)))
+
+            def _grab(u):
+                if seg_cache.has((u, tvid)):
+                    return
+                try:
+                    d, c, _ = upstream_fetch(th, u)
+                    seg_cache.put((u, tvid), (c or "video/mp2t", d))
+                except Exception:  # noqa: BLE001
+                    pass
+            with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+                list(ex.map(_grab, urls))
+        except Exception:  # noqa: BLE001
+            pass
+        proxied = "http://127.0.0.1:%d/p?u=%s&vid=%s" % (
+            port, urllib.parse.quote(m3u8, safe=""), tvid)
+        vf = ("fps=1/%d,scale=%d:%d:force_original_aspect_ratio=increase,"
+              "crop=%d:%d,tile=%dx%d" % (THUMB_INTERVAL, THUMB_W, THUMB_H,
+                                         THUMB_W, THUMB_H, THUMB_COLS, rows))
+        # -skip_frame nokey：只解关键帧，配合 fps 过滤器既保持均匀间隔又大幅加速
+        cmd = ["ffmpeg", "-y", "-nostdin", "-skip_frame", "nokey", "-i", proxied,
+               "-an", "-vf", vf, "-frames:v", "1", "-q:v", "6", out, "-loglevel", "error"]
+        rc = subprocess.call(cmd)
+        if rc == 0 and os.path.exists(out):
+            with thumb_lock:
+                thumb_meta[vid] = {"state": "ready", "url": "/thumbs/%s.jpg" % vid,
+                                   "number": number, "column": THUMB_COLS,
+                                   "width": THUMB_W, "height": THUMB_H}
+        else:
+            with thumb_lock:
+                thumb_meta[vid] = {"state": "error", "reason": "ffmpeg rc=%d" % rc}
+
+    def start_thumbs(vid, m3u8, duration):
+        if not have_ffmpeg:
+            return {"state": "error", "reason": "no ffmpeg"}
+        with thumb_lock:
+            st = thumb_meta.get(vid)
+            if st and st["state"] in ("ready", "gen"):
+                return st
+            thumb_meta[vid] = {"state": "gen"}
+        thumb_q.put((vid, m3u8, duration))
+        return {"state": "gen"}
+
+    threading.Thread(target=_thumb_worker, daemon=True).start()
 
     # 整集后台预缓存：边看边把整节课下到磁盘缓存；切走的那节自动暂停
     pf_lock = threading.Lock()
@@ -687,9 +816,9 @@ def make_handler(base_headers, default_url="", session=None, auto=None,
             qs = urllib.parse.parse_qs(parsed.query)
             if path in ("/", "/index.html"):
                 self._send_bytes(200, page.encode("utf-8"), "text/html; charset=utf-8")
-            elif path == "/hls.js":
-                js = hls_js_bytes()
-                self._send_bytes(200 if js else 502, js or b"// hls.js unavailable",
+            elif path in ("/hls.js", "/artplayer.js"):
+                js = asset_bytes(path.lstrip("/"))
+                self._send_bytes(200 if js else 502, js or b"// asset unavailable",
                                  "application/javascript; charset=utf-8")
             elif path == "/api/courses":
                 self._api_courses()
@@ -697,6 +826,10 @@ def make_handler(base_headers, default_url="", session=None, auto=None,
                 self._api_course(qs)
             elif path == "/api/play":
                 self._api_play(qs)
+            elif path == "/api/thumb":
+                self._api_thumb(qs)
+            elif path.startswith("/thumbs/"):
+                self._serve_thumb(path)
             elif path == "/p":
                 self._proxy(qs)
             elif path == "/api/_debug":
@@ -705,6 +838,43 @@ def make_handler(base_headers, default_url="", session=None, auto=None,
                                  "cacheBytes": seg_cache.size})
             else:
                 self._send_bytes(404, b"not found", "text/plain")
+
+        def _api_thumb(self, qs):
+            vid = (qs.get("videoId") or [None])[0]
+            if not vid:
+                self._send_json({"state": "error", "reason": "no videoId"}, 400)
+                return
+            with thumb_lock:
+                st = thumb_meta.get(vid)
+            if st and st["state"] == "ready":
+                self._send_json(st)
+                return
+            if st and st["state"] in ("gen", "error"):
+                self._send_json(st)
+                return
+            try:
+                duration = int(float((qs.get("duration") or ["0"])[0]))
+            except ValueError:
+                duration = 0
+            # 缩略图优先用低清晰度流（解码更快；密钥按视频共享，仍能解密）
+            src = (qs.get("src") or [None])[0]
+            with vh_lock:
+                stored = (video_headers.get(vid) or {}).get("Url")
+            m3u8 = src if (src and src.startswith("https://stream.youdao.com")) else stored
+            if not m3u8:
+                self._send_json({"state": "error", "reason": "play first"}, 409)
+                return
+            self._send_json(start_thumbs(vid, m3u8, duration))
+
+        def _serve_thumb(self, path):
+            name = os.path.basename(path)
+            fpath = os.path.join(thumb_dir, name)
+            if not os.path.isfile(fpath):
+                self._send_bytes(404, b"not found", "text/plain")
+                return
+            with open(fpath, "rb") as f:
+                self._send_bytes(200, f.read(), "image/jpeg",
+                                 {"Cache-Control": "max-age=3600"})
 
         def _api_courses(self):
             try:
@@ -827,7 +997,7 @@ def start_proxy(headers, port, default_url="", session=None, auto=None,
                 prefetch=True, cache_bytes=SEG_CACHE_BYTES):
     server = _QuietServer(("127.0.0.1", port),
                           make_handler(headers, default_url, session, auto,
-                                       prefetch, cache_bytes))
+                                       prefetch, cache_bytes, port))
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     return server
