@@ -33,11 +33,15 @@ youdao_course.py
 """
 
 import argparse
+import atexit
+import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -72,34 +76,85 @@ def _parse_range(range_header, total):
     return (start, end)
 
 
-class _ByteLRU:
-    """按总字节数上限的简单 LRU，用来缓存已下载的分片/密钥，拖动到看过的地方秒开。"""
+class _DiskLRU:
+    """磁盘上的分片/密钥缓存（按总字节数 LRU）。整集预缓存几百 MB 也不吃内存。"""
 
     def __init__(self, max_bytes):
         self.max = max_bytes
-        self.d = OrderedDict()
+        self.dir = tempfile.mkdtemp(prefix="ydcourse_cache_")
+        self.meta = OrderedDict()  # key -> (ctype, size, fname)
         self.size = 0
         self.lock = threading.Lock()
+        atexit.register(self.cleanup)
 
-    def get(self, k):
+    @staticmethod
+    def _fname(key):
+        return hashlib.sha1(repr(key).encode("utf-8")).hexdigest()
+
+    def has(self, key):
         with self.lock:
-            if k in self.d:
-                self.d.move_to_end(k)
-                return self.d[k]
+            return key in self.meta
+
+    def get(self, key):
+        with self.lock:
+            m = self.meta.get(key)
+            if not m:
+                return None
+            self.meta.move_to_end(key)
+            path = os.path.join(self.dir, m[2])
+            ctype = m[0]
+        try:
+            with open(path, "rb") as f:
+                return (ctype, f.read())
+        except OSError:
             return None
 
-    def put(self, k, value):
-        nbytes = len(value[1])
+    def put(self, key, value):
+        ctype, data = value
+        n = len(data)
+        fn = self._fname(key)
+        path = os.path.join(self.dir, fn)
+        try:
+            with open(path, "wb") as f:
+                f.write(data)
+        except OSError:
+            return
         with self.lock:
-            if k in self.d:
-                self.size -= len(self.d[k][1])
-                del self.d[k]
-            self.d[k] = value
-            self.size += nbytes
-            self.d.move_to_end(k)
-            while self.size > self.max and len(self.d) > 1:
-                _, old = self.d.popitem(last=False)
-                self.size -= len(old[1])
+            if key in self.meta:
+                self.size -= self.meta[key][1]
+            self.meta[key] = (ctype, n, fn)
+            self.size += n
+            self.meta.move_to_end(key)
+            while self.size > self.max and len(self.meta) > 1:
+                _, (_, s, f) = self.meta.popitem(last=False)
+                self.size -= s
+                try:
+                    os.remove(os.path.join(self.dir, f))
+                except OSError:
+                    pass
+
+    def cleanup(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+
+def upstream_fetch(headers, target, range_header=None, retries=3):
+    """带重试地从上游取一个资源，返回 (data, content_type, status)。"""
+    fwd = forward_headers(headers, range_header)
+    last = None
+    for attempt in range(retries):
+        req = urllib.request.Request(target, headers=fwd, method="GET")
+        try:
+            resp = urllib.request.urlopen(req, timeout=60)
+            with resp:
+                return resp.read(), resp.headers.get("Content-Type", ""), resp.status
+        except urllib.error.HTTPError as e:
+            if e.code not in (500, 502, 503, 504):
+                raise
+            last = e
+        except urllib.error.URLError as e:
+            last = e
+        time.sleep(0.4 * (attempt + 1))
+    raise last
 
 # 转发给上游时要去掉的逐跳 / 会被自动重设的头。
 # 注意：故意保留 "url" —— 解密 key 的接口(live.ydshengxue.com)要求 Url 头始终指向
@@ -468,10 +523,11 @@ function loadSrc(url){
   if(window.Hls&&Hls.isSupported()){
     if(!hls){
       hls=new Hls({
-        maxBufferLength:90,                 // 向前缓冲 90 秒
-        maxMaxBufferLength:1800,            // 上限放很大
+        // 客户端内存只放前后几分钟；整集由本地服务端缓存兜底
+        maxBufferLength:120,                // 向前约 2 分钟
+        maxMaxBufferLength:300,             // 上限 5 分钟，避免浏览器吃太多内存
         backBufferLength:180,               // 向后保留 3 分钟，往回拖秒回
-        maxBufferSize:300*1000*1000,        // 300MB
+        maxBufferSize:200*1000*1000,        // 200MB 上限
         maxBufferHole:0.5,
         startFragPrefetch:true,             // 预取首片
         testBandwidth:false,                // 单清晰度，免去 ABR 探测
@@ -546,12 +602,64 @@ def hls_js_bytes():
     return _HLS_JS_CACHE["data"]
 
 
-def make_handler(base_headers, default_url="", session=None, auto=None):
+def make_handler(base_headers, default_url="", session=None, auto=None,
+                 prefetch=True, cache_bytes=SEG_CACHE_BYTES):
     session = session if session is not None else base_headers
     page = APP_HTML.replace("__AUTO__", json.dumps(auto) if auto else "null")
     video_headers = {}
     vh_lock = threading.Lock()
-    seg_cache = _ByteLRU(SEG_CACHE_BYTES)
+    seg_cache = _DiskLRU(cache_bytes)
+
+    # 整集后台预缓存：边看边把整节课下到磁盘缓存；切走的那节自动暂停
+    pf_lock = threading.Lock()
+    pf_active = {"vid": None}
+    pf_threads = {}  # vid -> (thread, stop_event)
+
+    def _prefetch_worker(vid, m3u8, stop):
+        hdrs = video_headers.get(vid)
+        if not hdrs:
+            return
+        try:
+            data, _, _ = upstream_fetch(hdrs, m3u8)
+        except Exception:  # noqa: BLE001
+            return
+        text = data.decode("utf-8", "replace")
+        # 先把密钥缓存好
+        for line in text.splitlines():
+            if line.startswith("#EXT-X-KEY") and 'URI="' in line:
+                kabs = urllib.parse.urljoin(m3u8, re.search(r'URI="([^"]+)"', line).group(1))
+                if not seg_cache.has((kabs, vid)):
+                    try:
+                        kd, kc, _ = upstream_fetch(hdrs, kabs)
+                        seg_cache.put((kabs, vid), (kc or "application/octet-stream", kd))
+                    except Exception:  # noqa: BLE001
+                        pass
+        segs = [urllib.parse.urljoin(m3u8, ln.strip())
+                for ln in text.splitlines() if ln.strip() and not ln.startswith("#")]
+        for s in segs:
+            if stop.is_set() or pf_active["vid"] != vid:
+                return  # 被切走 -> 暂停（已缓存的保留，回来可续）
+            if seg_cache.has((s, vid)):
+                continue
+            try:
+                d, c, _ = upstream_fetch(hdrs, s)
+                seg_cache.put((s, vid), (c or "video/mp2t", d))
+            except Exception:  # noqa: BLE001
+                pass
+
+    def start_prefetch(vid, m3u8):
+        with pf_lock:
+            pf_active["vid"] = vid
+            for ovid, (_, ev) in pf_threads.items():
+                if ovid != vid:
+                    ev.set()  # 暂停其它正在下的
+            cur = pf_threads.get(vid)
+            if cur and cur[0].is_alive():
+                return
+            ev = threading.Event()
+            t = threading.Thread(target=_prefetch_worker, args=(vid, m3u8, ev), daemon=True)
+            pf_threads[vid] = (t, ev)
+            t.start()
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -591,6 +699,10 @@ def make_handler(base_headers, default_url="", session=None, auto=None):
                 self._api_play(qs)
             elif path == "/p":
                 self._proxy(qs)
+            elif path == "/api/_debug":
+                self._send_json({"active": pf_active["vid"],
+                                 "cacheItems": len(seg_cache.meta),
+                                 "cacheBytes": seg_cache.size})
             else:
                 self._send_bytes(404, b"not found", "text/plain")
 
@@ -633,30 +745,18 @@ def make_handler(base_headers, default_url="", session=None, auto=None):
             if not m3u8:
                 self._send_json({"error": "no m3u8 (locked?)"}, 502)
                 return
+            vid = str(video["videoId"])
             hdrs = play_headers(session, video, m3u8)
             with vh_lock:
-                video_headers[str(video["videoId"])] = hdrs
+                video_headers[vid] = hdrs
+            if prefetch:
+                start_prefetch(vid, m3u8)  # 后台整集预缓存；切走会自动暂停
             self._send_json({"url": _proxify(m3u8, video["videoId"]), "m3u8": m3u8})
 
-        def _fetch_upstream(self, target, vid, range_header=None, retries=3):
+        def _fetch_upstream(self, target, vid, range_header=None):
             with vh_lock:
                 hdrs = video_headers.get(vid, base_headers) if vid else base_headers
-            fwd = forward_headers(hdrs, range_header)
-            last = None
-            for attempt in range(retries):
-                req = urllib.request.Request(target, headers=fwd, method="GET")
-                try:
-                    resp = urllib.request.urlopen(req, timeout=60)
-                    with resp:
-                        return resp.read(), resp.headers.get("Content-Type", ""), resp.status
-                except urllib.error.HTTPError as e:
-                    if e.code not in (500, 502, 503, 504):
-                        raise
-                    last = e
-                except urllib.error.URLError as e:
-                    last = e
-                time.sleep(0.4 * (attempt + 1))
-            raise last
+            return upstream_fetch(hdrs, target, range_header)
 
         def _proxy(self, qs):
             if "u" not in qs:
@@ -723,9 +823,11 @@ class _QuietServer(ThreadingHTTPServer):
         super().handle_error(request, client_address)
 
 
-def start_proxy(headers, port, default_url="", session=None, auto=None):
+def start_proxy(headers, port, default_url="", session=None, auto=None,
+                prefetch=True, cache_bytes=SEG_CACHE_BYTES):
     server = _QuietServer(("127.0.0.1", port),
-                          make_handler(headers, default_url, session, auto))
+                          make_handler(headers, default_url, session, auto,
+                                       prefetch, cache_bytes))
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     return server
@@ -939,9 +1041,13 @@ def cmd_serve(args):
             auto = {"productId": v["productId"], "videoId": v["videoId"]}
         else:
             print("没找到该 videoId，将正常打开课程列表。")
-    server = start_proxy(session, args.port, "", session, auto)
+    prefetch = not args.no_prefetch
+    server = start_proxy(session, args.port, "", session, auto,
+                         prefetch, args.cache_mb * 1024 * 1024)
     print("课程网页已启动： http://127.0.0.1:%d" % args.port)
     print("左侧选课、选讲即可播放，支持搜索 / 倍速 / 上下一讲。Ctrl-C 退出。")
+    if prefetch:
+        print("整集预缓存：已开（边看边下整节课，切走自动暂停；缓存上限 %d MB）" % args.cache_mb)
     try:
         while True:
             time.sleep(3600)
@@ -1003,7 +1109,11 @@ def build_parser():
     lp.set_defaults(func=cmd_list)
 
     sp = sub.add_parser("serve", parents=[common], help="起本地代理 + 网页播放器，浏览器在线看。")
-    sp.add_argument("--video", "-V", help="要播放的 videoId（用 list 查到）；不传则放 req.txt 里那条。")
+    sp.add_argument("--video", "-V", help="打开时自动播放的 videoId（用 list 查到）。")
+    sp.add_argument("--no-prefetch", action="store_true",
+                    help="关闭整集后台预缓存（默认开启：边看边下整节课，切走自动暂停）。")
+    sp.add_argument("--cache-mb", type=int, default=3072,
+                    help="磁盘分片缓存上限 MB（默认 3072）。")
     sp.set_defaults(func=cmd_serve)
 
     dp = sub.add_parser("download", parents=[common], help="下载并合并成 mp4（需要 ffmpeg）。")
