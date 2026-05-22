@@ -33,6 +33,7 @@ youdao_course.py
 """
 
 import argparse
+import json
 import os
 import re
 import subprocess
@@ -159,8 +160,9 @@ PLAYER_HTML = """<!doctype html>
 <button onclick="play()">播放</button>
 <div class="hint">
   播放器只跟本地代理通信，鉴权头由代理自动补上。支持倍速（右键 / 控制条）和拖动进度。<br>
-  地址已按 req.txt 自动填好。注意：解密 key 绑定该视频的 Videoid/Cardpackageid，<b>一份 req.txt 只对应它抓的那个视频</b>；换视频请重新抓一条请求。<br>
-  想存成文件：终端运行 <code>python3 youdao_course.py download --request req.txt -o out.mp4</code>
+  列出全部课程：<code>python3 youdao_course.py list -r req.txt</code>，
+  再 <code>serve -r req.txt --video &lt;videoId&gt;</code> 换视频，无需重新抓包。<br>
+  想存成文件：<code>python3 youdao_course.py download -r req.txt --video &lt;videoId&gt; -o out.mp4</code>
 </div>
 <video id="v" controls playsinline></video>
 <script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>
@@ -265,6 +267,124 @@ def start_proxy(headers, port, default_url=""):
     return server
 
 
+# ---------------------------------------------------------------------------
+# 课程 / 视频枚举（只要会话 Cookie 就能列出全部课程和视频，不用一个个抓）
+# ---------------------------------------------------------------------------
+API_PRODUCTS = "https://ai.ydshengxue.com/ai-product/api/app/v2/products/after-sale"
+API_PRODUCT_DETAIL = "https://ai.ydshengxue.com/ai-product/api/app/v3/products/after-sale/%s"
+API_VIDEO_OUTLINE = ("https://ai.ydshengxue.com/ai-product/api/app/v1/products/"
+                     "videos/%s/outline?cardPackageId=%s&cardPackageContentId=%s&productId=%s")
+
+# 调 ydshengxue API 时只需要这几个头；其余按 App 习惯补默认值
+_API_HEADER_KEYS = {"cookie", "imei", "keyfrom", "user-agent"}
+
+
+def api_headers(session):
+    out = {}
+    for k, v in session.items():
+        if k.lower() in _API_HEADER_KEYS:
+            out[k] = v
+    out.setdefault("User-Agent", "YoudaoCourse/iPhone")
+    out.setdefault("Keyfrom", "aicard.1.4.9.ios")
+    out["Accept"] = "application/json"
+    out["Accept-Encoding"] = "identity"
+    return out
+
+
+def api_get_json(session, url):
+    req = urllib.request.Request(url, headers=api_headers(session))
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+
+def list_products(session):
+    """返回已购课程列表：[{id, name, ...}]。"""
+    d = api_get_json(session, API_PRODUCTS)
+    return (d.get("data") or {}).get("allProductList") or []
+
+
+def _walk_outline(node, pkg_id, product_id, out):
+    """递归 outline 树，收集所有视频节点。"""
+    if isinstance(node, list):
+        for it in node:
+            _walk_outline(it, pkg_id, product_id, out)
+        return
+    if not isinstance(node, dict):
+        return
+    for v in node.get("videos") or []:
+        out.append({
+            "videoId": v.get("videoId"),
+            "contentId": v.get("id"),
+            "cardPackageId": pkg_id,
+            "productId": product_id,
+            "title": v.get("title"),
+            "downloadUrl": v.get("downloadUrl"),
+            "locked": not v.get("downloadUrl"),
+            "module": (v.get("moduleInfo") or {}).get("title"),
+            "examKey": (v.get("examKeyInfo") or {}).get("title"),
+        })
+    for key in ("subOutlines", "outlines"):
+        if node.get(key):
+            _walk_outline(node[key], pkg_id, product_id, out)
+
+
+def get_product_videos(session, product_id):
+    """返回某课程下所有视频（含 videoId / contentId / cardPackageId / productId / m3u8）。"""
+    d = (api_get_json(session, API_PRODUCT_DETAIL % product_id).get("data") or {})
+    out = []
+    tab = d.get("videoPackageTab") or {}
+    pkgs = tab.get("videoPackages") or []
+    for pkg in pkgs:
+        _walk_outline(pkg.get("outlines"), pkg.get("videoPackageId"), product_id, out)
+    # 直播回放：cardPackageId 复用主视频包（最佳猜测）
+    live_pkg = pkgs[0].get("videoPackageId") if pkgs else None
+    for live in (d.get("servicePackage") or {}).get("videoLiveTab") or []:
+        _walk_outline(live.get("outlines"), live_pkg, product_id, out)
+    return out
+
+
+def find_video(session, video_id):
+    """在所有课程里找到指定 videoId 的视频条目。"""
+    video_id = int(video_id)
+    for prod in list_products(session):
+        for v in get_product_videos(session, prod["id"]):
+            if v.get("videoId") == video_id:
+                v["productName"] = prod.get("name")
+                return v
+    return None
+
+
+def resolve_m3u8(session, video, quality="highest"):
+    """拿到视频的 m3u8 地址；优先用 outline 接口里清晰度最高的，回退到 downloadUrl。"""
+    try:
+        url = API_VIDEO_OUTLINE % (video["videoId"], video["cardPackageId"],
+                                   video["contentId"], video["productId"])
+        infos = (api_get_json(session, url).get("data") or {}).get("videoInfos") or []
+        for vi in infos:
+            cl = vi.get("clarityInfoList") or []
+            if cl:
+                cl = sorted(cl, key=lambda c: c.get("type", 0),
+                            reverse=(quality == "highest"))
+                return cl[0]["url"]
+    except Exception:  # noqa: BLE001
+        pass
+    return video.get("downloadUrl")
+
+
+def play_headers(session, video, m3u8_url):
+    """构造播放该视频所需的全套头（会话头 + 该视频的 Url/Videoid/Cardpackageid...）。"""
+    h = dict(session)
+    h.setdefault("User-Agent", "YoudaoCourse/iPhone")
+    h.setdefault("Referer", "http://live.youdao.com")
+    h.setdefault("Keyfrom", "aicard.1.4.9.ios")
+    h["Url"] = m3u8_url
+    h["Videoid"] = str(video["videoId"])
+    h["Cardpackageid"] = str(video["cardPackageId"])
+    h["Cardpackagecontentid"] = str(video["contentId"])
+    h["Productid"] = str(video["productId"])
+    return h
+
+
 def load_session(args):
     if args.request:
         with open(args.request, "r", encoding="utf-8", errors="replace") as f:
@@ -287,11 +407,49 @@ def cmd_parse(args):
         print("  %s: %s" % (k, v))
 
 
+def cmd_list(args):
+    _, session = load_session(args)
+    prods = list_products(session)
+    print("共 %d 门课：\n" % len(prods))
+    for prod in prods:
+        vids = []
+        try:
+            vids = get_product_videos(session, prod["id"])
+        except Exception as e:  # noqa: BLE001
+            print("== [%s] %s  (读取失败: %s)" % (prod["id"], prod.get("name"), e))
+            continue
+        print("== [product %s] %s  —— %d 个视频" %
+              (prod["id"], prod.get("name"), len(vids)))
+        for v in vids:
+            lock = "🔒未解锁" if v["locked"] else "可看"
+            print("   video %-7s %-4s %s / %s" %
+                  (v["videoId"], lock, v.get("examKey") or "", v.get("title") or ""))
+        print()
+    print("播放某个：python3 youdao_course.py serve -r %s --video <videoId>"
+          % (args.request or "req.txt"))
+
+
+def _resolve_video(args, session):
+    print("正在按 videoId=%s 查找视频……" % args.video)
+    v = find_video(session, args.video)
+    if not v:
+        raise SystemExit("没找到 videoId=%s（确认它在你的已购课程里）。" % args.video)
+    if v["locked"]:
+        print("注意：该视频在 App 里显示未解锁，可能取不到地址。")
+    m3u8 = resolve_m3u8(session, v)
+    if not m3u8:
+        raise SystemExit("拿不到该视频的 m3u8 地址（可能未解锁）。")
+    print("找到：%s / %s" % (v.get("productName"), v.get("title")))
+    return play_headers(session, v, m3u8), m3u8
+
+
 def cmd_serve(args):
     url, headers = load_session(args)
+    if getattr(args, "video", None):
+        headers, url = _resolve_video(args, headers)
     server = start_proxy(headers, args.port, url)
     print("代理已启动。浏览器打开： http://127.0.0.1:%d" % args.port)
-    print("地址已自动填好（来自 req.txt），点“播放”即可。Ctrl-C 退出。")
+    print("地址已自动填好，点“播放”即可。Ctrl-C 退出。")
     try:
         while True:
             time.sleep(3600)
@@ -302,6 +460,8 @@ def cmd_serve(args):
 
 def cmd_download(args):
     default_url, headers = load_session(args)
+    if getattr(args, "video", None):
+        headers, default_url = _resolve_video(args, headers)
     m3u8_url = args.url or default_url
     if not _looks_like_m3u8(m3u8_url, ""):
         print("警告：地址看起来不是 .m3u8，可能下不到完整视频：", m3u8_url)
@@ -346,11 +506,17 @@ def build_parser():
                         help="抓包复制出来的请求原文文件（含 .m3u8 那条）。不传则从 stdin 读。")
     common.add_argument("--port", type=int, default=8808, help="本地代理端口（默认 8808）。")
 
+    lp = sub.add_parser("list", parents=[common],
+                        help="列出所有已购课程和视频（只需会话 Cookie）。")
+    lp.set_defaults(func=cmd_list)
+
     sp = sub.add_parser("serve", parents=[common], help="起本地代理 + 网页播放器，浏览器在线看。")
+    sp.add_argument("--video", "-V", help="要播放的 videoId（用 list 查到）；不传则放 req.txt 里那条。")
     sp.set_defaults(func=cmd_serve)
 
     dp = sub.add_parser("download", parents=[common], help="下载并合并成 mp4（需要 ffmpeg）。")
-    dp.add_argument("--url", "-u", help="要下载的 m3u8 地址；不传则用原文里那条请求的地址。")
+    dp.add_argument("--video", "-V", help="要下载的 videoId（用 list 查到）。")
+    dp.add_argument("--url", "-u", help="要下载的 m3u8 地址；不传则用 --video 或原文里那条。")
     dp.add_argument("--output", "-o", default="output.mp4", help="输出文件名（默认 output.mp4）。")
     dp.set_defaults(func=cmd_download)
 
