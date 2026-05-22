@@ -287,7 +287,7 @@ video{width:100%;height:100%;display:block;background:#000}
   </main>
 </div>
 <div class="toast" id="toast"></div>
-<script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>
+<script src="/hls.js"></script>
 <script>
 const AUTO = __AUTO__;
 const $ = s => document.querySelector(s);
@@ -393,9 +393,18 @@ async function play(v,pid){
   updNav(); closeDrawer(); localStorage.setItem('last',JSON.stringify({pid,vid:v.videoId}));
   $('#dl').onclick=()=>{const c='python3 youdao_course.py download -r req.txt --video '+v.videoId+' -o "'+(v.title||v.videoId)+'.mp4"';navigator.clipboard&&navigator.clipboard.writeText(c);toast('下载命令已复制');};
   try{
-    const r=await api('/api/play?videoId='+v.videoId+'&contentId='+v.contentId+'&cardPackageId='+v.cardPackageId+'&productId='+v.productId);
+    const m3u8=pickM3u8(v);
+    if(!m3u8){ toast('该讲暂无可播放地址（可能未解锁）'); return; }
+    const r=await api('/api/play?videoId='+v.videoId+'&contentId='+v.contentId
+      +'&cardPackageId='+v.cardPackageId+'&productId='+v.productId
+      +'&m3u8='+encodeURIComponent(m3u8));
     loadSrc(r.url);
   }catch(e){ toast('取流失败：'+e.message); }
+}
+
+function pickM3u8(v){
+  const c=(v.clarity||[]).filter(x=>x&&x.url).sort((a,b)=>(b.type||0)-(a.type||0));
+  return c.length?c[0].url:(v.downloadUrl||null);
 }
 
 function loadSrc(url){
@@ -444,6 +453,22 @@ init();
 """
 
 
+HLS_JS_CDN = "https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js"
+_HLS_JS_CACHE = {}
+
+
+def hls_js_bytes():
+    """本地代理自带 hls.js（首次从 CDN 取一次并缓存），避免浏览器直连 CDN 失败。"""
+    if "data" not in _HLS_JS_CACHE:
+        try:
+            req = urllib.request.Request(HLS_JS_CDN, headers={"User-Agent": "youdao_course"})
+            with urllib.request.urlopen(req, timeout=30) as r:
+                _HLS_JS_CACHE["data"] = r.read()
+        except Exception:  # noqa: BLE001
+            _HLS_JS_CACHE["data"] = b""
+    return _HLS_JS_CACHE["data"]
+
+
 def make_handler(base_headers, default_url="", session=None, auto=None):
     session = session if session is not None else base_headers
     page = APP_HTML.replace("__AUTO__", json.dumps(auto) if auto else "null")
@@ -476,6 +501,10 @@ def make_handler(base_headers, default_url="", session=None, auto=None):
             qs = urllib.parse.parse_qs(parsed.query)
             if path in ("/", "/index.html"):
                 self._send_bytes(200, page.encode("utf-8"), "text/html; charset=utf-8")
+            elif path == "/hls.js":
+                js = hls_js_bytes()
+                self._send_bytes(200 if js else 502, js or b"// hls.js unavailable",
+                                 "application/javascript; charset=utf-8")
             elif path == "/api/courses":
                 self._api_courses()
             elif path == "/api/course":
@@ -522,7 +551,7 @@ def make_handler(base_headers, default_url="", session=None, auto=None):
             except (KeyError, ValueError):
                 self._send_json({"error": "bad params"}, 400)
                 return
-            m3u8 = resolve_m3u8(session, video)
+            m3u8 = (qs.get("m3u8") or [None])[0] or resolve_m3u8(session, video)
             if not m3u8:
                 self._send_json({"error": "no m3u8 (locked?)"}, 502)
                 return
@@ -565,9 +594,20 @@ def make_handler(base_headers, default_url="", session=None, auto=None):
     return Handler
 
 
+class _QuietServer(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+    def handle_error(self, request, client_address):
+        # 播放器/ffmpeg 提前断开连接很正常，不刷栈
+        if sys.exc_info()[0] in (ConnectionResetError, BrokenPipeError):
+            return
+        super().handle_error(request, client_address)
+
+
 def start_proxy(headers, port, default_url="", session=None, auto=None):
-    server = ThreadingHTTPServer(("127.0.0.1", port),
-                                 make_handler(headers, default_url, session, auto))
+    server = _QuietServer(("127.0.0.1", port),
+                          make_handler(headers, default_url, session, auto))
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     return server
@@ -628,10 +668,11 @@ def _walk_outline(node, pkg_id, product_id, out):
         out.append({
             "videoId": v.get("videoId"),
             "contentId": v.get("id"),
-            "cardPackageId": pkg_id,
-            "productId": product_id,
+            "cardPackageId": v.get("cardPackageId") or pkg_id,
+            "productId": v.get("productId") or product_id,
             "title": v.get("title"),
             "downloadUrl": v.get("downloadUrl"),
+            "clarity": v.get("clarityInfoList") or [],
             "locked": not v.get("downloadUrl"),
             "module": (v.get("moduleInfo") or {}).get("title"),
             "topic": (v.get("topicInfo") or {}).get("title"),
@@ -669,21 +710,33 @@ def find_video(session, video_id):
     return None
 
 
+def _pick_clarity(clist, quality="highest"):
+    clist = [c for c in (clist or []) if c.get("url")]
+    if not clist:
+        return None
+    clist = sorted(clist, key=lambda c: c.get("type", 0),
+                   reverse=(quality == "highest"))
+    return clist[0]["url"]
+
+
 def resolve_m3u8(session, video, quality="highest"):
-    """拿到视频的 m3u8 地址；优先用 outline 接口里清晰度最高的，回退到 downloadUrl。"""
+    """拿到视频的 m3u8 地址；优先用树里自带的 clarityInfoList，再回退 downloadUrl / outline 接口。"""
+    url = _pick_clarity(video.get("clarity"), quality)
+    if url:
+        return url
+    if video.get("downloadUrl"):
+        return video["downloadUrl"]
     try:
-        url = API_VIDEO_OUTLINE % (video["videoId"], video["cardPackageId"],
+        api = API_VIDEO_OUTLINE % (video["videoId"], video["cardPackageId"],
                                    video["contentId"], video["productId"])
-        infos = (api_get_json(session, url).get("data") or {}).get("videoInfos") or []
+        infos = (api_get_json(session, api).get("data") or {}).get("videoInfos") or []
         for vi in infos:
-            cl = vi.get("clarityInfoList") or []
-            if cl:
-                cl = sorted(cl, key=lambda c: c.get("type", 0),
-                            reverse=(quality == "highest"))
-                return cl[0]["url"]
+            url = _pick_clarity(vi.get("clarityInfoList"), quality)
+            if url:
+                return url
     except Exception:  # noqa: BLE001
         pass
-    return video.get("downloadUrl")
+    return None
 
 
 def play_headers(session, video, m3u8_url):
