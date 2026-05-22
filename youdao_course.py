@@ -368,6 +368,21 @@ body{margin:0;background:var(--bg);color:var(--txt);
   color:var(--txt);font-size:13px;outline:none}
 .set-select:focus{border-color:var(--accent)}
 .set-actions{display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap}
+.toolbar{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:10px}
+.toolbar2{display:flex;gap:10px;align-items:center;margin-bottom:14px;flex-wrap:wrap}
+.toolbar2 .tsp{flex:1}
+.selinfo{font-size:12.5px;color:var(--mut);font-variant-numeric:tabular-nums}
+.set-input{flex:1;min-width:160px;padding:9px 12px;border-radius:10px;border:1px solid var(--line);
+  background:var(--panel2);color:var(--txt);font-size:13px;outline:none}
+.set-input:focus{border-color:var(--accent)}
+.set-select.sm{flex:0 0 auto;padding:9px 10px}
+.dtable th.ckcol,.dtable td.ckcol{width:34px;text-align:center;padding-left:10px;padding-right:0}
+.dtable input[type=checkbox]{accent-color:var(--accent);cursor:pointer;width:15px;height:15px}
+.dtable th.sortable{cursor:pointer;user-select:none}
+.dtable th.sortable:hover{color:var(--txt)}
+.dtable th.sortable .ar{opacity:.5;font-size:10px;margin-left:3px}
+.dtable th.sortable.asc .ar,.dtable th.sortable.desc .ar{opacity:1;color:var(--accent2)}
+.tfoot{padding:9px 4px 0;font-size:12px;color:var(--mut);font-variant-numeric:tabular-nums}
 .set-prog-row{display:flex;align-items:center;gap:10px;margin-top:8px}
 .set-prog-row .pl{width:42px;flex:0 0 auto;font-size:12px;color:var(--mut)}
 .prog{flex:1;height:9px;background:var(--panel2);border-radius:6px;overflow:hidden}
@@ -459,21 +474,36 @@ body{margin:0;background:var(--bg);color:var(--txt);
         <h2 class="set-h">预生成 &amp; 缓冲</h2>
         <p class="set-sub">提前生成拖动缩略图、把整集缓冲到服务端，看课更顺。缩略图持久保存（<code id="set-dir">~/.youdao_course/thumbs</code>）；整集缓冲走磁盘缓存（LRU，受上限约束，优先缓冲将看的课）。</p>
         <div class="set-card">
-          <div class="set-row">
-            <label class="set-label">范围</label>
-            <select id="set-scope" class="set-select"></select>
+          <div class="toolbar">
+            <input id="flt-q" class="set-input" placeholder="搜索讲次 / 课程…" autocomplete="off">
+            <select id="flt-course" class="set-select sm"></select>
+            <select id="flt-thumb" class="set-select sm"><option value="">缩略图: 全部</option><option value="ready">已生成</option><option value="gen">生成中</option><option value="missing">未生成</option></select>
+            <select id="flt-buf" class="set-select sm"><option value="">缓冲: 全部</option><option value="done">已缓冲</option><option value="missing">未缓冲</option></select>
           </div>
-          <div class="set-actions">
-            <button class="btn primary" id="set-gen">生成缩略图</button>
-            <button class="btn" id="set-buf">缓冲整集</button>
+          <div class="toolbar2">
+            <span class="selinfo" id="selinfo">共 0 讲</span>
+            <span class="tsp"></span>
+            <button class="btn primary" id="act-thumb">生成缩略图</button>
+            <button class="btn" id="act-buf">缓冲整集</button>
             <button class="btn" id="set-refresh">刷新</button>
           </div>
           <div class="set-prog-row"><span class="pl">缩略图</span><div class="prog"><div class="prog-bar" id="tb-bar"></div></div><span class="prog-text" id="tb-text">—</span></div>
           <div class="set-prog-row"><span class="pl">缓冲</span><div class="prog"><div class="prog-bar buf" id="bf-bar"></div></div><span class="prog-text" id="bf-text">—</span></div>
         </div>
         <div class="set-card">
-          <h3 class="set-h3">明细</h3>
-          <div class="tablewrap"><table class="dtable"><thead id="dthead"></thead><tbody id="dtbody"><tr><td class="empty">加载中…</td></tr></tbody></table></div>
+          <div class="tablewrap"><table class="dtable">
+            <thead><tr>
+              <th class="ckcol"><input type="checkbox" id="ck-all"></th>
+              <th class="sortable" data-sort="course">课程</th>
+              <th class="sortable" data-sort="title">讲次</th>
+              <th class="sortable" data-sort="duration">时长</th>
+              <th class="sortable" data-sort="thumb">缩略图</th>
+              <th class="sortable" data-sort="buffer">缓冲</th>
+              <th>操作</th>
+            </tr></thead>
+            <tbody id="dtbody"><tr><td class="empty" colspan="7">加载中…</td></tr></tbody>
+          </table></div>
+          <div class="tfoot" id="tfoot">—</div>
         </div>
         <div class="set-card">
           <h3 class="set-h3">信息</h3>
@@ -735,77 +765,93 @@ $('#q').addEventListener('input',e=>{
 $('#hamb').onclick=()=>$('#app').classList.toggle('drawer');
 $('#scrim').onclick=closeDrawer;
 
-// ---- 设置页：缩略图 + 整集缓冲，批量 + 明细表格 ----
+// ---- 设置页：单集明细数据表（筛选 / 排序 / 多选 / 单行操作）----
 let setVideos={}, setLoaded=false, statusCache={thumb:{states:{}},buffer:{perVid:{}}}, pollTimer=null;
+let allRows=[], sel=new Set(), sortKey='', sortDir=1;
 function fmtBytes(n){ n=n||0; if(n<1024)return n+' B'; if(n<1048576)return (n/1024|0)+' KB';
   if(n<1073741824)return (n/1048576).toFixed(1)+' MB'; return (n/1073741824).toFixed(2)+' GB'; }
-function scopeVids(){
-  const scope=$('#set-scope').value;
-  if(scope==='all'){ let a=[]; courses.forEach(c=>{ a=a.concat(setVideos[c.id]||[]); }); return a; }
-  return setVideos[scope]||[];
-}
 function tState(id){ return (statusCache.thumb.states||{})[String(id)]; }
 function bInfo(id){ return (statusCache.buffer.perVid||{})[String(id)]||{}; }
 function isBuffered(v){ const b=bInfo(v.videoId); return b.state==='done' || (b.total && b.cached>=b.total); }
 
-async function ensureCourseLoaded(pid){
-  if(pid==='all' || setVideos[pid]) return;
-  try{ if(!byId[pid]._vids){ const d=await api('/api/course?productId='+pid); byId[pid]._vids=d.videos||[]; } }
-  catch(e){ byId[pid]._vids=byId[pid]._vids||[]; }
-  setVideos[pid]=(byId[pid]._vids||[]).filter(v=>!v.locked && pickLow(v));
-}
+function buildRows(){ allRows=[]; courses.forEach(c=>{ (setVideos[c.id]||[]).forEach(v=>{
+  allRows.push({v:v, cid:c.id, cname:c.name}); }); }); }
 async function loadAllCourseVideos(){
-  if(setLoaded){ return; }
+  if(setLoaded) return;
   for(const c of courses){
     try{ if(!byId[c.id]._vids){ const d=await api('/api/course?productId='+c.id); byId[c.id]._vids=d.videos||[]; } }
     catch(e){ byId[c.id]._vids=byId[c.id]._vids||[]; }
     setVideos[c.id]=(byId[c.id]._vids||[]).filter(v=>!v.locked && pickLow(v));
-    renderTable();
+    buildRows(); renderTable();
   }
   setLoaded=true; pollOnce();
 }
 
-function thumbChip(id){
-  const s=tState(id);
+function thumbChip(id){ const s=tState(id);
   if(s==='ready')return '<span class="chip ok">✓ 已生成</span>';
   if(s==='gen')return '<span class="chip run">⏳ 生成中</span>';
   if(s==='error')return '<span class="chip err">✗ 失败</span>';
-  return '<span class="chip">—</span>';
-}
-function bufCell(v){
-  const b=bInfo(v.videoId);
+  return '<span class="chip">— 未生成</span>'; }
+function bufCell(v){ const b=bInfo(v.videoId);
   if(b.state==='working')return '<span class="chip run">⏳ 缓冲中</span>';
   if(b.state==='error')return '<span class="chip err">✗ 失败</span>';
   if(b.total){ const pct=Math.round(b.cached/b.total*100);
     return '<span class="cell-bar"><i style="width:'+pct+'%"></i></span><span class="num">'+b.cached+'/'+b.total+'</span>'; }
   if(b.cached)return '<span class="num">'+b.cached+' 段</span>';
-  return '<span class="chip">—</span>';
+  return '<span class="chip">—</span>'; }
+
+function filteredRows(){
+  const q=$('#flt-q').value.trim().toLowerCase();
+  const fc=$('#flt-course').value, ft=$('#flt-thumb').value, fb=$('#flt-buf').value;
+  let rows=allRows.filter(r=>{
+    if(fc && String(r.cid)!==fc) return false;
+    if(q && !((r.v.title||'').toLowerCase().includes(q) || r.cname.toLowerCase().includes(q))) return false;
+    const ts=tState(r.v.videoId);
+    if(ft==='ready' && ts!=='ready') return false;
+    if(ft==='gen' && ts!=='gen') return false;
+    if(ft==='missing' && (ts==='ready'||ts==='gen')) return false;
+    const bd=isBuffered(r.v);
+    if(fb==='done' && !bd) return false;
+    if(fb==='missing' && bd) return false;
+    return true;
+  });
+  if(sortKey){
+    const rank=r=>{ if(sortKey==='course')return r.cname;
+      if(sortKey==='title')return r.v.title||'';
+      if(sortKey==='duration')return r.v.duration||0;
+      if(sortKey==='thumb')return ({ready:3,gen:2,error:1}[tState(r.v.videoId)]||0);
+      if(sortKey==='buffer'){const b=bInfo(r.v.videoId);return b.total?b.cached/b.total:(b.cached?0.001:0);}
+      return 0; };
+    rows.sort((a,b)=>{const x=rank(a),y=rank(b);return x<y?-sortDir:x>y?sortDir:0;});
+  }
+  return rows;
 }
 
 function renderTable(){
-  const head=$('#dthead'), body=$('#dtbody'); if(!head||!body)return;
-  const scope=$('#set-scope').value;
-  if(scope==='all'){
-    head.innerHTML='<tr><th>课程</th><th>视频</th><th>缩略图</th><th>缓冲</th></tr>';
-    body.innerHTML = courses.map(c=>{
-      const vs=setVideos[c.id]; if(!vs)return '<tr><td class="nm">'+esc(c.name)+'</td><td class="num">…</td><td class="num">…</td><td class="num">…</td></tr>';
-      const tready=vs.filter(v=>tState(v.videoId)==='ready').length;
-      const bdone=vs.filter(v=>isBuffered(v)).length;
-      return '<tr><td class="nm">'+esc(c.name)+'</td><td class="num">'+vs.length+'</td>'
-        +'<td class="num">'+tready+'/'+vs.length+'</td><td class="num">'+bdone+'/'+vs.length+'</td></tr>';
-    }).join('') || '<tr><td class="empty">加载中…</td></tr>';
-  } else {
-    head.innerHTML='<tr><th>讲次</th><th>时长</th><th>缩略图</th><th>缓冲</th><th>操作</th></tr>';
-    const vs=setVideos[scope];
-    if(!vs){ body.innerHTML='<tr><td class="empty">加载中…</td></tr>'; return; }
-    body.innerHTML = vs.map(v=>(
-      '<tr data-vid="'+v.videoId+'"><td class="nm" title="'+esc(v.title||'')+'">'+esc(v.title||('视频'+v.videoId))+'</td>'
+  const body=$('#dtbody'); if(!body)return;
+  if(!allRows.length){ body.innerHTML='<tr><td class="empty" colspan="7">加载中…</td></tr>'; return; }
+  const rows=filteredRows();
+  body.innerHTML = rows.map(r=>{ const v=r.v, id=v.videoId, ck=sel.has(String(id))?' checked':'';
+    return '<tr data-vid="'+id+'">'
+      +'<td class="ckcol"><input type="checkbox" class="rk" data-vid="'+id+'"'+ck+'></td>'
+      +'<td class="nm" title="'+esc(r.cname)+'">'+esc(r.cname)+'</td>'
+      +'<td class="nm" title="'+esc(v.title||'')+'">'+esc(v.title||('视频'+id))+'</td>'
       +'<td class="num">'+(fmtDur(v.duration)||'—')+'</td>'
-      +'<td>'+thumbChip(v.videoId)+'</td><td>'+bufCell(v)+'</td>'
-      +'<td><button class="tbtn" data-act="thumb" data-vid="'+v.videoId+'">缩略图</button> '
-      +'<button class="tbtn" data-act="buf" data-vid="'+v.videoId+'">缓冲</button></td></tr>'
-    )).join('') || '<tr><td class="empty">这门课没有可处理的视频</td></tr>';
-  }
+      +'<td>'+thumbChip(id)+'</td><td>'+bufCell(v)+'</td>'
+      +'<td><button class="tbtn" data-act="thumb" data-vid="'+id+'">缩略图</button> '
+      +'<button class="tbtn" data-act="buf" data-vid="'+id+'">缓冲</button></td></tr>';
+  }).join('') || '<tr><td class="empty" colspan="7">没有匹配的讲次</td></tr>';
+  // 表头排序指示
+  document.querySelectorAll('.dtable th.sortable').forEach(th=>{
+    th.classList.remove('asc','desc');
+    const a=th.querySelector('.ar'); if(a)a.remove();
+    if(th.dataset.sort===sortKey){ th.classList.add(sortDir>0?'asc':'desc');
+      th.insertAdjacentHTML('beforeend','<span class="ar">'+(sortDir>0?'▲':'▼')+'</span>'); }
+  });
+  const fr=rows.length, selN=rows.filter(r=>sel.has(String(r.v.videoId))).length;
+  $('#ck-all').checked = fr>0 && selN===fr;
+  $('#selinfo').textContent = sel.size? ('已选 '+sel.size+' / 显示 '+fr+' 讲') : ('显示 '+fr+' 讲（共 '+allRows.length+'）');
+  $('#tfoot').textContent = '显示 '+fr+' / 共 '+allRows.length+' 讲'+(sel.size?'　·　已选 '+sel.size:'');
 }
 
 async function pollOnce(){
@@ -814,17 +860,15 @@ async function pollOnce(){
   $('#set-cdir').textContent=s.thumbDir||'—'; $('#set-dir').textContent=s.thumbDir||'~/.youdao_course/thumbs';
   $('#set-ffmpeg').textContent=s.ffmpeg?'可用':'未安装（无法生成，brew install ffmpeg）';
   const tb=s.thumb||{}, bf=s.buffer||{};
-  // 缩略图占用：用 buffer.bytes? 不，单独：sum sprite via /api/thumbs/status? 这里用缓冲缓存显示
   $('#set-bsize').textContent=fmtBytes(bf.bytes)+' / '+fmtBytes(bf.limit);
-  const vs=scopeVids();
-  const tReady=vs.filter(v=>tState(v.videoId)==='ready').length;
-  const bDone=vs.filter(v=>isBuffered(v)).length;
-  const tot=vs.length;
+  const rows=filteredRows();
+  const tReady=rows.filter(r=>tState(r.v.videoId)==='ready').length;
+  const bDone=rows.filter(r=>isBuffered(r.v)).length;
+  const tot=rows.length;
   $('#tb-bar').style.width=(tot?tReady/tot*100:0)+'%';
   $('#bf-bar').style.width=(tot?bDone/tot*100:0)+'%';
-  $('#tb-text').textContent= tot?(tReady+'/'+tot+'　生成中 '+tb.generating.length+'　队列 '+tb.queued):'—';
+  $('#tb-text').textContent= tot?(tReady+'/'+tot+'　生成中 '+(tb.generating||[]).length+'　队列 '+tb.queued):'—';
   $('#bf-text').textContent= tot?(bDone+'/'+tot+'　缓冲中 '+(bf.working||[]).length+'　队列 '+bf.queued):'—';
-  // 缩略图占用大小另查一次（轻量）
   try{ const ts=await api('/api/thumbs/status'); $('#set-csize').textContent=fmtBytes(ts.bytes); }catch(e){}
   renderTable();
   clearTimeout(pollTimer); pollTimer=null;
@@ -833,7 +877,7 @@ async function pollOnce(){
 }
 
 async function postBatch(url,vids,mk){
-  if(!vids.length){ toast('该范围没有可处理的视频'); return; }
+  if(!vids.length){ toast('没有可处理的讲次'); return; }
   try{
     const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({videos:vids.map(mk)})}).then(x=>x.json());
@@ -841,35 +885,52 @@ async function postBatch(url,vids,mk){
   }catch(e){ toast('提交失败：'+e.message); }
   pollOnce();
 }
-async function genThumbs(){ await loadAllCourseVideos();
-  postBatch('/api/thumbs/batch', scopeVids(), v=>({videoId:v.videoId,contentId:v.contentId,
-    cardPackageId:v.cardPackageId,productId:v.productId,duration:v.duration,src:pickLow(v)})); }
-async function bufCourse(){ await loadAllCourseVideos();
-  postBatch('/api/buffer/batch', scopeVids(), v=>({videoId:v.videoId,contentId:v.contentId,
-    cardPackageId:v.cardPackageId,productId:v.productId,src:pickM3u8(v)})); }
+const MK_THUMB=v=>({videoId:v.videoId,contentId:v.contentId,cardPackageId:v.cardPackageId,productId:v.productId,duration:v.duration,src:pickLow(v)});
+const MK_BUF=v=>({videoId:v.videoId,contentId:v.contentId,cardPackageId:v.cardPackageId,productId:v.productId,src:pickM3u8(v)});
+function actionTargets(){
+  if(sel.size) return allRows.filter(r=>sel.has(String(r.v.videoId))).map(r=>r.v);
+  return filteredRows().map(r=>r.v);   // 没多选则对当前筛选结果操作
+}
+async function doThumb(){ await loadAllCourseVideos(); postBatch('/api/thumbs/batch', actionTargets(), MK_THUMB); }
+async function doBuf(){ await loadAllCourseVideos(); postBatch('/api/buffer/batch', actionTargets(), MK_BUF); }
 
-function vById(id){ for(const c of courses){ const v=(setVideos[c.id]||[]).find(x=>String(x.videoId)===String(id)); if(v)return v; } return null; }
+function vById(id){ for(const r of allRows){ if(String(r.v.videoId)===String(id))return r.v; } return null; }
 $('#dtbody').addEventListener('click',e=>{
   const btn=e.target.closest('.tbtn'); if(!btn)return;
   const v=vById(btn.dataset.vid); if(!v)return;
-  if(btn.dataset.act==='thumb') postBatch('/api/thumbs/batch',[v],x=>({videoId:x.videoId,contentId:x.contentId,cardPackageId:x.cardPackageId,productId:x.productId,duration:x.duration,src:pickLow(x)}));
-  else postBatch('/api/buffer/batch',[v],x=>({videoId:x.videoId,contentId:x.contentId,cardPackageId:x.cardPackageId,productId:x.productId,src:pickM3u8(x)}));
+  if(btn.dataset.act==='thumb') postBatch('/api/thumbs/batch',[v],MK_THUMB);
+  else postBatch('/api/buffer/batch',[v],MK_BUF);
 });
+$('#dtbody').addEventListener('change',e=>{
+  const ck=e.target.closest('.rk'); if(!ck)return;
+  if(ck.checked) sel.add(ck.dataset.vid); else sel.delete(ck.dataset.vid);
+  const rows=filteredRows();
+  $('#ck-all').checked = rows.length>0 && rows.every(r=>sel.has(String(r.v.videoId)));
+  $('#selinfo').textContent = sel.size? ('已选 '+sel.size+' / 显示 '+rows.length+' 讲') : ('显示 '+rows.length+' 讲（共 '+allRows.length+'）');
+});
+$('#ck-all').onchange=()=>{ const rows=filteredRows();
+  if($('#ck-all').checked) rows.forEach(r=>sel.add(String(r.v.videoId)));
+  else rows.forEach(r=>sel.delete(String(r.v.videoId)));
+  renderTable(); };
+document.querySelectorAll('.dtable th.sortable').forEach(th=>{ th.onclick=()=>{
+  const k=th.dataset.sort; if(sortKey===k) sortDir=-sortDir; else { sortKey=k; sortDir=1; }
+  renderTable(); }; });
+['#flt-q','#flt-course','#flt-thumb','#flt-buf'].forEach(s=>{
+  $(s).addEventListener('input',renderTable); $(s).addEventListener('change',renderTable); });
 
 function openSettings(){
-  const sel=$('#set-scope');
-  if(sel.dataset.n!==String(courses.length)){
-    sel.innerHTML='<option value="all">全部课程（'+courses.length+'）</option>'
+  const sel2=$('#flt-course');
+  if(sel2.dataset.n!==String(courses.length)){
+    sel2.innerHTML='<option value="">课程: 全部（'+courses.length+'）</option>'
       +courses.map(c=>'<option value="'+c.id+'">'+esc(c.name)+'</option>').join('');
-    sel.dataset.n=String(courses.length);
+    sel2.dataset.n=String(courses.length);
   }
   pollOnce(); loadAllCourseVideos();
 }
 $('#gear').onclick=()=>{ const on=$('#app').classList.toggle('settings-on');
   $('#gear').classList.toggle('on',on); if(on)openSettings(); };
-$('#set-scope').onchange=async()=>{ await ensureCourseLoaded($('#set-scope').value); renderTable(); pollOnce(); };
-$('#set-gen').onclick=genThumbs;
-$('#set-buf').onclick=bufCourse;
+$('#act-thumb').onclick=doThumb;
+$('#act-buf').onclick=doBuf;
 $('#set-refresh').onclick=pollOnce;
 
 init();
