@@ -345,6 +345,41 @@ body{margin:0;background:var(--bg);color:var(--txt);
   background:#222b38;color:#fff;padding:10px 16px;border-radius:10px;font-size:13px;box-shadow:var(--shadow);
   transition:.25s;pointer-events:none;z-index:50;border:1px solid var(--line)}
 .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+.iconbtn{background:none;border:none;color:var(--mut);cursor:pointer;padding:5px;border-radius:8px;display:flex}
+.iconbtn:hover{color:var(--txt);background:var(--panel2)}
+.iconbtn.on{color:var(--accent)}
+/* settings */
+.settings{display:none;flex:1;overflow-y:auto;padding:24px 18px}
+.app.settings-on .stage{display:none}
+.app.settings-on .settings{display:block}
+.set-wrap{max-width:760px;margin:0 auto}
+.set-h{font-size:20px;font-weight:700;margin:0 0 6px}
+.set-sub{color:var(--mut);font-size:13px;line-height:1.7;margin:0 0 18px}
+.set-sub code{color:var(--accent2)}
+.set-card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px;margin-bottom:16px}
+.set-h3{font-size:14px;font-weight:700;margin:0 0 14px}
+.set-row{display:flex;align-items:center;gap:12px;margin-bottom:14px}
+.set-label{font-size:13px;color:var(--mut);width:48px;flex:0 0 auto}
+.set-select{flex:1;padding:9px 12px;border-radius:10px;border:1px solid var(--line);background:var(--panel2);
+  color:var(--txt);font-size:13px;outline:none}
+.set-select:focus{border-color:var(--accent)}
+.set-actions{display:flex;gap:10px;margin-bottom:16px}
+.prog{height:10px;background:var(--panel2);border-radius:6px;overflow:hidden}
+.prog-bar{height:100%;width:0;background:linear-gradient(90deg,var(--accent),var(--accent2));
+  border-radius:6px;transition:width .4s}
+.prog-text{margin-top:8px;font-size:12.5px;color:var(--mut);font-variant-numeric:tabular-nums}
+.set-courselist{display:flex;flex-direction:column;gap:2px;max-height:340px;overflow-y:auto}
+.cprow{display:flex;align-items:center;gap:10px;padding:9px 8px;border-radius:8px;font-size:13px}
+.cprow:hover{background:var(--panel2)}
+.cprow .cn{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cprow .cc{font-size:12px;color:var(--mut);font-variant-numeric:tabular-nums;flex:0 0 auto}
+.cprow .mini{width:80px;height:6px;background:var(--panel2);border-radius:4px;overflow:hidden;flex:0 0 auto}
+.cprow .mini i{display:block;height:100%;width:0;background:var(--ok);border-radius:4px}
+.cprow.done .cc{color:var(--ok)}
+.set-kv{display:flex;justify-content:space-between;padding:7px 0;font-size:13px;border-bottom:1px solid var(--line)}
+.set-kv:last-child{border-bottom:none}
+.set-kv span{color:var(--mut)}
+.set-kv b{font-weight:600}
 .scrim{display:none}
 @media(max-width:860px){
   .app{grid-template-columns:1fr}
@@ -377,8 +412,9 @@ body{margin:0;background:var(--bg);color:var(--txt);
     <div class="topbar">
       <button class="hamb" id="hamb" aria-label="menu"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M3 12h18M3 18h18"/></svg></button>
       <div class="crumb" id="crumb">选择左侧任意一讲开始</div>
+      <button class="iconbtn" id="gear" title="设置"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
     </div>
-    <div class="stage">
+    <div class="stage" id="stage">
       <div class="player-wrap">
         <div class="artwrap">
           <div id="art"></div>
@@ -395,6 +431,34 @@ body{margin:0;background:var(--bg);color:var(--txt);
             <button class="btn primary" id="next" disabled>下一讲 →</button>
             <button class="btn" id="dl">复制下载命令</button>
           </div>
+        </div>
+      </div>
+    </div>
+    <div class="settings" id="settings">
+      <div class="set-wrap">
+        <h2 class="set-h">缩略图预生成</h2>
+        <p class="set-sub">提前生成拖动预览缩略图，看课时拖动即时出图。生成后持久保存（<code id="set-dir">~/.youdao_course/thumbs</code>），下次直接复用。</p>
+        <div class="set-card">
+          <div class="set-row">
+            <label class="set-label">范围</label>
+            <select id="set-scope" class="set-select"></select>
+          </div>
+          <div class="set-actions">
+            <button class="btn primary" id="set-gen">开始生成</button>
+            <button class="btn" id="set-refresh">刷新状态</button>
+          </div>
+          <div class="prog"><div class="prog-bar" id="set-progbar"></div></div>
+          <div class="prog-text" id="set-progtext">—</div>
+        </div>
+        <div class="set-card">
+          <h3 class="set-h3">各课程进度</h3>
+          <div id="set-courselist" class="set-courselist"><div class="empty">加载中…</div></div>
+        </div>
+        <div class="set-card">
+          <h3 class="set-h3">缓存</h3>
+          <div class="set-kv"><span>缩略图目录</span><b id="set-cdir">—</b></div>
+          <div class="set-kv"><span>缩略图占用</span><b id="set-csize">—</b></div>
+          <div class="set-kv"><span>ffmpeg</span><b id="set-ffmpeg">—</b></div>
         </div>
       </div>
     </div>
@@ -600,10 +664,12 @@ function pickLow(v){
 async function ensureThumbs(v){
   const cur=thumbState[v.videoId];
   if(cur && cur.state==='ready'){ applyThumbs(v.videoId); return; }
-  const low=pickLow(v);
+  const low=pickLow(v); if(!low) return;
+  const q='videoId='+v.videoId+'&contentId='+v.contentId+'&cardPackageId='+v.cardPackageId
+    +'&productId='+v.productId+'&duration='+(v.duration||0)+'&src='+encodeURIComponent(low);
   for(let i=0;i<90;i++){
     if(activeVid!==v.videoId) return;     // 切走了就不再等它的缩略图
-    let r; try{ r=await api('/api/thumb?videoId='+v.videoId+'&duration='+(v.duration||0)+(low?'&src='+encodeURIComponent(low):'')); }catch(e){ return; }
+    let r; try{ r=await api('/api/thumb?'+q); }catch(e){ return; }
     thumbState[v.videoId]=r;
     if(r.state==='ready'){ applyThumbs(v.videoId); return; }
     if(r.state==='error'){ return; }
@@ -646,6 +712,85 @@ $('#q').addEventListener('input',e=>{
 });
 $('#hamb').onclick=()=>$('#app').classList.toggle('drawer');
 $('#scrim').onclick=closeDrawer;
+
+// ---- 设置页：缩略图批量预生成 + 进度 ----
+let setVideos={}, setLoaded=false, statusCache={states:{}}, pollTimer=null;
+function fmtBytes(n){ n=n||0; if(n<1024)return n+' B'; if(n<1048576)return (n/1024|0)+' KB';
+  if(n<1073741824)return (n/1048576).toFixed(1)+' MB'; return (n/1073741824).toFixed(2)+' GB'; }
+function allTargetIds(){ let a=[]; for(const c of courses){ (setVideos[c.id]||[]).forEach(v=>a.push(String(v.videoId))); } return a; }
+
+async function loadAllCourseVideos(){
+  if(setLoaded) return;
+  for(const c of courses){
+    try{ if(!byId[c.id]._vids){ const d=await api('/api/course?productId='+c.id); byId[c.id]._vids=d.videos||[]; } }
+    catch(e){ byId[c.id]._vids=byId[c.id]._vids||[]; }
+    setVideos[c.id]=(byId[c.id]._vids||[]).filter(v=>!v.locked && pickLow(v));
+    renderCourseProgress();
+  }
+  setLoaded=true; pollOnce();
+}
+function renderCourseProgress(){
+  const wrap=$('#set-courselist'); if(!wrap)return; wrap.innerHTML='';
+  const states=statusCache.states||{};
+  courses.forEach(c=>{
+    const vs=setVideos[c.id]; const total=vs?vs.length:null;
+    const ready=vs?vs.filter(v=>states[String(v.videoId)]==='ready').length:0;
+    const pct=total?Math.round(ready/(total||1)*100):0;
+    const row=el('div','cprow'+(total&&ready>=total?' done':''));
+    row.innerHTML='<span class="cn">'+esc(c.name)+'</span>'
+      +'<span class="mini"><i style="width:'+pct+'%"></i></span>'
+      +'<span class="cc">'+(total==null?'…':ready+'/'+total)+'</span>';
+    wrap.appendChild(row);
+  });
+}
+async function pollOnce(){
+  let s; try{ s=await api('/api/thumbs/status'); }catch(e){ return; }
+  statusCache=s;
+  $('#set-cdir').textContent=s.dir||'—'; $('#set-dir').textContent=s.dir||'~/.youdao_course/thumbs';
+  $('#set-csize').textContent=fmtBytes(s.bytes);
+  $('#set-ffmpeg').textContent=s.ffmpeg?'可用':'未安装（无法生成，brew install ffmpeg）';
+  const targets=allTargetIds();
+  const ready=targets.filter(id=>s.states[id]==='ready').length;
+  const total=targets.length;
+  const pct=total?Math.round(ready/total*100):0;
+  $('#set-progbar').style.width=pct+'%';
+  $('#set-progtext').textContent= total
+    ? ('已完成 '+ready+' / '+total+'　·　生成中 '+s.generating.length+'　·　队列 '+s.queued+(s.errorCount?'　·　失败 '+s.errorCount:''))
+    : ('已就绪 '+s.readyCount+' 个缩略图');
+  renderCourseProgress();
+  clearTimeout(pollTimer); pollTimer=null;
+  if(s.queued>0 || s.generating.length>0) pollTimer=setTimeout(pollOnce,1500);
+}
+async function genThumbs(){
+  await loadAllCourseVideos();
+  const scope=$('#set-scope').value;
+  let vids=[];
+  if(scope==='all'){ courses.forEach(c=>{ vids=vids.concat(setVideos[c.id]||[]); }); }
+  else vids=setVideos[scope]||[];
+  if(!vids.length){ toast('该范围没有可生成的视频'); return; }
+  const payload={videos:vids.map(v=>({videoId:v.videoId,contentId:v.contentId,
+    cardPackageId:v.cardPackageId,productId:v.productId,duration:v.duration,src:pickLow(v)}))};
+  try{
+    const r=await fetch('/api/thumbs/batch',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(payload)}).then(x=>x.json());
+    toast('已加入队列 '+r.queued+' 个'+(r.skipped?'（跳过 '+r.skipped+'）':''));
+  }catch(e){ toast('提交失败：'+e.message); }
+  pollOnce();
+}
+function openSettings(){
+  const sel=$('#set-scope');
+  if(sel.dataset.n!==String(courses.length)){
+    sel.innerHTML='<option value="all">全部课程（'+courses.length+'）</option>'
+      +courses.map(c=>'<option value="'+c.id+'">'+esc(c.name)+'</option>').join('');
+    sel.dataset.n=String(courses.length);
+  }
+  pollOnce(); loadAllCourseVideos();
+}
+$('#gear').onclick=()=>{ const on=$('#app').classList.toggle('settings-on');
+  $('#gear').classList.toggle('on',on); if(on)openSettings(); };
+$('#set-gen').onclick=genThumbs;
+$('#set-refresh').onclick=pollOnce;
+
 init();
 </script>
 </body>
@@ -678,6 +823,9 @@ THUMB_INTERVAL = 10   # 每 10 秒一帧
 THUMB_W = 160
 THUMB_H = 90
 THUMB_COLS = 10
+# 缩略图持久化目录（生成后不删，跨会话复用）
+THUMB_DIR = os.path.join(os.path.expanduser("~"), ".youdao_course", "thumbs")
+THUMB_WORKERS = 3
 
 
 def make_handler(base_headers, default_url="", session=None, auto=None,
@@ -688,13 +836,31 @@ def make_handler(base_headers, default_url="", session=None, auto=None,
     vh_lock = threading.Lock()
     seg_cache = _DiskLRU(cache_bytes)
 
-    # 缩略图雪碧图：服务端用 ffmpeg 生成（复用已缓存分片），供 Artplayer 拖动预览
-    thumb_dir = tempfile.mkdtemp(prefix="ydcourse_thumbs_")
-    atexit.register(lambda: shutil.rmtree(thumb_dir, ignore_errors=True))
+    # 缩略图雪碧图：服务端用 ffmpeg 生成（复用已缓存分片），供 Artplayer 拖动预览。
+    # 持久化到 ~/.youdao_course/thumbs，生成后不删，跨会话复用。
+    thumb_dir = THUMB_DIR
+    os.makedirs(thumb_dir, exist_ok=True)
+    thumb_index_path = os.path.join(thumb_dir, "index.json")
     thumb_meta = {}  # vid -> {"state": "gen"/"ready"/"error", ...}
     thumb_lock = threading.Lock()
     thumb_q = queue.Queue()
     have_ffmpeg = _which("ffmpeg") is not None
+    try:
+        with open(thumb_index_path, "r", encoding="utf-8") as f:
+            for vid, m in (json.load(f) or {}).items():
+                if os.path.exists(os.path.join(thumb_dir, "%s.jpg" % vid)):
+                    thumb_meta[vid] = m
+    except Exception:  # noqa: BLE001
+        pass
+
+    def _save_index():
+        with thumb_lock:
+            snap = {k: v for k, v in thumb_meta.items() if v.get("state") == "ready"}
+        try:
+            with open(thumb_index_path, "w", encoding="utf-8") as f:
+                json.dump(snap, f)
+        except Exception:  # noqa: BLE001
+            pass
 
     def _thumb_worker():
         while True:
@@ -704,6 +870,8 @@ def make_handler(base_headers, default_url="", session=None, auto=None,
             except Exception as e:  # noqa: BLE001
                 with thumb_lock:
                     thumb_meta[vid] = {"state": "error", "reason": str(e)}
+            finally:
+                thumb_q.task_done()
 
     def _gen_thumbs(vid, m3u8, duration):
         if duration <= 0:
@@ -711,12 +879,13 @@ def make_handler(base_headers, default_url="", session=None, auto=None,
         number = max(1, int(duration // THUMB_INTERVAL))
         rows = (number + THUMB_COLS - 1) // THUMB_COLS
         out = os.path.join(thumb_dir, "%s.jpg" % vid)
-        # key 是按清晰度绑定 Url 的：缩略图流要用它自己的 Url 头才能解密
-        tvid = "t_" + vid
+        tvid = "t_" + vid  # 缩略图用低清流自己的 Url 头（key 按清晰度绑定）
         with vh_lock:
-            th = dict(video_headers.get(vid) or {})
-            th["Url"] = m3u8
-            video_headers[tvid] = th
+            th = dict(video_headers.get(tvid) or {})
+        if not th:
+            with thumb_lock:
+                thumb_meta[vid] = {"state": "error", "reason": "no headers"}
+            return
         # 先并行把低清分片+密钥灌进缓存，ffmpeg 再顺序读缓存就很快
         try:
             pl, _, _ = upstream_fetch(th, m3u8)
@@ -753,11 +922,14 @@ def make_handler(base_headers, default_url="", session=None, auto=None,
                 thumb_meta[vid] = {"state": "ready", "url": "/thumbs/%s.jpg" % vid,
                                    "number": number, "column": THUMB_COLS,
                                    "width": THUMB_W, "height": THUMB_H}
+            _save_index()
         else:
             with thumb_lock:
                 thumb_meta[vid] = {"state": "error", "reason": "ffmpeg rc=%d" % rc}
 
-    def start_thumbs(vid, m3u8, duration):
+    def start_thumbs(video, m3u8, duration):
+        """video: {videoId,contentId,cardPackageId,productId}; m3u8: 低清地址。"""
+        vid = str(video["videoId"])
         if not have_ffmpeg:
             return {"state": "error", "reason": "no ffmpeg"}
         with thumb_lock:
@@ -765,10 +937,13 @@ def make_handler(base_headers, default_url="", session=None, auto=None,
             if st and st["state"] in ("ready", "gen"):
                 return st
             thumb_meta[vid] = {"state": "gen"}
+        with vh_lock:
+            video_headers["t_" + vid] = play_headers(session, video, m3u8)
         thumb_q.put((vid, m3u8, duration))
         return {"state": "gen"}
 
-    threading.Thread(target=_thumb_worker, daemon=True).start()
+    for _ in range(max(1, THUMB_WORKERS)):
+        threading.Thread(target=_thumb_worker, daemon=True).start()
 
     # 整集后台预缓存：边看边把整节课下到磁盘缓存；切走的那节自动暂停
     pf_lock = threading.Lock()
@@ -859,6 +1034,8 @@ def make_handler(base_headers, default_url="", session=None, auto=None,
                 self._api_play(qs)
             elif path == "/api/thumb":
                 self._api_thumb(qs)
+            elif path == "/api/thumbs/status":
+                self._api_thumbs_status()
             elif path.startswith("/thumbs/"):
                 self._serve_thumb(path)
             elif path == "/p":
@@ -870,6 +1047,29 @@ def make_handler(base_headers, default_url="", session=None, auto=None,
             else:
                 self._send_bytes(404, b"not found", "text/plain")
 
+        def do_POST(self):
+            parsed = urllib.parse.urlparse(self.path)
+            if parsed.path == "/api/thumbs/batch":
+                self._api_thumbs_batch()
+            else:
+                self._send_bytes(404, b"not found", "text/plain")
+
+        def _thumb_video(self, d):
+            """从 dict 取出生成缩略图需要的字段，返回 (video, m3u8_low, duration) 或 None。"""
+            try:
+                video = {"videoId": int(d["videoId"]), "contentId": int(d["contentId"]),
+                         "cardPackageId": int(d["cardPackageId"]), "productId": int(d["productId"])}
+            except (KeyError, ValueError, TypeError):
+                return None
+            src = d.get("src") or ""
+            if not (isinstance(src, str) and src.startswith("https://stream.youdao.com")):
+                return None
+            try:
+                duration = int(float(d.get("duration") or 0))
+            except (ValueError, TypeError):
+                duration = 0
+            return video, src, duration
+
         def _api_thumb(self, qs):
             vid = (qs.get("videoId") or [None])[0]
             if not vid:
@@ -877,25 +1077,57 @@ def make_handler(base_headers, default_url="", session=None, auto=None,
                 return
             with thumb_lock:
                 st = thumb_meta.get(vid)
-            if st and st["state"] == "ready":
+            if st and st["state"] in ("ready", "gen", "error"):
                 self._send_json(st)
                 return
-            if st and st["state"] in ("gen", "error"):
-                self._send_json(st)
+            parsed = {k: (v[0] if v else None) for k, v in qs.items()}
+            tv = self._thumb_video(parsed)
+            if not tv:
+                self._send_json({"state": "error", "reason": "need ids+src"}, 400)
                 return
+            self._send_json(start_thumbs(*tv))
+
+        def _api_thumbs_batch(self):
             try:
-                duration = int(float((qs.get("duration") or ["0"])[0]))
-            except ValueError:
-                duration = 0
-            # 缩略图优先用低清晰度流（解码更快；密钥按视频共享，仍能解密）
-            src = (qs.get("src") or [None])[0]
-            with vh_lock:
-                stored = (video_headers.get(vid) or {}).get("Url")
-            m3u8 = src if (src and src.startswith("https://stream.youdao.com")) else stored
-            if not m3u8:
-                self._send_json({"state": "error", "reason": "play first"}, 409)
+                length = int(self.headers.get("Content-Length") or 0)
+                payload = json.loads(self.rfile.read(length).decode("utf-8"))
+            except Exception as e:  # noqa: BLE001
+                self._send_json({"error": str(e)}, 400)
                 return
-            self._send_json(start_thumbs(vid, m3u8, duration))
+            queued = skipped = 0
+            for d in payload.get("videos") or []:
+                with thumb_lock:
+                    st = thumb_meta.get(str(d.get("videoId")))
+                if st and st["state"] in ("ready", "gen"):
+                    skipped += 1
+                    continue
+                tv = self._thumb_video(d)
+                if tv:
+                    start_thumbs(*tv)
+                    queued += 1
+                else:
+                    skipped += 1
+            self._send_json({"queued": queued, "skipped": skipped})
+
+        def _api_thumbs_status(self):
+            with thumb_lock:
+                states = {k: v.get("state") for k, v in thumb_meta.items()}
+            ready = [k for k, s in states.items() if s == "ready"]
+            generating = [k for k, s in states.items() if s == "gen"]
+            errored = [k for k, s in states.items() if s == "error"]
+            nbytes = 0
+            try:
+                for n in os.listdir(thumb_dir):
+                    if n.endswith(".jpg"):
+                        nbytes += os.path.getsize(os.path.join(thumb_dir, n))
+            except OSError:
+                pass
+            self._send_json({
+                "states": states, "readyCount": len(ready),
+                "generating": generating, "queued": thumb_q.qsize(),
+                "errorCount": len(errored), "ffmpeg": have_ffmpeg,
+                "dir": thumb_dir, "bytes": nbytes,
+            })
 
         def _serve_thumb(self, path):
             name = os.path.basename(path)
