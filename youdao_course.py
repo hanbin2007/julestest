@@ -43,7 +43,63 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+
+SEG_CACHE_BYTES = 256 * 1024 * 1024  # 分片缓存上限（约 256MB，够前后拖动很大范围）
+_RANGE_RE = re.compile(r"bytes=(\d*)-(\d*)")
+
+
+def _parse_range(range_header, total):
+    """解析单段 Range；返回 (start, end) 闭区间，或 None 表示整段。"""
+    if not range_header:
+        return None
+    m = _RANGE_RE.search(range_header)
+    if not m:
+        return None
+    s, e = m.group(1), m.group(2)
+    if s == "":
+        if e == "":
+            return None
+        length = min(int(e), total)
+        return (total - length, total - 1)
+    start = int(s)
+    end = int(e) if e else total - 1
+    end = min(end, total - 1)
+    if start > end or start >= total:
+        return None
+    return (start, end)
+
+
+class _ByteLRU:
+    """按总字节数上限的简单 LRU，用来缓存已下载的分片/密钥，拖动到看过的地方秒开。"""
+
+    def __init__(self, max_bytes):
+        self.max = max_bytes
+        self.d = OrderedDict()
+        self.size = 0
+        self.lock = threading.Lock()
+
+    def get(self, k):
+        with self.lock:
+            if k in self.d:
+                self.d.move_to_end(k)
+                return self.d[k]
+            return None
+
+    def put(self, k, value):
+        nbytes = len(value[1])
+        with self.lock:
+            if k in self.d:
+                self.size -= len(self.d[k][1])
+                del self.d[k]
+            self.d[k] = value
+            self.size += nbytes
+            self.d.move_to_end(k)
+            while self.size > self.max and len(self.d) > 1:
+                _, old = self.d.popitem(last=False)
+                self.size -= len(old[1])
 
 # 转发给上游时要去掉的逐跳 / 会被自动重设的头。
 # 注意：故意保留 "url" —— 解密 key 的接口(live.ydshengxue.com)要求 Url 头始终指向
@@ -410,9 +466,30 @@ function pickM3u8(v){
 function loadSrc(url){
   const vd=$('#v');
   if(window.Hls&&Hls.isSupported()){
-    if(!hls){ hls=new Hls({maxBufferLength:30}); hls.attachMedia(vd);
+    if(!hls){
+      hls=new Hls({
+        maxBufferLength:90,                 // 向前缓冲 90 秒
+        maxMaxBufferLength:1800,            // 上限放很大
+        backBufferLength:180,               // 向后保留 3 分钟，往回拖秒回
+        maxBufferSize:300*1000*1000,        // 300MB
+        maxBufferHole:0.5,
+        startFragPrefetch:true,             // 预取首片
+        testBandwidth:false,                // 单清晰度，免去 ABR 探测
+        fragLoadingMaxRetry:8,
+        fragLoadingMaxRetryTimeout:8000,
+        maxFragLookUpTolerance:0.2,
+        nudgeMaxRetry:10,
+        lowLatencyMode:false
+      });
+      hls.attachMedia(vd);
       hls.on(Hls.Events.MANIFEST_PARSED,()=>vd.play().catch(()=>{}));
-      hls.on(Hls.Events.ERROR,(e,d)=>{ if(d.fatal)toast('播放错误，可能未解锁或会话过期'); }); }
+      hls.on(Hls.Events.ERROR,(e,d)=>{
+        if(!d.fatal) return;
+        if(d.type===Hls.ErrorTypes.NETWORK_ERROR){ hls.startLoad(); }
+        else if(d.type===Hls.ErrorTypes.MEDIA_ERROR){ hls.recoverMediaError(); }
+        else { toast('播放错误，可能未解锁或会话过期'); }
+      });
+    }
     hls.loadSource(url);
   }else{ vd.src=url; vd.play().catch(()=>{}); }
 }
@@ -474,6 +551,7 @@ def make_handler(base_headers, default_url="", session=None, auto=None):
     page = APP_HTML.replace("__AUTO__", json.dumps(auto) if auto else "null")
     video_headers = {}
     vh_lock = threading.Lock()
+    seg_cache = _ByteLRU(SEG_CACHE_BYTES)
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -560,36 +638,76 @@ def make_handler(base_headers, default_url="", session=None, auto=None):
                 video_headers[str(video["videoId"])] = hdrs
             self._send_json({"url": _proxify(m3u8, video["videoId"]), "m3u8": m3u8})
 
+        def _fetch_upstream(self, target, vid, range_header=None, retries=3):
+            with vh_lock:
+                hdrs = video_headers.get(vid, base_headers) if vid else base_headers
+            fwd = forward_headers(hdrs, range_header)
+            last = None
+            for attempt in range(retries):
+                req = urllib.request.Request(target, headers=fwd, method="GET")
+                try:
+                    resp = urllib.request.urlopen(req, timeout=60)
+                    with resp:
+                        return resp.read(), resp.headers.get("Content-Type", ""), resp.status
+                except urllib.error.HTTPError as e:
+                    if e.code not in (500, 502, 503, 504):
+                        raise
+                    last = e
+                except urllib.error.URLError as e:
+                    last = e
+                time.sleep(0.4 * (attempt + 1))
+            raise last
+
         def _proxy(self, qs):
             if "u" not in qs:
                 self._send_bytes(400, b"missing u", "text/plain")
                 return
             target = qs["u"][0]
             vid = (qs.get("vid") or [None])[0]
-            with vh_lock:
-                hdrs = video_headers.get(vid, base_headers) if vid else base_headers
-            fwd = forward_headers(hdrs, self.headers.get("Range"))
-            req = urllib.request.Request(target, headers=fwd, method="GET")
-            try:
-                resp = urllib.request.urlopen(req, timeout=60)
-            except urllib.error.HTTPError as e:
-                self._send_bytes(e.code, e.read() or b"",
-                                 e.headers.get("Content-Type", "text/plain"))
-                return
-            except Exception as e:  # noqa: BLE001
-                self._send_bytes(502, str(e).encode("utf-8"), "text/plain")
-                return
-            with resp:
-                ctype = resp.headers.get("Content-Type", "")
-                data = resp.read()
-                status = resp.status
-            if _looks_like_m3u8(target, ctype):
+
+            # m3u8 播放列表：不缓存，取来改写
+            if _looks_like_m3u8(target, ""):
+                try:
+                    data, _, _ = self._fetch_upstream(target, vid)
+                except Exception as e:  # noqa: BLE001
+                    self._send_bytes(502, str(e).encode("utf-8"), "text/plain")
+                    return
                 rewritten = rewrite_m3u8(data.decode("utf-8", "replace"), target, vid)
                 self._send_bytes(200, rewritten.encode("utf-8"),
                                  "application/vnd.apple.mpegurl")
                 return
-            self._send_bytes(status, data, ctype or "application/octet-stream",
-                             {"Accept-Ranges": "bytes"})
+
+            # 分片 / 密钥：整段缓存，拖动到看过的位置秒开；并支持 Range（Safari 原生拖动）
+            ck = (target, vid)
+            cached = seg_cache.get(ck)
+            if cached is None:
+                try:
+                    data, ctype, _ = self._fetch_upstream(target, vid)
+                except urllib.error.HTTPError as e:
+                    self._send_bytes(e.code, e.read() or b"",
+                                     e.headers.get("Content-Type", "text/plain"))
+                    return
+                except Exception as e:  # noqa: BLE001
+                    self._send_bytes(502, str(e).encode("utf-8"), "text/plain")
+                    return
+                ctype = ctype or "application/octet-stream"
+                seg_cache.put(ck, (ctype, data))
+            else:
+                ctype, data = cached
+
+            self._serve_blob(data, ctype, self.headers.get("Range"))
+
+        def _serve_blob(self, data, ctype, range_header):
+            total = len(data)
+            rng = _parse_range(range_header, total)
+            if rng is None:
+                self._send_bytes(200, data, ctype, {"Accept-Ranges": "bytes"})
+                return
+            start, end = rng
+            self._send_bytes(206, data[start:end + 1], ctype, {
+                "Accept-Ranges": "bytes",
+                "Content-Range": "bytes %d-%d/%d" % (start, end, total),
+            })
 
     return Handler
 
