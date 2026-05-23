@@ -20,6 +20,8 @@ interface GwStatus {
   live?: { active: string | null; playhead: Record<string, number | null>; inFlight: { live: number; auto: number; manual: number } };
   ffmpeg: boolean;
   thumbDir: string;
+  cacheDir?: string;
+  cacheDirOk?: boolean;
 }
 interface GwThumbsStatus {
   bytes: number;
@@ -188,7 +190,14 @@ async function build(): Promise<CoursesStatus> {
       queue: { thumb: gw.thumb.queued ?? 0, buffer: gw.buffer.queued ?? 0 },
     },
     tasks,
-    health: { gatewayOnline: true, stale: false, ffmpeg: gw.ffmpeg, updatedAt: Date.now() },
+    health: {
+      gatewayOnline: true,
+      stale: false,
+      ffmpeg: gw.ffmpeg,
+      updatedAt: Date.now(),
+      cacheDir: gw.cacheDir ?? "",
+      cacheDirOk: gw.cacheDirOk ?? true,
+    },
     orphans,
   };
 }
@@ -297,7 +306,15 @@ async function fallback(
     },
     activity: { downloadingVid: null, title: null, tier: null, queue: { thumb: 0, buffer: 0 } },
     tasks: [],
-    health: { gatewayOnline: false, stale: true, ffmpeg: true, updatedAt: Date.now() },
+    // 网关离线时无法得知缓存目录状态：cacheDirOk 保持 true，避免与“网关离线”重复报警。
+    health: {
+      gatewayOnline: false,
+      stale: true,
+      ffmpeg: true,
+      updatedAt: Date.now(),
+      cacheDir: "",
+      cacheDirOk: true,
+    },
     orphans: [],
   };
 }

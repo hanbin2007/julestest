@@ -21,6 +21,7 @@ import LectureGrid, { type GridRow } from "./LectureGrid";
 import HealthBar from "./HealthBar";
 import StorageStrip from "./StorageStrip";
 import TaskQueuePanel from "./TaskQueuePanel";
+import CacheDirCard from "./CacheDirCard";
 import CourseStatusGrid, { type CourseSort } from "./CourseStatusGrid";
 import CourseDetailDrawer from "./CourseDetailDrawer";
 import { batchThumbs, batchBuffer, getCourseVideos, syncYoudaoProgress } from "@/lib/api";
@@ -189,7 +190,7 @@ export default function SettingsView() {
         alignItems={{ xs: "flex-start", sm: "baseline" }}
         sx={{ mb: 1.5 }}
       >
-        <Typography variant="h5" sx={{ flexShrink: 0 }}>课程状态</Typography>
+        <Typography variant="h5" sx={{ flexShrink: 0 }}>设置 / 状态</Typography>
         <Typography
           variant="body2"
           color="text.secondary"
@@ -226,6 +227,13 @@ export default function SettingsView() {
           </Box>
         </Stack>
       </Card>
+
+      {/* 缓存目录设置：查看 / 修改持久化目录，目录丢失时报错 */}
+      <CacheDirCard
+        cacheDir={data?.health.cacheDir ?? ""}
+        cacheDirOk={data?.health.cacheDirOk ?? true}
+        onSaved={refresh}
+      />
 
       {/* 工具栏 */}
       <Card sx={{ p: 1.5, mb: 2 }}>

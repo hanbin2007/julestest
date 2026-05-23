@@ -98,16 +98,20 @@ class _DiskLRU:
         self.protect_vid = None    # 当前在看那集；淘汰时优先丢别的，最后才动它
         self.persist = bool(persist_dir)
         if self.persist:
-            # 固定目录 + index.json：重启不清缓存。
+            # 固定目录 + index.json：重启不清缓存。目录由调用方（resolve_cache_dir）按
+            # “首次启用才创建、已记录却丢失则报错”的策略管理，这里不再静默 mkdir：
+            # 否则外置盘掉线时会在本地盘悄悄重建一个空缓存，几个 G 静默蒸发。
             self.dir = persist_dir
-            os.makedirs(self.dir, exist_ok=True)
             self.index_path = os.path.join(self.dir, "index.json")
-            self._load_index()
-            threading.Thread(target=self._flush_loop, daemon=True).start()
-            atexit.register(self._save_index)
+            self.ok = os.path.isdir(self.dir)
+            if self.ok:
+                self._load_index()
+                threading.Thread(target=self._flush_loop, daemon=True).start()
+                atexit.register(self._save_index)
         else:
             self.dir = tempfile.mkdtemp(prefix="ydcourse_cache_")
             self.index_path = None
+            self.ok = True
             atexit.register(self.cleanup)
 
     # ---- 持久化：index.json 记录 key->(ctype,size,fname) 与 LRU 顺序 ----
@@ -261,6 +265,13 @@ class _DiskLRU:
 
     def cleanup(self):
         shutil.rmtree(self.dir, ignore_errors=True)
+
+    def dir_ok(self):
+        """缓存目录当前是否可用（持久化目录可能被删 / 外置盘掉线）。临时目录恒真。
+        每次 /api/status 实时复查，所以会话中途丢盘也能立刻在网页报错。"""
+        if not self.persist:
+            return True
+        return os.path.isdir(self.dir) and os.access(self.dir, os.W_OK)
 
 
 def upstream_fetch(headers, target, range_header=None, retries=3):
@@ -1097,6 +1108,74 @@ THUMB_DIR = os.path.join(os.path.expanduser("~"), ".youdao_course", "thumbs")
 THUMB_WORKERS = 3
 # 分片缓存持久化目录：固定位置 + index.json，重启不清缓存。
 CACHE_DIR = os.path.join(os.path.expanduser("~"), ".youdao_course", "cache")
+# 应用配置（缓存目录等可持久化设置）。刻意放在缓存目录之外：换盘/缓存目录整体丢失时
+# 配置仍在，才能据此分辨“目录被删”（报错）还是“首次启用”（创建）。
+CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".youdao_course", "config.json")
+
+
+def load_config():
+    """读应用配置；任何损坏都退化为空 dict，绝不让坏配置拖垮网关。"""
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def save_config(cfg):
+    """原子写配置（tmp + rename），避免半截 JSON。成功返回 True。"""
+    try:
+        os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+        tmp = CONFIG_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False)
+        os.replace(tmp, CONFIG_PATH)
+        return True
+    except OSError:
+        return False
+
+
+def resolve_cache_dir(cli_dir):
+    """决定本次使用的缓存目录，并处理“首次创建 / 丢失报错”。
+    优先级：CLI 显式 --cache-dir > config.json > 默认。CLI 为一次性覆盖，不写回 config。
+    判定依据：config.json 是否已记录该目录。
+      · 已记录却不存在 → 视为被删 / 外置盘未挂：报错，绝不静默重建。
+      · 未记录且不存在 → 首次启用：创建并（非 CLI 时）记录。
+    返回 (cache_dir, ok)；ok=False 时缓存停用，但网关照常起，以便网页报错与改设置。
+    """
+    cfg = load_config()
+    if cli_dir is not None:
+        cache_dir = os.path.abspath(os.path.expanduser(cli_dir))
+        persist_choice = False     # CLI 覆盖：一次性，不改 config
+    else:
+        cache_dir = os.path.abspath(os.path.expanduser(cfg.get("cacheDir") or CACHE_DIR))
+        persist_choice = True
+    recorded = cfg.get("cacheDir")
+    known = bool(recorded) and os.path.abspath(os.path.expanduser(recorded)) == cache_dir
+
+    if os.path.isdir(cache_dir):
+        if persist_choice and not known:
+            cfg["cacheDir"] = cache_dir
+            save_config(cfg)
+        return cache_dir, True
+    if known:
+        # 记录过却消失了：外置盘没挂 / 被删。报错，绝不在别处悄悄重建空缓存。
+        sys.stderr.write(
+            "⚠ 缓存目录丢失：%s\n"
+            "  不会自动重建（可能是外置盘未挂载）。请在网页「设置」中修正，"
+            "或恢复该目录后重启网关。\n" % cache_dir)
+        return cache_dir, False
+    # 首次启用：创建并记录
+    try:
+        os.makedirs(cache_dir, exist_ok=True)
+        if persist_choice:
+            cfg["cacheDir"] = cache_dir
+            save_config(cfg)
+        return cache_dir, True
+    except OSError as e:
+        sys.stderr.write("⚠ 无法创建缓存目录 %s：%s\n" % (cache_dir, e))
+        return cache_dir, False
 
 
 def make_handler(base_headers, default_url="", session=None, auto=None,
@@ -1467,6 +1546,8 @@ def make_handler(base_headers, default_url="", session=None, auto=None,
                 self._api_thumbs_batch()
             elif parsed.path == "/api/buffer/batch":
                 self._api_buffer_batch()
+            elif parsed.path == "/api/cache-dir":
+                self._api_set_cache_dir()
             else:
                 self._send_bytes(404, b"not found", "text/plain")
 
@@ -1540,6 +1621,38 @@ def make_handler(base_headers, default_url="", session=None, auto=None,
                                 "buckets": None, "playhead": None}
             self._send_json({"segments": out})
 
+        def _api_set_cache_dir(self):
+            """设置缓存目录：校验可写 → 创建 → 持久化到 config.json（先校验后写，
+            失败绝不动 config，杜绝半生效状态）。为避免热替换正在写入的 _DiskLRU
+            （牵涉大量在途下载与线程），改动在网关下次启动时生效；当前会话仍写旧目录。"""
+            try:
+                payload = self._read_json()
+            except Exception as e:  # noqa: BLE001
+                self._send_json({"error": str(e)}, 400)
+                return
+            raw = (payload.get("dir") or "").strip()
+            if not raw:
+                self._send_json({"error": "缓存目录不能为空"}, 400)
+                return
+            d = os.path.abspath(os.path.expanduser(raw))
+            try:
+                os.makedirs(d, exist_ok=True)
+                probe = os.path.join(d, ".ydcourse_write_test")
+                with open(probe, "w", encoding="utf-8") as f:
+                    f.write("ok")
+                os.remove(probe)
+            except OSError as e:
+                self._send_json({"error": "无法写入该目录：%s" % e}, 400)
+                return
+            cfg = load_config()
+            cfg["cacheDir"] = d
+            if not save_config(cfg):
+                self._send_json({"error": "保存配置失败（无法写 config.json）"}, 500)
+                return
+            active = seg_cache.dir if seg_cache.persist else ""
+            self._send_json({"ok": True, "cacheDir": d, "active": active,
+                             "restartRequired": d != active})
+
         def _api_status(self, qs):
             with thumb_lock:
                 tstates = {k: v.get("state") for k, v in thumb_meta.items()}
@@ -1590,6 +1703,8 @@ def make_handler(base_headers, default_url="", session=None, auto=None,
                                       if pf_active["vid"] else {}),
                          "inFlight": {"live": _pri_n[0], "auto": _pri_n[1], "manual": _pri_n[2]}},
                 "ffmpeg": have_ffmpeg, "thumbDir": thumb_dir,
+                "cacheDir": seg_cache.dir if seg_cache.persist else "",
+                "cacheDirOk": seg_cache.dir_ok(),
             })
 
         def _thumb_video(self, d):
@@ -2141,12 +2256,17 @@ def cmd_serve(args):
     prefetch = not args.no_prefetch
     # 让 kill(SIGTERM) 也走 KeyboardInterrupt 优雅退出路径，从而触发 index 落盘。
     signal.signal(signal.SIGTERM, signal.default_int_handler)
+    cache_dir, cache_dir_ok = resolve_cache_dir(args.cache_dir)
     server = start_proxy(session, args.port, "", session, auto,
-                         prefetch, args.cache_mb * 1024 * 1024, args.cache_dir)
+                         prefetch, args.cache_mb * 1024 * 1024, cache_dir)
     print("课程网页已启动： http://127.0.0.1:%d" % args.port)
     print("左侧选课、选讲即可播放，支持搜索 / 倍速 / 上下一讲。Ctrl-C 退出。")
-    print("缓存持久化目录：%s（重启不清，上限 %d MB，到顶按 LRU 淘汰）"
-          % (args.cache_dir, args.cache_mb))
+    if cache_dir_ok:
+        print("缓存持久化目录：%s（重启不清，上限 %d MB，到顶按 LRU 淘汰）"
+              % (cache_dir, args.cache_mb))
+    else:
+        print("⚠ 缓存目录不可用：%s —— 缓存已停用，请在网页「设置」中修正后重启网关。"
+              % cache_dir)
     if prefetch:
         print("后台预缓存：已开（以播放头为中心前后双向补片，给观看让路）")
     try:
@@ -2216,8 +2336,9 @@ def build_parser():
                     help="关闭整集后台预缓存（默认开启：边看边下整节课，切走自动暂停）。")
     sp.add_argument("--cache-mb", type=int, default=5120,
                     help="磁盘分片缓存上限 MB（默认 5120≈5G，到顶才按 LRU 淘汰）。")
-    sp.add_argument("--cache-dir", default=CACHE_DIR,
-                    help="缓存持久化目录（默认 ~/.youdao_course/cache，重启不清）。")
+    sp.add_argument("--cache-dir", default=None,
+                    help="缓存持久化目录（一次性覆盖，不写回配置；缺省读 config.json，"
+                         "再退回 ~/.youdao_course/cache）。常驻设置请在网页「设置」里改。")
     sp.set_defaults(func=cmd_serve)
 
     dp = sub.add_parser("download", parents=[common], help="下载并合并成 mp4（需要 ffmpeg）。")

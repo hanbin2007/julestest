@@ -180,6 +180,13 @@ export interface CoursesStatus {
     queue: { thumb: number; buffer: number };
   };
   tasks: TaskItem[];
-  health: { gatewayOnline: boolean; stale: boolean; ffmpeg: boolean; updatedAt: number };
+  health: {
+    gatewayOnline: boolean;
+    stale: boolean;
+    ffmpeg: boolean;
+    updatedAt: number;
+    cacheDir: string; // 当前生效的缓存目录（空=临时/未知）
+    cacheDirOk: boolean; // 该目录当前是否存在且可写（丢失/掉盘=false）
+  };
   orphans: { vid: number; segments: number; bytes: number }[];
 }
