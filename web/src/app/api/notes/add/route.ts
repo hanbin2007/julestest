@@ -9,10 +9,10 @@ export const dynamic = "force-dynamic";
 export async function POST(req: NextRequest) {
   const { data, error } = await parseBody(req, noteAddSchema);
   if (error) return error;
-  const { videoId, text, t } = data;
+  const { videoId, text, t, strokes } = data;
   const id = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-  await prisma.note.create({ data: { id, videoId, t, text } });
+  await prisma.note.create({ data: { id, videoId, t, text, strokes: strokes ?? null } });
   const rows = await prisma.note.findMany({ where: { videoId }, orderBy: { t: "asc" } });
-  const notes = rows.map((r) => ({ id: r.id, t: r.t, text: r.text, at: r.at.getTime() }));
+  const notes = rows.map((r) => ({ id: r.id, t: r.t, text: r.text, strokes: r.strokes, at: r.at.getTime() }));
   return Response.json({ note: notes.find((n) => n.id === id), notes });
 }

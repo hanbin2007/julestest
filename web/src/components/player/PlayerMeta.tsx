@@ -3,6 +3,8 @@ import { Box, Breadcrumbs, Button, Stack, Typography } from "@mui/material";
 import SkipPreviousRoundedIcon from "@mui/icons-material/SkipPreviousRounded";
 import SkipNextRoundedIcon from "@mui/icons-material/SkipNextRounded";
 import NoteAltOutlinedIcon from "@mui/icons-material/NoteAltOutlined";
+import GestureRoundedIcon from "@mui/icons-material/GestureRounded";
+import AutoAwesomeRoundedIcon from "@mui/icons-material/AutoAwesomeRounded";
 import DownloadRoundedIcon from "@mui/icons-material/DownloadRounded";
 import { fmtDur } from "@/lib/media";
 import type { Course, Video } from "@/types/api";
@@ -15,6 +17,8 @@ export default function PlayerMeta({
   onPrev,
   onNext,
   onNotes,
+  onAnnotate,
+  onChat,
   onCopyDownload,
 }: {
   course: Course;
@@ -24,6 +28,8 @@ export default function PlayerMeta({
   onPrev: () => void;
   onNext: () => void;
   onNotes: () => void;
+  onAnnotate: () => void;
+  onChat: () => void;
   onCopyDownload: () => void;
 }) {
   const crumbs = [course.name, video.module, video.topic, video.examKey].filter(Boolean) as string[];
@@ -49,6 +55,12 @@ export default function PlayerMeta({
         </Button>
         <Button variant="text" startIcon={<NoteAltOutlinedIcon />} onClick={onNotes}>
           笔记
+        </Button>
+        <Button variant="text" startIcon={<GestureRoundedIcon />} onClick={onAnnotate}>
+          批注
+        </Button>
+        <Button variant="text" startIcon={<AutoAwesomeRoundedIcon />} onClick={onChat}>
+          AI 助教
         </Button>
         <Button variant="text" startIcon={<DownloadRoundedIcon />} onClick={onCopyDownload}>
           复制下载命令

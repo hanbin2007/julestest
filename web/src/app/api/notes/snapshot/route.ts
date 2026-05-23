@@ -4,7 +4,8 @@ import { readSnap, saveSnap } from "@/lib/noteSnaps";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const MAX_BYTES = 800 * 1024; // 单张截图上限（前端约 400px JPEG，通常 ~20KB）
+// 批注合成图分辨率更高（最宽 1600 的 JPEG），放宽到 3MB。
+const MAX_BYTES = 3 * 1024 * 1024;
 
 // 保存某条笔记的手动截图（记笔记时抓的当前画面，JPEG dataURL）。
 export async function POST(req: NextRequest) {
@@ -20,7 +21,8 @@ export async function POST(req: NextRequest) {
   return Response.json({ ok: true });
 }
 
-// 取某条笔记的截图。每条 id 的截图不会被覆盖 → immutable 强缓存。
+// 取某条笔记的截图。批注再编辑会覆盖同一 id 的图，故不能用 immutable；
+// 用可重验的短缓存（局域网工具，重验成本可忽略）。
 export async function GET(req: NextRequest) {
   const id = new URL(req.url).searchParams.get("id") ?? "";
   if (!id) return new Response("no id", { status: 400 });
@@ -30,7 +32,7 @@ export async function GET(req: NextRequest) {
     status: 200,
     headers: {
       "content-type": "image/jpeg",
-      "cache-control": "public, max-age=31536000, immutable",
+      "cache-control": "no-cache",
     },
   });
 }

@@ -10,6 +10,6 @@ export async function GET(req: NextRequest) {
   if (!videoId) return Response.json({ error: "missing videoId" }, { status: 400 });
   const rows = await prisma.note.findMany({ where: { videoId }, orderBy: { t: "asc" } });
   return Response.json({
-    notes: rows.map((r) => ({ id: r.id, t: r.t, text: r.text, at: r.at.getTime() })),
+    notes: rows.map((r) => ({ id: r.id, t: r.t, text: r.text, strokes: r.strokes, at: r.at.getTime() })),
   });
 }

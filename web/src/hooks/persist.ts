@@ -21,12 +21,12 @@ export function useNotes(videoId: number | null) {
   );
   const notes: Note[] = data?.notes ?? [];
 
-  const add = async (t: number, text: string, snap?: string | null) => {
+  const add = async (t: number, text: string, snap?: string | null, strokes?: string) => {
     if (videoId == null || !text.trim()) return;
-    const optimistic: Note = { id: `tmp-${Date.now()}`, t, text: text.trim(), at: Date.now() };
+    const optimistic: Note = { id: `tmp-${Date.now()}`, t, text: text.trim(), strokes: strokes ?? null, at: Date.now() };
     await mutate(
       async () => {
-        const r = await api.addNote(videoId, t, text.trim());
+        const r = await api.addNote(videoId, t, text.trim(), strokes);
         // 拿到服务端分配的 id 后，把记笔记那一刻抓的画面存为该笔记的截图
         if (snap && r.note) {
           try {
@@ -45,13 +45,26 @@ export function useNotes(videoId: number | null) {
     );
   };
 
-  const update = async (id: string, text: string) => {
+  const update = async (id: string, text: string, strokes?: string, snap?: string | null) => {
     if (videoId == null || !text.trim()) return;
     const next = text.trim();
     await mutate(
-      async () => ({ notes: (await api.updateNote(videoId, id, next)).notes }),
+      async () => {
+        const r = await api.updateNote(videoId, id, next, strokes);
+        // 再编辑批注：覆盖该笔记的合成图（snapshot 通道按 id 覆盖、已去 immutable 缓存）
+        if (snap) {
+          try {
+            await api.saveNoteSnapshot(id, snap);
+          } catch {
+            /* 截图失败不影响笔记本身 */
+          }
+        }
+        return { notes: r.notes };
+      },
       {
-        optimisticData: { notes: notes.map((n) => (n.id === id ? { ...n, text: next } : n)) },
+        optimisticData: {
+          notes: notes.map((n) => (n.id === id ? { ...n, text: next, ...(strokes !== undefined && { strokes }) } : n)),
+        },
         rollbackOnError: true,
         revalidate: false,
       },

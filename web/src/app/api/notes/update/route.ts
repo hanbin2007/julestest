@@ -9,11 +9,13 @@ export const dynamic = "force-dynamic";
 export async function POST(req: NextRequest) {
   const { data, error } = await parseBody(req, noteUpdateSchema);
   if (error) return error;
-  const { videoId, id, text } = data;
-  await prisma.note.updateMany({ where: { videoId, id }, data: { text } });
+  const { videoId, id, text, strokes } = data;
+  // strokes 仅在传入时更新（再编辑批注）；不传则只改文案，保留原笔迹。
+  const patch = strokes === undefined ? { text } : { text, strokes };
+  await prisma.note.updateMany({ where: { videoId, id }, data: patch });
   const rows = await prisma.note.findMany({ where: { videoId }, orderBy: { t: "asc" } });
   return Response.json({
     ok: true,
-    notes: rows.map((r) => ({ id: r.id, t: r.t, text: r.text, at: r.at.getTime() })),
+    notes: rows.map((r) => ({ id: r.id, t: r.t, text: r.text, strokes: r.strokes, at: r.at.getTime() })),
   });
 }

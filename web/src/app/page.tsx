@@ -10,6 +10,10 @@ import CourseSidebar from "@/components/sidebar/CourseSidebar";
 import PlayerMeta from "@/components/player/PlayerMeta";
 import NotesPanel from "@/components/player/NotesPanel";
 import UpNextCountdown from "@/components/player/UpNextCountdown";
+import AnnotationOverlay from "@/components/annotate/AnnotationOverlay";
+import { useAnnotation, bakeAnnotation } from "@/components/annotate/useAnnotation";
+import { serializeStrokes, parseStrokes } from "@/components/annotate/strokes";
+import ChatPanel, { type ChatPrefill } from "@/components/chat/ChatPanel";
 import ContinueWatchingRail from "@/components/home/ContinueWatchingRail";
 import CommandPalette from "@/components/common/CommandPalette";
 import ShortcutsOverlay from "@/components/common/ShortcutsOverlay";
@@ -22,7 +26,7 @@ import { useSegmentMaps } from "@/hooks/useSegmentMaps";
 import { useHotkeys } from "@/hooks/useHotkeys";
 import { play, pickM3u8, postProgress, addNote as apiAddNote, saveNoteSnapshot as apiSaveNoteSnapshot, patchSettings, refreshCatalog } from "@/lib/api";
 import { themeForSeed, hashSeed } from "@/lib/color";
-import { useProgressMap, useLast } from "@/hooks/persist";
+import { useProgressMap, useLast, useNotes } from "@/hooks/persist";
 import type { Course, Video, VideoRow } from "@/types/api";
 
 const ArtPlayer = dynamic(() => import("@/components/player/ArtPlayer"), {
@@ -49,6 +53,16 @@ export default function PlayerView() {
   const [src, setSrc] = React.useState<string | null>(null);
   const [upNext, setUpNext] = React.useState<Video | null>(null);
   const artRef = React.useRef<any>(null);
+  const [art, setArt] = React.useState<any>(null); // 渲染用（批注层挂载/门控）
+  // 批注 + AI 助教
+  const [annotateOpen, setAnnotateOpen] = React.useState(false);
+  const [chatOpen, setChatOpen] = React.useState(false);
+  const [annotationText, setAnnotationText] = React.useState("");
+  const [editingNoteId, setEditingNoteId] = React.useState<string | null>(null);
+  const [pendingEditId, setPendingEditId] = React.useState<string | null>(null); // 深链 ?annotation=
+  const [chatPrefill, setChatPrefill] = React.useState<ChatPrefill | null>(null);
+  const [savingAnno, setSavingAnno] = React.useState(false);
+  const annotation = useAnnotation();
 
   const { videos: courseVideos } = useCourseVideos(sel?.courseId ?? null);
   const course: Course | undefined = courses.find((c) => c.id === sel?.courseId);
@@ -57,6 +71,8 @@ export default function PlayerView() {
   const idx = curList.findIndex((v) => v.videoId === sel?.videoId);
   const prev = idx > 0 ? curList[idx - 1] : null;
   const next = idx >= 0 && idx < curList.length - 1 ? curList[idx + 1] : null;
+  // 批注存/改笔记复用 useNotes（与笔记抽屉同一 SWR key，自动同步）
+  const notesApi = useNotes(video?.videoId ?? null);
 
   const thumbnails = useThumbPoll(video ?? null);
   // 本讲逐片缓存：观看/预缓存会持续补片，快一点刷新让缓存条像在“长”。
@@ -80,11 +96,13 @@ export default function PlayerView() {
     const p = Number(sp.get("productId"));
     const v = Number(sp.get("videoId"));
     const t = Number(sp.get("t"));
+    const an = sp.get("annotation"); // 编辑批注深链
     if (p && v) {
       setSel({ courseId: p, videoId: v });
-      if (t > 0) {
-        setSeekOverride(t);
-        // 抹掉 t：可分享的跳转链接不该变成"刷新即丢进度"的链接
+      if (t > 0) setSeekOverride(t);
+      if (an) setPendingEditId(an);
+      if (t > 0 || an) {
+        // 抹掉一次性参数：可分享的跳转链接不该变成"刷新即丢进度/重入编辑"的链接
         window.history.replaceState(null, "", `/?productId=${p}&videoId=${v}`);
       }
       resumedRef.current = true;
@@ -188,6 +206,69 @@ export default function PlayerView() {
       return null;
     }
   };
+
+  // ---- 批注 ----
+  const pauseVideo = () => {
+    const v = artRef.current?.video as HTMLVideoElement | undefined;
+    if (v && !v.paused) v.pause();
+  };
+  const openAnnotateFresh = React.useCallback(() => {
+    if (!video) return;
+    annotation.load([]);
+    setAnnotationText("");
+    setEditingNoteId(null);
+    setAnnotateOpen(true);
+    const v = artRef.current?.video as HTMLVideoElement | undefined;
+    if (v && !v.paused) v.pause();
+  }, [video, annotation]);
+
+  const saveAnnotation = React.useCallback(async () => {
+    if (!video) return;
+    if (annotation.strokes.length === 0 && !annotationText.trim()) return;
+    const text = annotationText.trim() || "批注";
+    setSavingAnno(true);
+    try {
+      const baked = bakeAnnotation(artRef.current?.video, annotation.strokes);
+      const strokesJson = serializeStrokes(annotation.strokes);
+      if (editingNoteId) {
+        await notesApi.update(editingNoteId, text, strokesJson, baked.image);
+        toast("批注已更新");
+      } else {
+        const t = Math.floor(artRef.current?.video?.currentTime ?? 0);
+        await notesApi.add(t, text, baked.image, strokesJson);
+        toast("批注已存入笔记");
+      }
+      setAnnotateOpen(false);
+    } catch (e) {
+      toast("保存失败：" + (e as Error).message, { severity: "error" });
+    } finally {
+      setSavingAnno(false);
+    }
+  }, [video, annotation, annotationText, editingNoteId, notesApi, toast]);
+
+  const askClaude = React.useCallback(() => {
+    if (!video) return;
+    const baked = bakeAnnotation(artRef.current?.video, annotation.strokes);
+    setChatPrefill({ text: annotationText.trim() || "请讲解一下这道题的思路。", image: baked.image ?? undefined });
+    setAnnotateOpen(false);
+    setChatOpen(true);
+  }, [video, annotation, annotationText]);
+
+  // 深链「编辑批注」：等播放器就绪 + 该讲笔记加载后，载入笔迹并进入批注模式
+  const annoLoad = annotation.load; // 稳定引用，避免整个 annotation 对象进 deps 引起重跑
+  const notesList = notesApi.notes;
+  React.useEffect(() => {
+    if (!pendingEditId || !art || !video) return;
+    const note = notesList.find((n) => n.id === pendingEditId);
+    if (!note) return; // 笔记尚未加载，等下一轮
+    annoLoad(parseStrokes(note.strokes));
+    setAnnotationText(note.text === "批注" ? "" : note.text);
+    setEditingNoteId(note.id);
+    setAnnotateOpen(true);
+    pauseVideo();
+    setPendingEditId(null);
+  }, [pendingEditId, art, video, notesList, annoLoad]);
+
   useHotkeys({
     " ": () => {
       const v = a()?.video as HTMLVideoElement | undefined;
@@ -207,6 +288,7 @@ export default function PlayerView() {
     "[": () => { const p = a(); if (p) p.playbackRate = Math.max(0.5, (p.playbackRate || 1) - 0.25); },
     m: () => { const p = a(); if (p) p.muted = !p.muted; },
     f: () => { const p = a(); if (p) p.fullscreen = !p.fullscreen; },
+    a: () => (annotateOpen ? setAnnotateOpen(false) : openAnnotateFresh()),
     n: () => next && course && selectVideo(next, course),
     p: () => prev && course && selectVideo(prev, course),
     c: () => copyDownload(),
@@ -309,7 +391,11 @@ export default function PlayerView() {
                       startTime={startTime}
                       onTime={onTime}
                       onEnded={() => setUpNext(next)}
-                      onInstance={(art) => (artRef.current = art)}
+                      onInstance={(inst) => {
+                        artRef.current = inst;
+                        setArt(inst);
+                        if (!inst) setAnnotateOpen(false);
+                      }}
                       onReady={() => setSeekOverride(undefined)}
                     />
                   ) : (
@@ -359,6 +445,8 @@ export default function PlayerView() {
                   onPrev={() => prev && selectVideo(prev, course)}
                   onNext={() => next && selectVideo(next, course)}
                   onNotes={() => setNotesOpen(true)}
+                  onAnnotate={openAnnotateFresh}
+                  onChat={() => setChatOpen(true)}
                   onCopyDownload={copyDownload}
                 />
               )}
@@ -378,6 +466,25 @@ export default function PlayerView() {
           const p = artRef.current;
           if (p) p.currentTime = t;
         }}
+      />
+      {annotateOpen && art && video && (
+        <AnnotationOverlay
+          art={art}
+          api={annotation}
+          text={annotationText}
+          setText={setAnnotationText}
+          onSaveNote={saveAnnotation}
+          onAskClaude={askClaude}
+          onClose={() => setAnnotateOpen(false)}
+          busy={savingAnno}
+        />
+      )}
+      <ChatPanel
+        open={chatOpen}
+        onClose={() => setChatOpen(false)}
+        videoId={video?.videoId ?? null}
+        prefill={chatPrefill}
+        onConsumePrefill={() => setChatPrefill(null)}
       />
       <CommandPalette open={cmdOpen} onClose={() => setCmdOpen(false)} courses={courses} onPick={pickFromPalette} />
       <ShortcutsOverlay open={scOpen} onClose={() => setScOpen(false)} />

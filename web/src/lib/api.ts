@@ -14,6 +14,7 @@ import type {
   Video,
 } from "@/types/api";
 import type {
+  ChatMessage,
   EnrichedNote,
   LastWatched,
   Note,
@@ -103,10 +104,10 @@ export const syncYoudaoProgress = (productId?: number) =>
 
 export const getNotes = (videoId: number) =>
   fetcher<{ notes: Note[] }>(`/api/notes?videoId=${videoId}`);
-export const addNote = (videoId: number, t: number, text: string) =>
-  postJson<{ note: Note; notes: Note[] }>("/api/notes/add", { videoId, t, text });
-export const updateNote = (videoId: number, id: string, text: string) =>
-  postJson<{ ok: boolean; notes: Note[] }>("/api/notes/update", { videoId, id, text });
+export const addNote = (videoId: number, t: number, text: string, strokes?: string) =>
+  postJson<{ note: Note; notes: Note[] }>("/api/notes/add", { videoId, t, text, strokes });
+export const updateNote = (videoId: number, id: string, text: string, strokes?: string) =>
+  postJson<{ ok: boolean; notes: Note[] }>("/api/notes/update", { videoId, id, text, strokes });
 export const deleteNote = (videoId: number, id: string) =>
   postJson<{ ok: boolean; notes: Note[] }>("/api/notes/delete", { videoId, id });
 
@@ -123,6 +124,20 @@ export const saveNoteSnapshot = (id: string, image: string) =>
   postJson<{ ok: boolean }>("/api/notes/snapshot", { id, image });
 export const noteSnapshotUrl = (id: string) =>
   `/api/notes/snapshot?id=${encodeURIComponent(id)}`;
+
+// ---- 内置 Claude 助教（按讲对话）----
+export const getChat = (videoId: number) =>
+  fetcher<{ messages: ChatMessage[] }>(`/api/chat?videoId=${videoId}`);
+export const clearChat = (videoId: number) =>
+  postJson<{ ok: boolean }>("/api/chat/clear", { videoId });
+export const chatImageUrl = (id: string) => `/api/chat/image?id=${encodeURIComponent(id)}`;
+// 流式发送：返回原始 Response，由 useChat 读取 SSE（不走 fetcher/JSON）。
+export const sendChat = (videoId: number, text: string, image?: string) =>
+  fetch("/api/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ videoId, text, image }),
+  });
 
 export const getSettings = () =>
   fetcher<{ prefs: Prefs; last: LastWatched | null }>("/api/settings");

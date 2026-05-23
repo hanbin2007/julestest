@@ -21,6 +21,16 @@ export interface Note {
   id: string;
   t: number; // 时间戳（秒）
   text: string;
+  strokes?: string | null; // 矢量批注 JSON（Stroke[]）；纯文字笔记为 null
+  at: number; // ms
+}
+
+// 内置 Claude 助教消息（按讲）。
+export interface ChatMessage {
+  id: string;
+  role: "user" | "assistant";
+  text: string;
+  image?: string | null; // 附图文件 id（=消息 id），用 chatImageUrl(id) 取图
   at: number; // ms
 }
 
@@ -39,6 +49,7 @@ export interface EnrichedNote {
   videoId: number;
   t: number; // 时间戳（秒）
   text: string;
+  strokes?: string | null; // 矢量批注 JSON；非 null 即为批注笔记
   at: number; // ms
   courseId: number;
   courseName: string;

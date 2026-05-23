@@ -50,9 +50,29 @@ model Note {
   videoId Int
   t       Int      @default(0) // 时间戳（秒）
   text    String
+  strokes String? // 矢量批注 JSON（归一化坐标的 Stroke[]）；普通文字笔记为 null
   at      DateTime @default(now())
 
   @@index([videoId])
+}
+
+// ---- 内置 Claude 助教（按讲对话）----
+// ChatMessage 是 UI 渲染的真相源；模型上下文续接靠 ChatThread.sessionId（Agent SDK resume）。
+model ChatMessage {
+  id      String   @id
+  videoId Int
+  role    String // "user" | "assistant"
+  text    String
+  image   String? // 附图文件 id（用户消息可带批注画面，落盘在 chat-imgs/）
+  at      DateTime @default(now())
+
+  @@index([videoId])
+}
+
+model ChatThread {
+  videoId   Int      @id
+  sessionId String? // Claude Agent SDK 会话 id，用于多轮 resume
+  updatedAt DateTime @updatedAt
 }
 
 // 网关缓存/缓冲状态的镜像（真相在网关，这里供 UI 直读 + 跨设备）

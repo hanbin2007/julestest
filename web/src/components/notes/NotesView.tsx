@@ -125,6 +125,10 @@ export default function NotesView() {
   const jump = (cid: number, vid: number, t: number) =>
     router.push(`/?productId=${cid}&videoId=${vid}&t=${t}`);
 
+  // 编辑批注：回看课页并带 annotation=id，让播放页进入批注模式并还原笔迹。
+  const editAnnotation = (cid: number, vid: number, t: number, id: string) =>
+    router.push(`/?productId=${cid}&videoId=${vid}&t=${t}&annotation=${encodeURIComponent(id)}`);
+
   const exportMd = () => {
     if (!shownCount) return toast("没有可导出的笔记");
     const date = new Date().toISOString().slice(0, 10);
@@ -314,6 +318,7 @@ export default function NotesView() {
                     onUpdate={update}
                     onDelete={remove}
                     onJump={jump}
+                    onEditAnnotation={editAnnotation}
                   />
                 ))}
               </Box>

@@ -14,6 +14,7 @@ import {
 } from "@mui/material";
 import AddRoundedIcon from "@mui/icons-material/AddRounded";
 import EditOutlinedIcon from "@mui/icons-material/EditOutlined";
+import GestureRoundedIcon from "@mui/icons-material/GestureRounded";
 import DeleteOutlineRoundedIcon from "@mui/icons-material/DeleteOutlineRounded";
 import CheckRoundedIcon from "@mui/icons-material/CheckRounded";
 import CloseRoundedIcon from "@mui/icons-material/CloseRounded";
@@ -157,12 +158,19 @@ export default function NotesPanel({
                   onClick={() => onSeek(n.t)}
                   sx={{ borderRadius: (t) => t.radius.sm, alignItems: "flex-start", pr: 9 }}
                 >
-                  <Typography
-                    variant="caption"
-                    sx={{ color: "primary.main", fontWeight: 700, mr: 1, mt: 0.2, fontVariantNumeric: "tabular-nums" }}
-                  >
-                    {fmtDur(n.t) || "0:00"}
-                  </Typography>
+                  <Stack direction="row" sx={{ alignItems: "center", gap: 0.25, mr: 1, mt: 0.2, flexShrink: 0 }}>
+                    <Typography
+                      variant="caption"
+                      sx={{ color: "primary.main", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}
+                    >
+                      {fmtDur(n.t) || "0:00"}
+                    </Typography>
+                    {n.strokes && (
+                      <Tooltip title="批注">
+                        <GestureRoundedIcon sx={{ fontSize: 14, color: "text.secondary" }} />
+                      </Tooltip>
+                    )}
+                  </Stack>
                   <Typography variant="body2" sx={{ whiteSpace: "pre-wrap" }}>
                     {n.text}
                   </Typography>

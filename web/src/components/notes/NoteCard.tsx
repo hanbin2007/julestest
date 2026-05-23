@@ -1,8 +1,9 @@
 "use client";
 import * as React from "react";
-import { Box, Card, Checkbox, IconButton, Stack, TextField, Tooltip, Typography } from "@mui/material";
+import { Box, Card, Checkbox, Chip, IconButton, Stack, TextField, Tooltip, Typography } from "@mui/material";
 import PlayArrowRoundedIcon from "@mui/icons-material/PlayArrowRounded";
 import EditOutlinedIcon from "@mui/icons-material/EditOutlined";
+import GestureRoundedIcon from "@mui/icons-material/GestureRounded";
 import DeleteOutlineRoundedIcon from "@mui/icons-material/DeleteOutlineRounded";
 import CheckRoundedIcon from "@mui/icons-material/CheckRounded";
 import CloseRoundedIcon from "@mui/icons-material/CloseRounded";
@@ -19,6 +20,7 @@ export default function NoteCard({
   onUpdate,
   onDelete,
   onJump,
+  onEditAnnotation,
 }: {
   note: EnrichedNote;
   color: string;
@@ -28,7 +30,9 @@ export default function NoteCard({
   onUpdate: (videoId: number, id: string, text: string) => void;
   onDelete: (videoId: number, id: string) => void;
   onJump: (courseId: number, videoId: number, t: number) => void;
+  onEditAnnotation: (courseId: number, videoId: number, t: number, id: string) => void;
 }) {
+  const isAnnotation = !!note.strokes;
   const [editing, setEditing] = React.useState(false);
   const [draft, setDraft] = React.useState(note.text);
   const dirty = !!draft.trim() && draft.trim() !== note.text;
@@ -123,6 +127,15 @@ export default function NoteCard({
                 · 回放
               </Typography>
             )}
+            {isAnnotation && (
+              <Chip
+                size="small"
+                variant="outlined"
+                icon={<GestureRoundedIcon />}
+                label="批注"
+                sx={{ height: 20, "& .MuiChip-label": { px: 0.75, fontSize: 11 } }}
+              />
+            )}
           </Stack>
           <Typography variant="caption" color="text.secondary" noWrap title={note.lessonTitle}>
             {note.lessonTitle}
@@ -192,11 +205,22 @@ export default function NoteCard({
                 <PlayArrowRoundedIcon fontSize="small" />
               </IconButton>
             </Tooltip>
-            <Tooltip title="编辑">
+            <Tooltip title="编辑文字">
               <IconButton size="small" onClick={stop(startEdit)} aria-label="edit note">
                 <EditOutlinedIcon fontSize="small" />
               </IconButton>
             </Tooltip>
+            {isAnnotation && (
+              <Tooltip title="编辑批注">
+                <IconButton
+                  size="small"
+                  onClick={stop(() => onEditAnnotation(note.courseId, note.videoId, note.t, note.id))}
+                  aria-label="edit annotation"
+                >
+                  <GestureRoundedIcon fontSize="small" />
+                </IconButton>
+              </Tooltip>
+            )}
             <Tooltip title="删除">
               <IconButton size="small" onClick={stop(() => onDelete(note.videoId, note.id))} aria-label="delete note">
                 <DeleteOutlineRoundedIcon fontSize="small" />

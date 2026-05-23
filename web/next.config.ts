@@ -7,6 +7,8 @@ const GATEWAY = process.env.GATEWAY_ORIGIN ?? process.env.BACKEND_ORIGIN ?? "htt
 const nextConfig: NextConfig = {
   // 把工作区根锁定在本目录，避免 Next 误把 ~ 下的 lockfile 当成项目根。
   outputFileTracingRoot: __dirname,
+  // Claude Agent SDK 自带 claude 二进制并 spawn 子进程，别让 webpack 打包它（会破坏二进制解析）。
+  serverExternalPackages: ["@anthropic-ai/claude-agent-sdk"],
   // 允许局域网内其它设备访问 dev server（避免 Next 15 跨源开发请求被拦）。
   allowedDevOrigins: ["192.168.0.126"],
   async rewrites() {

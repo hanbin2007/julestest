@@ -4,16 +4,28 @@ import { z } from "zod";
 // 这里收敛为 zod schema，解析失败统一返回 400 + 可读的字段错误。
 // 数值用 z.coerce 保留原先 Number() 的宽松（前端偶尔传字符串数字也能过）。
 
+// 矢量批注 JSON 文本（Stroke[] 序列化），上限 256KB。
+const strokesField = z.string().max(262144).optional();
+
 export const noteAddSchema = z.object({
   videoId: z.coerce.number().int().positive(),
   text: z.string().trim().min(1),
   t: z.coerce.number().int().min(0).catch(0), // 时间戳秒，非法→0（同原 Math.floor(Number||0)）
+  strokes: strokesField,
 });
 
 export const noteUpdateSchema = z.object({
   videoId: z.coerce.number().int().positive(),
   id: z.string().min(1),
   text: z.string().trim().min(1),
+  strokes: strokesField,
+});
+
+// 内置 Claude 助教：发消息入参。image 为可选的 dataURL（批注画面截图）。
+export const chatSchema = z.object({
+  videoId: z.coerce.number().int().positive(),
+  text: z.string().trim().min(1),
+  image: z.string().startsWith("data:image/").max(6_000_000).optional(),
 });
 
 export const noteDeleteSchema = z.object({

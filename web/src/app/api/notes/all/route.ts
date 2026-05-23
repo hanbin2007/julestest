@@ -35,6 +35,7 @@ export async function GET() {
       videoId: r.videoId,
       t: r.t,
       text: r.text,
+      strokes: r.strokes,
       at: r.at.getTime(),
       courseId: m?.courseId ?? 0,
       courseName: m?.courseName ?? "未知课程",
