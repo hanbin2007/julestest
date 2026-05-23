@@ -5,14 +5,16 @@
 """
 import json
 import socket
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 
 import pytest
 
-import youdao_course as yc
+import ydcore.gateway as gateway
 import ydcore.httpio as httpio
+from ydcore.gateway import start_proxy
 
 M3U8 = "https://stream.youdao.com/a/play.m3u8"
 SEG0 = "https://stream.youdao.com/a/seg0.ts"
@@ -53,9 +55,9 @@ def server(tmp_path, monkeypatch):
         raise AssertionError("unexpected upstream target: " + target)
 
     monkeypatch.setattr(httpio, "upstream_fetch", fake)
-    monkeypatch.setattr(yc, "THUMB_DIR", str(tmp_path / "thumbs"))  # 别污染真实缩略图目录
+    monkeypatch.setattr(gateway, "THUMB_DIR", str(tmp_path / "thumbs"))  # 别污染真实缩略图目录
     port = _free_port()
-    srv = yc.start_proxy({"Cookie": "x"}, port, session={"Cookie": "x"}, prefetch=False)
+    srv = start_proxy({"Cookie": "x"}, port, session={"Cookie": "x"}, prefetch=False)
     try:
         yield "http://127.0.0.1:%d" % port, calls
     finally:
@@ -124,3 +126,41 @@ def test_debug_and_status_endpoints(server):
     assert st2 == 200
     s = json.loads(body2)
     assert {"thumb", "buffer", "live", "cacheDir"} <= set(s.keys())
+
+
+def test_play_returns_proxied_url(server):
+    # 显式带 m3u8 参数，跳过 resolve_m3u8（不触网）；prefetch=False 不起预缓存线程。
+    base, _ = server
+    q = urllib.parse.urlencode({
+        "videoId": 42, "contentId": 1, "cardPackageId": 2, "productId": 3,
+        "m3u8": M3U8,
+    })
+    st, body, _ = _get(base + "/api/play?" + q)
+    assert st == 200
+    d = json.loads(body)
+    assert d["m3u8"] == M3U8
+    assert d["url"].startswith("/p?u=") and "vid=42" in d["url"]
+
+
+def test_buffer_batch_then_segments(server):
+    base, calls = server
+    payload = json.dumps({"videos": [{
+        "videoId": 42, "contentId": 1, "cardPackageId": 2, "productId": 3, "src": M3U8,
+    }]}).encode()
+    req = urllib.request.Request(base + "/api/buffer/batch", data=payload, method="POST")
+    with urllib.request.urlopen(req, timeout=5) as r:
+        res = json.loads(r.read())
+    assert res["queued"] == 1
+
+    # 缓冲是后台 worker，轮询直到整集 2 片落缓存（桩上游即时返回，通常 <0.5s）
+    deadline = time.time() + 5
+    seg = {}
+    while time.time() < deadline:
+        st, body, _ = _get(base + "/api/buffer/segments?vid=42")
+        seg = json.loads(body)["segments"].get("42") or {}
+        if seg.get("cached") == 2:
+            break
+        time.sleep(0.05)
+    assert seg.get("total") == 2 and seg.get("cached") == 2
+    assert seg.get("buckets") is not None
+    assert calls.get(SEG0) == 1 and calls.get(SEG1) == 1   # 每片只回源一次

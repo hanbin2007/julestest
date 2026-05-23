@@ -1,0 +1,841 @@
+"""本地解密代理网关：HTTP 处理 + 缩略图/缓冲/预缓存编排 + 状态对象。
+
+Gateway 持有一台网关实例的全部可变状态（原先散在 make_handler 闭包里），并提供
+缩略图/整集缓冲/预缓存的后台编排方法。make_handler(gateway) 返回一个 BaseHTTPRequestHandler
+子类，其 gw 类属性指向该 Gateway，处理方法统一通过 self.gw.* 访问状态。
+
+并发不变量（刻意不加锁的共享 dict，单写者 + GIL 原子，依赖如下约定）：
+  · playhead[vid]   仅由 /p 处理线程在该 vid 的直播分片请求里写；预缓存 worker 只读，
+                    读到旧值会在下一轮主动 re-center，stale 读无害。
+  · seg_urls[vid]   由 /p、整集缓冲、预缓存写入"该 vid 的有序分片列表"，三者写的是同一
+                    内容（同清晰度），互相覆盖等价；读方只做存在性/长度判断。
+  · seg_total[vid]  同上，写的是分片总数（同一值）。
+  · pf_active["vid"]  仅在 pf_lock 内写；多处无锁读，读到旧值最多让 worker 多跑一轮即退出。
+有锁保护的状态：video_headers(vh_lock)、thumb_meta/thumb_active(thumb_lock)、
+buf_state(buf_lock)、pf_threads(pf_lock)、seg_cache(自带锁)。
+"""
+import concurrent.futures
+import json
+import os
+import queue
+import re
+import subprocess
+import sys
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from ydcore.appconfig import load_config, save_config
+from ydcore.cache import DiskLRU, SEG_CACHE_BYTES
+from ydcore.hls import looks_like_m3u8, parse_range, parse_segments, proxify, rewrite_m3u8
+from ydcore.priority import PriorityGate
+from ydcore.util import which
+from ydcore.youdao_api import (
+    get_product_videos, get_product_watch_state, list_products,
+    play_headers, resolve_m3u8,
+)
+
+# ---- 前端单页 + 依赖资源 -------------------------------------------------
+_WEB_UI_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web_ui")
+
+
+def _load_app_html():
+    """前端单页：从 ydcore/web_ui/app.html 读入（含 __AUTO__ 占位，运行时替换）。"""
+    with open(os.path.join(_WEB_UI_DIR, "app.html"), encoding="utf-8") as f:
+        return f.read()
+
+
+APP_HTML = _load_app_html()
+
+_ASSET_CDN = {
+    "hls.js": "https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js",
+    "artplayer.js": "https://cdn.jsdelivr.net/npm/artplayer@5.1.7/dist/artplayer.js",
+}
+_ASSET_CACHE = {}
+
+
+def asset_bytes(name):
+    """本地代理自带前端依赖（hls.js / artplayer.js），首次从 CDN 取一次并缓存。"""
+    if name not in _ASSET_CACHE:
+        try:
+            req = urllib.request.Request(_ASSET_CDN[name],
+                                         headers={"User-Agent": "youdao_course"})
+            with urllib.request.urlopen(req, timeout=30) as r:
+                _ASSET_CACHE[name] = r.read()
+        except Exception:  # noqa: BLE001
+            _ASSET_CACHE[name] = b""
+    return _ASSET_CACHE[name]
+
+
+# 缩略图雪碧图参数
+THUMB_INTERVAL = 10   # 每 10 秒一帧
+THUMB_W = 160
+THUMB_H = 90
+THUMB_COLS = 10
+# 缩略图持久化目录（生成后不删，跨会话复用）
+THUMB_DIR = os.path.join(os.path.expanduser("~"), ".youdao_course", "thumbs")
+THUMB_WORKERS = 3
+
+
+class Gateway:
+    """一台网关实例的全部状态 + 后台编排（缩略图 / 整集缓冲 / 预缓存）。"""
+
+    def __init__(self, base_headers, session=None, auto=None, prefetch=True,
+                 cache_bytes=SEG_CACHE_BYTES, port=8808, cache_dir=None):
+        self.base_headers = base_headers
+        self.session = session if session is not None else base_headers
+        self.prefetch = prefetch
+        self.port = port
+        self.page = APP_HTML.replace("__AUTO__", json.dumps(auto) if auto else "null")
+
+        self.video_headers = {}
+        self.vh_lock = threading.Lock()
+        self.seg_cache = DiskLRU(cache_bytes, cache_dir)
+        # 三档优先级闸门：0=LIVE(观看) > 1=AUTO(自动缓存) > 2=MANUAL(手动缓存)。
+        self.gate = PriorityGate()
+
+        # 缩略图雪碧图：服务端用 ffmpeg 生成（复用已缓存分片），供 Artplayer 拖动预览。
+        self.thumb_dir = THUMB_DIR
+        os.makedirs(self.thumb_dir, exist_ok=True)
+        self.thumb_index_path = os.path.join(self.thumb_dir, "index.json")
+        self.thumb_meta = {}     # vid -> {"state": "gen"/"ready"/"error", ...}
+        self.thumb_active = set()  # 真正在 ffmpeg 生成中的 vid（区分"生成中"与"排队中"）
+        self.thumb_lock = threading.Lock()
+        self.thumb_q = queue.Queue()
+        self.have_ffmpeg = which("ffmpeg") is not None
+        try:
+            with open(self.thumb_index_path, "r", encoding="utf-8") as f:
+                for vid, m in (json.load(f) or {}).items():
+                    if os.path.exists(os.path.join(self.thumb_dir, "%s.jpg" % vid)):
+                        self.thumb_meta[vid] = m
+        except Exception:  # noqa: BLE001
+            pass
+
+        # 整集缓冲（把整节课分片下到服务端磁盘缓存）：批量预缓冲 + 状态
+        self.seg_total = {}      # vid -> 总分片数（已知时）
+        self.seg_urls = {}       # vid -> 按播放顺序的分片绝对地址列表
+        self.buf_state = {}      # vid -> "queued"/"working"/"done"/"error"
+        self.buf_lock = threading.Lock()
+        self.buf_q = queue.Queue()
+
+        # 自动预缓存：以"播放头"为中心向前后双向补未缓存分片。
+        self.pf_lock = threading.Lock()
+        self.pf_active = {"vid": None}
+        self.pf_threads = {}     # vid -> (thread, stop_event)
+        self.pf_segidx = {}      # vid -> {seg_url: index}
+        self.playhead = {}       # vid -> 最近一次直播请求到的分片下标
+
+        for _ in range(max(1, THUMB_WORKERS)):
+            threading.Thread(target=self._thumb_worker, daemon=True).start()
+        threading.Thread(target=self._buffer_worker, daemon=True).start()
+
+    def pri_fetch(self, t, hdrs, url, range_header=None):
+        """按优先级档位回源（委托给闸门）。"""
+        return self.gate.fetch(t, hdrs, url, range_header)
+
+    # ---- 缩略图 ----------------------------------------------------------
+    def _save_thumb_index(self):
+        with self.thumb_lock:
+            snap = {k: v for k, v in self.thumb_meta.items() if v.get("state") == "ready"}
+        try:
+            with open(self.thumb_index_path, "w", encoding="utf-8") as f:
+                json.dump(snap, f)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _thumb_worker(self):
+        while True:
+            vid, m3u8, duration, tier = self.thumb_q.get()
+            with self.thumb_lock:
+                self.thumb_active.add(vid)
+            try:
+                self._gen_thumbs(vid, m3u8, duration, tier)
+            except Exception as e:  # noqa: BLE001
+                with self.thumb_lock:
+                    self.thumb_meta[vid] = {"state": "error", "reason": str(e)}
+            finally:
+                with self.thumb_lock:
+                    self.thumb_active.discard(vid)
+                self.thumb_q.task_done()
+
+    def _gen_thumbs(self, vid, m3u8, duration, tier):
+        if duration <= 0:
+            duration = 600
+        number = max(1, int(duration // THUMB_INTERVAL))
+        rows = (number + THUMB_COLS - 1) // THUMB_COLS
+        out = os.path.join(self.thumb_dir, "%s.jpg" % vid)
+        tvid = "t_" + vid  # 缩略图用低清流自己的 Url 头（key 按清晰度绑定）
+        with self.vh_lock:
+            th = dict(self.video_headers.get(tvid) or {})
+        if not th:
+            with self.thumb_lock:
+                self.thumb_meta[vid] = {"state": "error", "reason": "no headers"}
+            return
+        # 先按档位把低清分片+密钥灌进缓存，ffmpeg 再顺序读缓存就很快
+        try:
+            pl, _, _ = self.pri_fetch(tier, th, m3u8)
+            text = pl.decode("utf-8", "replace")
+            urls = [urllib.parse.urljoin(m3u8, ln.strip())
+                    for ln in text.splitlines() if ln.strip() and not ln.startswith("#")]
+            for ln in text.splitlines():
+                if ln.startswith("#EXT-X-KEY") and 'URI="' in ln:
+                    urls.insert(0, urllib.parse.urljoin(m3u8, re.search(r'URI="([^"]+)"', ln).group(1)))
+
+            def _grab(u):
+                if self.seg_cache.has((u, tvid)):
+                    return
+                try:
+                    d, c, _ = self.pri_fetch(tier, th, u)
+                    self.seg_cache.put((u, tvid), (c or "video/mp2t", d))
+                except Exception:  # noqa: BLE001
+                    pass
+            # 并发收紧到 1：受限下行下，高档抢占时不可取消的在途下载越少越好。
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+                list(ex.map(_grab, urls))
+        except Exception:  # noqa: BLE001
+            pass
+        proxied = "http://127.0.0.1:%d/p?u=%s&vid=%s" % (
+            self.port, urllib.parse.quote(m3u8, safe=""), tvid)
+        vf = ("fps=1/%d,scale=%d:%d:force_original_aspect_ratio=increase,"
+              "crop=%d:%d,tile=%dx%d" % (THUMB_INTERVAL, THUMB_W, THUMB_H,
+                                         THUMB_W, THUMB_H, THUMB_COLS, rows))
+        # -skip_frame nokey：只解关键帧，配合 fps 过滤器既保持均匀间隔又大幅加速
+        # -allowed_extensions ALL + -extension_picky 0：ffmpeg 8 默认按扩展名校验，会拒绝
+        # 代理段地址（…&vid=t_xxx，无 .ts 后缀），不加这俩缩略图会 rc=183 失败。
+        cmd = ["ffmpeg", "-y", "-nostdin",
+               "-allowed_extensions", "ALL", "-extension_picky", "0",
+               "-skip_frame", "nokey", "-i", proxied,
+               "-an", "-vf", vf, "-frames:v", "1", "-q:v", "6", out, "-loglevel", "error"]
+        rc = subprocess.call(cmd)
+        if rc == 0 and os.path.exists(out):
+            with self.thumb_lock:
+                self.thumb_meta[vid] = {"state": "ready", "url": "/thumbs/%s.jpg" % vid,
+                                        "number": number, "column": THUMB_COLS,
+                                        "width": THUMB_W, "height": THUMB_H}
+            self._save_thumb_index()
+        else:
+            with self.thumb_lock:
+                self.thumb_meta[vid] = {"state": "error", "reason": "ffmpeg rc=%d" % rc}
+
+    def start_thumbs(self, video, m3u8, duration, tier=2):
+        """video: {videoId,contentId,cardPackageId,productId}; m3u8: 低清地址。
+        tier: 播放时自动触发=1(AUTO)，手动批量=2(MANUAL)。"""
+        vid = str(video["videoId"])
+        if not self.have_ffmpeg:
+            return {"state": "error", "reason": "no ffmpeg"}
+        with self.thumb_lock:
+            st = self.thumb_meta.get(vid)
+            if st and st["state"] in ("ready", "gen"):
+                return st
+            self.thumb_meta[vid] = {"state": "gen"}
+        with self.vh_lock:
+            self.video_headers["t_" + vid] = play_headers(self.session, video, m3u8)
+        self.thumb_q.put((vid, m3u8, duration, tier))
+        return {"state": "gen"}
+
+    # ---- 整集缓冲 --------------------------------------------------------
+    def _buffer_one(self, video, m3u8):
+        # 手动缓存（MANUAL，档 2）：让位给观看(0)和自动缓存(1)。注意：要和自动缓存
+        # 合并到同一集，二者须用同一清晰度——目前前端 pickM3u8/MK_BUF 与播放都取最高清，
+        # key 同为 (seg_url, vid) 故天然合并；若改播放器清晰度选择，需同步前端取值。
+        vid = str(video["videoId"])
+        th = play_headers(self.session, video, m3u8)
+        with self.vh_lock:
+            self.video_headers[vid] = th
+        pl, _, _ = self.pri_fetch(2, th, m3u8)
+        text = pl.decode("utf-8", "replace")
+        segs = parse_segments(text, m3u8)
+        self.seg_total[vid] = len(segs)
+        self.seg_urls[vid] = list(segs)  # 供逐片缓存 bitmap 查询
+        urls = list(segs)
+        for ln in text.splitlines():
+            if ln.startswith("#EXT-X-KEY") and 'URI="' in ln:
+                urls.insert(0, urllib.parse.urljoin(m3u8, re.search(r'URI="([^"]+)"', ln).group(1)))
+
+        def _grab(u):
+            if self.seg_cache.has((u, vid)):
+                return
+            try:
+                d, c, _ = self.pri_fetch(2, th, u)
+                self.seg_cache.put((u, vid), (c or "video/mp2t", d))  # 每片下完即可被命中
+            except Exception:  # noqa: BLE001
+                pass
+        # 并发收紧到 1：手动缓存最低优先，抢占时在途下载越少观看越稳。
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+            list(ex.map(_grab, urls))
+
+    def _buffer_worker(self):
+        while True:
+            video, m3u8 = self.buf_q.get()
+            vid = str(video["videoId"])
+            with self.buf_lock:
+                self.buf_state[vid] = "working"
+            try:
+                self._buffer_one(video, m3u8)
+                with self.buf_lock:
+                    self.buf_state[vid] = "done"
+            except Exception:  # noqa: BLE001
+                with self.buf_lock:
+                    self.buf_state[vid] = "error"
+            finally:
+                self.buf_q.task_done()
+
+    def start_buffer(self, video, m3u8):
+        vid = str(video["videoId"])
+        with self.buf_lock:
+            if self.buf_state.get(vid) in ("queued", "working"):
+                return
+            self.buf_state[vid] = "queued"
+        self.buf_q.put((video, m3u8))
+
+    # ---- 自动预缓存 ------------------------------------------------------
+    def _prefetch_worker(self, vid, m3u8, stop):
+        hdrs = self.video_headers.get(vid)
+        if not hdrs:
+            return
+        try:
+            data, _, _ = self.pri_fetch(1, hdrs, m3u8)
+        except Exception:  # noqa: BLE001
+            return
+        text = data.decode("utf-8", "replace")
+        # 先把密钥缓存好
+        for line in text.splitlines():
+            if line.startswith("#EXT-X-KEY") and 'URI="' in line:
+                kabs = urllib.parse.urljoin(m3u8, re.search(r'URI="([^"]+)"', line).group(1))
+                if not self.seg_cache.has((kabs, vid)):
+                    try:
+                        kd, kc, _ = self.pri_fetch(1, hdrs, kabs)
+                        self.seg_cache.put((kabs, vid), (kc or "application/octet-stream", kd))
+                    except Exception:  # noqa: BLE001
+                        pass
+        segs = parse_segments(text, m3u8)
+        n = len(segs)
+        self.seg_total[vid] = n
+        self.seg_urls[vid] = list(segs)  # 供逐片缓存 bitmap 查询
+        if n == 0:
+            return
+        self.pf_segidx[vid] = {u: i for i, u in enumerate(segs)}
+
+        def _order(center):
+            # 以播放头为中心、前后交替向外扩散的下标序（前方优先一格）。
+            if 0 <= center < n:
+                yield center
+            for d in range(1, n):
+                f, b = center + d, center - d
+                if f < n:
+                    yield f
+                if b >= 0:
+                    yield b
+
+        # 不停地以播放头为中心、前后双向补未缓存分片；播放头一动就立刻重新居中。
+        while not stop.is_set() and self.pf_active["vid"] == vid:
+            center = self.playhead.get(vid, 0)
+            fetched = recenter = False
+            for idx in _order(center):
+                if stop.is_set() or self.pf_active["vid"] != vid:
+                    return  # 被切走 -> 停（已缓存的保留，回来可续）
+                if self.playhead.get(vid, 0) != center:
+                    recenter = True
+                    break  # 播放头移动了 -> 重新居中
+                s = segs[idx]
+                if self.seg_cache.has((s, vid)):
+                    continue
+                try:
+                    d, c, _ = self.pri_fetch(1, hdrs, s)
+                    self.seg_cache.put((s, vid), (c or "video/mp2t", d))
+                    fetched = True
+                except Exception:  # noqa: BLE001
+                    pass
+            if recenter:
+                continue
+            if not fetched:
+                time.sleep(2.0)  # 整集已在缓存里，歇会儿再巡（播放头移动/被淘汰后回补）
+
+    def start_prefetch(self, vid, m3u8):
+        with self.pf_lock:
+            self.pf_active["vid"] = vid
+            for ovid, (_, ev) in self.pf_threads.items():
+                if ovid != vid:
+                    ev.set()  # 暂停其它正在下的
+            cur = self.pf_threads.get(vid)
+            if cur and cur[0].is_alive():
+                return
+            ev = threading.Event()
+            t = threading.Thread(target=self._prefetch_worker, args=(vid, m3u8, ev), daemon=True)
+            self.pf_threads[vid] = (t, ev)
+            t.start()
+
+
+def make_handler(gateway):
+    """返回一个 BaseHTTPRequestHandler 子类，其 gw 指向给定 Gateway。"""
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+        gw = gateway
+
+        def log_message(self, fmt, *args):
+            sys.stderr.write("[proxy] " + (fmt % args) + "\n")
+
+        def _send_bytes(self, status, body, content_type, extra=None):
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            for k, v in (extra or {}).items():
+                self.send_header(k, v)
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _send_json(self, obj, status=200):
+            self._send_bytes(status, json.dumps(obj, ensure_ascii=False).encode("utf-8"),
+                             "application/json; charset=utf-8")
+
+        def do_GET(self):
+            parsed = urllib.parse.urlparse(self.path)
+            path = parsed.path
+            qs = urllib.parse.parse_qs(parsed.query)
+            if path in ("/", "/index.html"):
+                self._send_bytes(200, self.gw.page.encode("utf-8"), "text/html; charset=utf-8")
+            elif path in ("/hls.js", "/artplayer.js"):
+                js = asset_bytes(path.lstrip("/"))
+                self._send_bytes(200 if js else 502, js or b"// asset unavailable",
+                                 "application/javascript; charset=utf-8")
+            elif path == "/api/courses":
+                self._api_courses()
+            elif path == "/api/course":
+                self._api_course(qs)
+            elif path == "/api/watch_state":
+                self._api_watch_state(qs)
+            elif path == "/api/play":
+                self._api_play(qs)
+            elif path == "/api/thumb":
+                self._api_thumb(qs)
+            elif path == "/api/thumbs/status":
+                self._api_thumbs_status()
+            elif path == "/api/status":
+                self._api_status(qs)
+            elif path == "/api/buffer/segments":
+                self._api_buffer_segments(qs)
+            elif path.startswith("/thumbs/"):
+                self._serve_thumb(path)
+            elif path == "/p":
+                self._proxy(qs)
+            elif path == "/api/_debug":
+                self._send_json({"active": self.gw.pf_active["vid"],
+                                 "cacheItems": len(self.gw.seg_cache.meta),
+                                 "cacheBytes": self.gw.seg_cache.size})
+            else:
+                self._send_bytes(404, b"not found", "text/plain")
+
+        def do_POST(self):
+            parsed = urllib.parse.urlparse(self.path)
+            if parsed.path == "/api/thumbs/batch":
+                self._api_thumbs_batch()
+            elif parsed.path == "/api/buffer/batch":
+                self._api_buffer_batch()
+            elif parsed.path == "/api/cache-dir":
+                self._api_set_cache_dir()
+            else:
+                self._send_bytes(404, b"not found", "text/plain")
+
+        def _read_json(self):
+            length = int(self.headers.get("Content-Length") or 0)
+            return json.loads(self.rfile.read(length).decode("utf-8"))
+
+        def _buffer_video(self, d):
+            """缓冲用：高清地址 src。返回 (video, m3u8) 或 None。"""
+            try:
+                video = {"videoId": int(d["videoId"]), "contentId": int(d["contentId"]),
+                         "cardPackageId": int(d["cardPackageId"]), "productId": int(d["productId"])}
+            except (KeyError, ValueError, TypeError):
+                return None
+            src = d.get("src") or ""
+            if not (isinstance(src, str) and src.startswith("https://stream.youdao.com")):
+                return None
+            return video, src
+
+        def _api_buffer_batch(self):
+            try:
+                payload = self._read_json()
+            except Exception as e:  # noqa: BLE001
+                self._send_json({"error": str(e)}, 400)
+                return
+            queued = skipped = 0
+            for d in payload.get("videos") or []:
+                bv = self._buffer_video(d)
+                vid = str(d.get("videoId"))
+                if not bv or self.gw.buf_state.get(vid) in ("queued", "working", "done"):
+                    skipped += 1
+                    continue
+                self.gw.start_buffer(*bv)
+                queued += 1
+            self._send_json({"queued": queued, "skipped": skipped})
+
+        def _api_buffer_segments(self, qs):
+            """逐片缓存 bitmap（"已缓存的地方"）。可传多个 vid；用 buckets 把分片压成
+            定长格子(每格=该区间已缓存占比 0..1)，无论分片多少都给定长、可上色的一条。
+            没有有序分片列表(如重启后只看过一次还没复看)时 buckets=null，前端回退到比例条。"""
+            vids = qs.get("vid") or qs.get("videoId") or []
+            try:
+                nb = int((qs.get("buckets") or ["60"])[0])
+            except (ValueError, TypeError):
+                nb = 60
+            nb = max(1, min(nb, 400))
+            snap = self.gw.seg_cache.cached_segs_by_vid()  # 一次持锁快照，避免逐 url 加锁
+            stats = self.gw.seg_cache.vid_stats()["real"]
+            out = {}
+            for vid in vids:
+                vid = str(vid)
+                urls = self.gw.seg_urls.get(vid)
+                disk = (stats.get(vid) or {}).get("segments", 0)
+                if urls:
+                    n = len(urls)
+                    cset = snap.get(vid) or set()
+                    flags = [1 if u in cset else 0 for u in urls]
+                    cached = sum(flags)
+                    b = min(nb, n)
+                    cells = []
+                    for i in range(b):
+                        lo, hi = i * n // b, (i + 1) * n // b
+                        seg = flags[lo:hi]
+                        cells.append(round(sum(seg) / len(seg), 3) if seg else 0)
+                    ph = self.gw.playhead.get(vid)
+                    pos = (ph / n) if (ph is not None and n) else None
+                    out[vid] = {"total": n, "cached": cached, "buckets": cells, "playhead": pos}
+                else:
+                    # 无有序列表：只能给磁盘计数与已知总数，buckets=null
+                    out[vid] = {"total": self.gw.seg_total.get(vid), "cached": disk,
+                                "buckets": None, "playhead": None}
+            self._send_json({"segments": out})
+
+        def _api_set_cache_dir(self):
+            """设置缓存目录：校验可写 → 创建 → 持久化到 config.json（先校验后写，
+            失败绝不动 config，杜绝半生效状态）。为避免热替换正在写入的 DiskLRU
+            （牵涉大量在途下载与线程），改动在网关下次启动时生效；当前会话仍写旧目录。"""
+            try:
+                payload = self._read_json()
+            except Exception as e:  # noqa: BLE001
+                self._send_json({"error": str(e)}, 400)
+                return
+            raw = (payload.get("dir") or "").strip()
+            if not raw:
+                self._send_json({"error": "缓存目录不能为空"}, 400)
+                return
+            d = os.path.abspath(os.path.expanduser(raw))
+            try:
+                os.makedirs(d, exist_ok=True)
+                probe = os.path.join(d, ".ydcourse_write_test")
+                with open(probe, "w", encoding="utf-8") as f:
+                    f.write("ok")
+                os.remove(probe)
+            except OSError as e:
+                self._send_json({"error": "无法写入该目录：%s" % e}, 400)
+                return
+            cfg = load_config()
+            cfg["cacheDir"] = d
+            if not save_config(cfg):
+                self._send_json({"error": "保存配置失败（无法写 config.json）"}, 500)
+                return
+            active = self.gw.seg_cache.dir if self.gw.seg_cache.persist else ""
+            self._send_json({"ok": True, "cacheDir": d, "active": active,
+                             "restartRequired": d != active})
+
+        def _api_status(self, qs):
+            gw = self.gw
+            with gw.thumb_lock:
+                tstates = {k: v.get("state") for k, v in gw.thumb_meta.items()}
+                tactive = set(gw.thumb_active)
+            stats = gw.seg_cache.vid_stats()  # 一次遍历拿到磁盘真相
+            real, thumbb = stats["real"], stats["thumb"]
+            vids = qs.get("videoId") or []  # 可选：只查这些 vid 的缓冲明细
+            # 关键：枚举范围 = 磁盘已缓存 ∪ 本会话已知总数 ∪ 缓冲状态。覆盖"任何来源的缓存"。
+            target = ([str(v) for v in vids] if vids
+                      else list(set(list(real.keys()) + list(gw.seg_total.keys()) + list(gw.buf_state.keys()))))
+
+            def _state(vid, cached, total):
+                s = gw.buf_state.get(vid)
+                if s:
+                    return s
+                if cached <= 0:
+                    return None
+                if total and cached >= total:
+                    return "full"
+                if total:
+                    return "partial"
+                return "cached"  # 磁盘有片但总数未知（如重启后/观看顺带缓存）
+
+            buffer = {}
+            for vid in target:
+                vid = str(vid)
+                r = real.get(vid) or {}
+                cached = r.get("segments", 0)
+                total = gw.seg_total.get(vid)
+                buffer[vid] = {"cached": cached, "total": total,
+                               "state": _state(vid, cached, total),
+                               "bytes": r.get("bytes", 0),
+                               "thumbBytes": (thumbb.get(vid) or {}).get("bytes", 0)}
+            tready = sum(1 for s in tstates.values() if s == "ready")
+            tgen = [k for k, s in tstates.items() if s == "gen"]
+            terr = sum(1 for s in tstates.values() if s == "error")
+            self._send_json({
+                "thumb": {"states": tstates, "ready": tready, "generating": tgen,
+                          "working": sorted(tactive),
+                          "queued_vids": [k for k in tgen if k not in tactive],
+                          "queued": gw.thumb_q.qsize(), "errors": terr},
+                "buffer": {"perVid": buffer, "bytes": gw.seg_cache.size, "limit": gw.seg_cache.max,
+                           "queued": gw.buf_q.qsize(),
+                           "working": [k for k, s in gw.buf_state.items() if s == "working"],
+                           "queued_vids": [k for k, s in gw.buf_state.items() if s == "queued"]},
+                "live": {"active": gw.pf_active["vid"],
+                         "playhead": ({gw.pf_active["vid"]: gw.playhead.get(gw.pf_active["vid"])}
+                                      if gw.pf_active["vid"] else {}),
+                         "inFlight": {"live": gw.gate.n[0], "auto": gw.gate.n[1], "manual": gw.gate.n[2]}},
+                "ffmpeg": gw.have_ffmpeg, "thumbDir": gw.thumb_dir,
+                "cacheDir": gw.seg_cache.dir if gw.seg_cache.persist else "",
+                "cacheDirOk": gw.seg_cache.dir_ok(),
+            })
+
+        def _thumb_video(self, d):
+            """从 dict 取出生成缩略图需要的字段，返回 (video, m3u8_low, duration) 或 None。"""
+            try:
+                video = {"videoId": int(d["videoId"]), "contentId": int(d["contentId"]),
+                         "cardPackageId": int(d["cardPackageId"]), "productId": int(d["productId"])}
+            except (KeyError, ValueError, TypeError):
+                return None
+            src = d.get("src") or ""
+            if not (isinstance(src, str) and src.startswith("https://stream.youdao.com")):
+                return None
+            try:
+                duration = int(float(d.get("duration") or 0))
+            except (ValueError, TypeError):
+                duration = 0
+            return video, src, duration
+
+        def _api_thumb(self, qs):
+            vid = (qs.get("videoId") or [None])[0]
+            if not vid:
+                self._send_json({"state": "error", "reason": "no videoId"}, 400)
+                return
+            with self.gw.thumb_lock:
+                st = self.gw.thumb_meta.get(vid)
+            if st and st["state"] in ("ready", "gen", "error"):
+                self._send_json(st)
+                return
+            parsed = {k: (v[0] if v else None) for k, v in qs.items()}
+            tv = self._thumb_video(parsed)
+            if not tv:
+                self._send_json({"state": "error", "reason": "need ids+src"}, 400)
+                return
+            self._send_json(self.gw.start_thumbs(*tv, tier=1))  # 播放时自动触发 → AUTO
+
+        def _api_thumbs_batch(self):
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                payload = json.loads(self.rfile.read(length).decode("utf-8"))
+            except Exception as e:  # noqa: BLE001
+                self._send_json({"error": str(e)}, 400)
+                return
+            queued = skipped = 0
+            for d in payload.get("videos") or []:
+                with self.gw.thumb_lock:
+                    st = self.gw.thumb_meta.get(str(d.get("videoId")))
+                if st and st["state"] in ("ready", "gen"):
+                    skipped += 1
+                    continue
+                tv = self._thumb_video(d)
+                if tv:
+                    self.gw.start_thumbs(*tv, tier=2)  # 手动批量 → MANUAL
+                    queued += 1
+                else:
+                    skipped += 1
+            self._send_json({"queued": queued, "skipped": skipped})
+
+        def _api_thumbs_status(self):
+            with self.gw.thumb_lock:
+                states = {k: v.get("state") for k, v in self.gw.thumb_meta.items()}
+            ready = [k for k, s in states.items() if s == "ready"]
+            generating = [k for k, s in states.items() if s == "gen"]
+            errored = [k for k, s in states.items() if s == "error"]
+            nbytes = 0
+            try:
+                for n in os.listdir(self.gw.thumb_dir):
+                    if n.endswith(".jpg"):
+                        nbytes += os.path.getsize(os.path.join(self.gw.thumb_dir, n))
+            except OSError:
+                pass
+            self._send_json({
+                "states": states, "readyCount": len(ready),
+                "generating": generating, "queued": self.gw.thumb_q.qsize(),
+                "errorCount": len(errored), "ffmpeg": self.gw.have_ffmpeg,
+                "dir": self.gw.thumb_dir, "bytes": nbytes,
+            })
+
+        def _serve_thumb(self, path):
+            name = os.path.basename(path)
+            fpath = os.path.join(self.gw.thumb_dir, name)
+            if not os.path.isfile(fpath):
+                self._send_bytes(404, b"not found", "text/plain")
+                return
+            with open(fpath, "rb") as f:
+                self._send_bytes(200, f.read(), "image/jpeg",
+                                 {"Cache-Control": "max-age=3600"})
+
+        def _api_courses(self):
+            try:
+                prods = list_products(self.gw.session)
+            except Exception as e:  # noqa: BLE001
+                self._send_json({"error": str(e)}, 502)
+                return
+            courses = [{
+                "id": p.get("id"), "name": p.get("name"),
+                "cardType": p.get("cardType"),
+                "authors": [a.get("name") if isinstance(a, dict) else a
+                            for a in (p.get("authors") or [])],
+            } for p in prods]
+            self._send_json({"courses": courses})
+
+        def _api_course(self, qs):
+            pid = (qs.get("productId") or [None])[0]
+            if not pid:
+                self._send_json({"error": "missing productId"}, 400)
+                return
+            try:
+                self._send_json({"videos": get_product_videos(self.gw.session, pid)})
+            except Exception as e:  # noqa: BLE001
+                self._send_json({"error": str(e)}, 502)
+
+        def _api_watch_state(self, qs):
+            pid = (qs.get("productId") or [None])[0]
+            if not pid:
+                self._send_json({"error": "missing productId"}, 400)
+                return
+            try:
+                self._send_json({"watch": get_product_watch_state(self.gw.session, pid)})
+            except Exception as e:  # noqa: BLE001
+                self._send_json({"error": str(e)}, 502)
+
+        def _api_play(self, qs):
+            try:
+                video = {
+                    "videoId": int(qs["videoId"][0]),
+                    "contentId": int(qs["contentId"][0]),
+                    "cardPackageId": int(qs["cardPackageId"][0]),
+                    "productId": int(qs["productId"][0]),
+                }
+            except (KeyError, ValueError):
+                self._send_json({"error": "bad params"}, 400)
+                return
+            live_id = (qs.get("liveId") or [None])[0]  # 直播回放才有；用于 Liveid 解密头
+            if live_id:
+                video["liveId"] = live_id
+            m3u8 = (qs.get("m3u8") or [None])[0] or resolve_m3u8(self.gw.session, video)
+            if not m3u8:
+                self._send_json({"error": "no m3u8 (locked?)"}, 502)
+                return
+            vid = str(video["videoId"])
+            hdrs = play_headers(self.gw.session, video, m3u8)
+            with self.gw.vh_lock:
+                self.gw.video_headers[vid] = hdrs
+            # 当前在看的这集设为缓存"保护集"：顶到上限淘汰时最后才动它（防被挤出）。
+            self.gw.seg_cache.set_protect_vid(vid)
+            if self.gw.prefetch:
+                self.gw.start_prefetch(vid, m3u8)  # 后台整集预缓存；切走会自动暂停
+            self._send_json({"url": proxify(m3u8, video["videoId"]), "m3u8": m3u8})
+
+        def _fetch_upstream(self, target, vid, range_header=None):
+            with self.gw.vh_lock:
+                hdrs = self.gw.video_headers.get(vid, self.gw.base_headers) if vid else self.gw.base_headers
+            # 观看路径的回源 = 最高档 LIVE(0)：压过一切后台缓存。
+            return self.gw.pri_fetch(0, hdrs, target, range_header)
+
+        def _proxy(self, qs):
+            if "u" not in qs:
+                self._send_bytes(400, b"missing u", "text/plain")
+                return
+            target = qs["u"][0]
+            vid = (qs.get("vid") or [None])[0]
+
+            # 记录播放头：把这次直播分片请求映射到下标，预缓存据此向两边扩散。
+            # （密钥/缩略图等不在 pf_segidx 里，pos 为 None，自然不影响。）
+            si = self.gw.pf_segidx.get(vid)
+            if si is not None:
+                pos = si.get(target)
+                if pos is not None:
+                    self.gw.playhead[vid] = pos
+
+            # m3u8 播放列表：不缓存，取来改写
+            if looks_like_m3u8(target, ""):
+                try:
+                    data, _, _ = self._fetch_upstream(target, vid)
+                except Exception as e:  # noqa: BLE001
+                    self._send_bytes(502, str(e).encode("utf-8"), "text/plain")
+                    return
+                text = data.decode("utf-8", "replace")
+                # 观看路径顺带记下分片顺序：仅媒体播放列表(#EXTINF)，避免把 master 的子列表当分片。
+                if vid and "#EXTINF" in text:
+                    segs = parse_segments(text, target)
+                    if segs:
+                        self.gw.seg_urls[vid] = segs
+                        self.gw.seg_total[vid] = len(segs)
+                rewritten = rewrite_m3u8(text, target, vid)
+                self._send_bytes(200, rewritten.encode("utf-8"),
+                                 "application/vnd.apple.mpegurl")
+                return
+
+            # 分片 / 密钥：整段缓存，拖动到看过的位置秒开；并支持 Range（Safari 原生拖动）
+            ck = (target, vid)
+            cached = self.gw.seg_cache.get(ck)
+            if cached is None:
+                try:
+                    data, ctype, _ = self._fetch_upstream(target, vid)
+                except urllib.error.HTTPError as e:
+                    self._send_bytes(e.code, e.read() or b"",
+                                     e.headers.get("Content-Type", "text/plain"))
+                    return
+                except Exception as e:  # noqa: BLE001
+                    self._send_bytes(502, str(e).encode("utf-8"), "text/plain")
+                    return
+                ctype = ctype or "application/octet-stream"
+                self.gw.seg_cache.put(ck, (ctype, data))
+            else:
+                ctype, data = cached
+
+            self._serve_blob(data, ctype, self.headers.get("Range"))
+
+        def _serve_blob(self, data, ctype, range_header):
+            total = len(data)
+            rng = parse_range(range_header, total)
+            if rng is None:
+                self._send_bytes(200, data, ctype, {"Accept-Ranges": "bytes"})
+                return
+            start, end = rng
+            self._send_bytes(206, data[start:end + 1], ctype, {
+                "Accept-Ranges": "bytes",
+                "Content-Range": "bytes %d-%d/%d" % (start, end, total),
+            })
+
+    return Handler
+
+
+class _QuietServer(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+    def handle_error(self, request, client_address):
+        # 播放器/ffmpeg 提前断开连接很正常，不刷栈
+        if sys.exc_info()[0] in (ConnectionResetError, BrokenPipeError):
+            return
+        super().handle_error(request, client_address)
+
+
+def start_proxy(headers, port, default_url="", session=None, auto=None,
+                prefetch=True, cache_bytes=SEG_CACHE_BYTES, cache_dir=None):
+    gateway = Gateway(headers, session=session, auto=auto, prefetch=prefetch,
+                      cache_bytes=cache_bytes, port=port, cache_dir=cache_dir)
+    server = _QuietServer(("127.0.0.1", port), make_handler(gateway))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server
