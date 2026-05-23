@@ -37,6 +37,8 @@ export default function ArtPlayer({ src, thumbnails, startTime, onEnded, onTime,
         import("hls.js"),
       ]);
       if (cancelled || !ref.current) return;
+      // 长按快进：artplayer 默认 1000ms 触发偏长，缩短让长按更跟手
+      (Artplayer as any).FAST_FORWARD_TIME = 500;
       art = new Artplayer({
         container: ref.current,
         url: src,
