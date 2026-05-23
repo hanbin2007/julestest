@@ -1,16 +1,15 @@
 import { NextRequest } from "next/server";
 import { prisma } from "@/lib/db";
+import { noteAddSchema, parseBody } from "@/lib/validate";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 // 细粒度新增：服务端分配 id/at，避免多设备整列表互相覆盖。返回整列表供前端对账。
 export async function POST(req: NextRequest) {
-  const d = await req.json().catch(() => ({}));
-  const videoId = Number(d.videoId);
-  const text = String(d.text ?? "").trim();
-  if (!videoId || !text) return Response.json({ error: "need videoId+text" }, { status: 400 });
-  const t = Math.floor(Number(d.t) || 0);
+  const { data, error } = await parseBody(req, noteAddSchema);
+  if (error) return error;
+  const { videoId, text, t } = data;
   const id = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   await prisma.note.create({ data: { id, videoId, t, text } });
   const rows = await prisma.note.findMany({ where: { videoId }, orderBy: { t: "asc" } });

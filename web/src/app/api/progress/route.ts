@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
 import { prisma } from "@/lib/db";
+import { parseBody, progressSchema } from "@/lib/validate";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -23,15 +24,15 @@ export async function GET() {
 }
 
 export async function POST(req: NextRequest) {
-  const d = await req.json().catch(() => ({}));
-  const videoId = Number(d.videoId);
-  if (!videoId) return Response.json({ error: "missing videoId" }, { status: 400 });
+  const { data: body, error } = await parseBody(req, progressSchema);
+  if (error) return error;
+  const { videoId } = body;
   const data = {
-    t: Number(d.t) || 0,
-    d: Number(d.d) || 0,
-    productId: d.productId != null ? Number(d.productId) : null,
-    title: d.title ?? null,
-    courseName: d.courseName ?? null,
+    t: body.t,
+    d: body.d,
+    productId: body.productId ?? null,
+    title: body.title ?? null,
+    courseName: body.courseName ?? null,
   };
   await prisma.progress.upsert({
     where: { videoId },
