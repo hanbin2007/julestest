@@ -111,19 +111,26 @@ function CourseStatusCard({
         flexDirection: "column",
         cursor: "pointer",
         position: "relative",
-        // Left accent edge
-        boxShadow: `inset 3px 0 0 ${color}`,
         transition: "transform .15s, box-shadow .15s",
+        // 左侧分类色条：圆角药丸，竖直内缩 12px 避开卡片圆角——不再被圆角裁出怪弧
+        "&::before": {
+          content: '""',
+          position: "absolute",
+          left: 0,
+          top: "12px",
+          bottom: "12px",
+          width: "3px",
+          borderRadius: "999px",
+          backgroundColor: color,
+        },
         "&:hover": {
           transform: "translateY(-2px)",
-          boxShadow: `inset 3px 0 0 ${color}, 0 6px 20px rgba(0,0,0,.18)`,
+          boxShadow: "0 6px 20px rgba(0,0,0,.18)",
         },
-        // Focus-visible outline keeps the accent edge intact
         "&:focus-visible": {
           outline: "2px solid",
           outlineColor: color,
           outlineOffset: 2,
-          boxShadow: `inset 3px 0 0 ${color}`,
         },
         // Actions: visible at rest on mobile; subtly visible on desktop, full on hover/focus-within
         "& .card-actions": {
@@ -160,7 +167,7 @@ function CourseStatusCard({
           <Chip
             size="small"
             label={course.cardType}
-            sx={{ height: 18, fontSize: 10, flexShrink: 0, alignSelf: "flex-start" }}
+            sx={{ height: 22, fontSize: 11, flexShrink: 0, alignSelf: "flex-start" }}
           />
         )}
       </Box>
@@ -191,7 +198,7 @@ function CourseStatusCard({
         sx={{
           display: "flex",
           alignItems: "center",
-          columnGap: 0.75,
+          columnGap: 0.5,
           rowGap: 0.5,
           mt: 1,
           flexWrap: "wrap",
@@ -272,7 +279,7 @@ function Stat({
   muted?: boolean;
 }) {
   return (
-    <Box sx={{ display: "flex", alignItems: "baseline", gap: 0.75, lineHeight: 1.5 }}>
+    <Box sx={{ display: "flex", alignItems: "baseline", gap: 0.5, lineHeight: 1.5 }}>
       <Typography variant="caption" color="text.secondary" sx={{ width: 30 }}>
         {label}
       </Typography>

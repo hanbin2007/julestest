@@ -57,7 +57,7 @@ export default function CommandPalette({
       onClose={onClose}
       fullWidth
       maxWidth="sm"
-      PaperProps={{ sx: { borderRadius: 4, bgcolor: "md3.surfaceContainerHigh" } }}
+      PaperProps={{ sx: { borderRadius: (t) => t.radius.lg, bgcolor: "md3.surfaceContainerHigh" } }}
     >
       <Box sx={{ p: 2 }}>
         <TextField
@@ -97,7 +97,7 @@ export default function CommandPalette({
               selected={i === idx}
               onMouseEnter={() => setIdx(i)}
               onClick={() => pick(r)}
-              sx={{ borderRadius: 2 }}
+              sx={{ borderRadius: (t) => t.radius.sm }}
             >
               <Box sx={{ flex: 1, minWidth: 0 }}>
                 <Typography variant="body2" noWrap>

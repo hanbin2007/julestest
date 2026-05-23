@@ -34,7 +34,7 @@ function HealthBar({ health }: { health: CoursesStatus["health"] | undefined }) 
       }}
     >
       {/* Row 1: status chips */}
-      <Box sx={{ display: "flex", alignItems: "center", gap: 1, flexWrap: "wrap", rowGap: 0.75 }}>
+      <Box sx={{ display: "flex", alignItems: "center", gap: 1, flexWrap: "wrap", rowGap: 0.5 }}>
         <Chip
           size="small"
           icon={online ? <CloudDoneRoundedIcon /> : <CloudOffRoundedIcon />}

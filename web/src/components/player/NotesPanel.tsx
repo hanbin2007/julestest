@@ -92,7 +92,7 @@ export default function NotesPanel({
                 <ListItem key={n.id} disablePadding sx={{ alignItems: "flex-start", px: 1, py: 0.5, gap: 1 }}>
                   <Typography
                     variant="caption"
-                    sx={{ color: "primary.main", fontWeight: 700, mt: 1.2, fontVariantNumeric: "tabular-nums" }}
+                    sx={{ color: "primary.main", fontWeight: 700, mt: 1, fontVariantNumeric: "tabular-nums" }}
                   >
                     {fmtDur(n.t) || "0:00"}
                   </Typography>
@@ -152,7 +152,7 @@ export default function NotesPanel({
               >
                 <ListItemButton
                   onClick={() => onSeek(n.t)}
-                  sx={{ borderRadius: 2, alignItems: "flex-start", pr: 9 }}
+                  sx={{ borderRadius: (t) => t.radius.sm, alignItems: "flex-start", pr: 9 }}
                 >
                   <Typography
                     variant="caption"

@@ -19,7 +19,7 @@ function TaskRow({ task }: { task: TaskItem }) {
   const working = task.state === "working";
   const pct = task.cached != null && task.total ? Math.min(100, (task.cached / task.total) * 100) : null;
   return (
-    <Box sx={{ display: "flex", alignItems: "center", gap: 1, py: 0.75, px: 0.5 }}>
+    <Box sx={{ display: "flex", alignItems: "center", gap: 1, py: 0.5, px: 0.5 }}>
       {/* State indicator: spinner for working, muted dot for queued */}
       {working ? (
         <CircularProgress size={14} thickness={6} />
@@ -39,17 +39,17 @@ function TaskRow({ task }: { task: TaskItem }) {
           {task.courseName}
         </Typography>
         {pct != null && (
-          <LinearProgress variant="determinate" value={pct} sx={{ mt: 0.5, height: 4, borderRadius: "999px" }} />
+          <LinearProgress variant="determinate" value={pct} sx={{ mt: 0.5, height: 4, borderRadius: (t) => t.radius.full }} />
         )}
       </Box>
       {/* Right column: status chip + segment count, right-aligned and vertically stacked */}
-      <Box sx={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 0.25, flexShrink: 0 }}>
+      <Box sx={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 0.5, flexShrink: 0 }}>
         <Chip
           size="small"
           variant={working ? "filled" : "outlined"}
           color={working ? k.color : "default"}
           label={working ? "进行中" : "排队"}
-          sx={{ height: 18, fontSize: 10 }}
+          sx={{ height: 22, fontSize: 11 }}
         />
         {task.cached != null && (
           <Typography variant="caption" color="text.secondary" sx={{ fontVariantNumeric: "tabular-nums" }}>
@@ -88,11 +88,11 @@ function TaskQueuePanel({
           flexWrap: "wrap",
           gap: 1,
           rowGap: 0.5,
-          mb: 0.75,
+          mb: 1,
         }}
       >
         <Typography variant="subtitle2">任务队列</Typography>
-        <Chip size="small" label={`${working} 进行 · ${total} 总`} sx={{ height: 18, fontSize: 10 }} />
+        <Chip size="small" label={`${working} 进行 · ${total} 总`} sx={{ height: 22, fontSize: 11 }} />
         <Box sx={{ ml: "auto", display: "flex", alignItems: "center", gap: 1 }}>
           <Tooltip title="下载速率">
             <Typography variant="caption" color="text.secondary" sx={{ fontVariantNumeric: "tabular-nums" }}>
@@ -115,7 +115,7 @@ function TaskQueuePanel({
           maxHeight: 168,
           overflowY: "auto",
           border: (t) => `1px solid ${t.palette.divider}`,
-          borderRadius: "12px",
+          borderRadius: (t) => t.radius.md,
           px: 0.5,
         }}
       >

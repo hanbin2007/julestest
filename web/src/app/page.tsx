@@ -189,7 +189,16 @@ export default function PlayerView() {
   });
 
   const sidebar = (
-    <CourseSidebar courses={courses} loading={isLoading} activeVideoId={sel?.videoId ?? null} onSelect={selectVideo} />
+    <CourseSidebar
+      courses={courses}
+      loading={isLoading}
+      activeVideoId={sel?.videoId ?? last?.videoId ?? null}
+      activeCourseId={sel?.courseId ?? last?.productId ?? null}
+      onSelect={selectVideo}
+      onJumpToCurrent={() => {
+        if (!sel && last) resume(last.productId, last.videoId);
+      }}
+    />
   );
 
   return (
@@ -250,7 +259,7 @@ export default function PlayerView() {
                     width: "100%",
                     aspectRatio: "16/9",
                     bgcolor: "#000",
-                    borderRadius: 4,
+                    borderRadius: (t) => t.radius.lg,
                     overflow: "hidden",
                     boxShadow: 6,
                   }}
