@@ -41,6 +41,7 @@ import os
 import queue
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -54,6 +55,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
 SEG_CACHE_BYTES = 256 * 1024 * 1024  # 分片缓存上限（约 256MB，够前后拖动很大范围）
+# 三档流量优先级：0=LIVE(观看) > 1=AUTO(自动缓存) > 2=MANUAL(手动缓存)。
+# 每档“活跃”后再静默这么久，挡住更低档抢这台机器有限的下行带宽。
+#   LIVE 1.5：观看分片成簇到达，静默稍长，簇间不让后台插进来。
+#   AUTO 0.5：预缓存循环很紧，段间空隙极小；>0 才能保证“当前这集自动补完前手动不抢”。
+#   MANUAL 0：其下无更低档，无需 grace。
+PRI_GRACE = {0: 1.5, 1: 0.5, 2: 0.0}
 _RANGE_RE = re.compile(r"bytes=(\d*)-(\d*)")
 
 
@@ -81,13 +88,95 @@ def _parse_range(range_header, total):
 class _DiskLRU:
     """磁盘上的分片/密钥缓存（按总字节数 LRU）。整集预缓存几百 MB 也不吃内存。"""
 
-    def __init__(self, max_bytes):
+    def __init__(self, max_bytes, persist_dir=None):
         self.max = max_bytes
-        self.dir = tempfile.mkdtemp(prefix="ydcourse_cache_")
-        self.meta = OrderedDict()  # key -> (ctype, size, fname)
+        self.meta = OrderedDict()  # key(url,vid) -> (ctype, size, fname)
         self.size = 0
         self.lock = threading.Lock()
-        atexit.register(self.cleanup)
+        self._io_lock = threading.Lock()   # 串行化 index 落盘
+        self._dirty = False
+        self.protect_vid = None    # 当前在看那集；淘汰时优先丢别的，最后才动它
+        self.persist = bool(persist_dir)
+        if self.persist:
+            # 固定目录 + index.json：重启不清缓存。
+            self.dir = persist_dir
+            os.makedirs(self.dir, exist_ok=True)
+            self.index_path = os.path.join(self.dir, "index.json")
+            self._load_index()
+            threading.Thread(target=self._flush_loop, daemon=True).start()
+            atexit.register(self._save_index)
+        else:
+            self.dir = tempfile.mkdtemp(prefix="ydcourse_cache_")
+            self.index_path = None
+            atexit.register(self.cleanup)
+
+    # ---- 持久化：index.json 记录 key->(ctype,size,fname) 与 LRU 顺序 ----
+    def _load_index(self):
+        items = []
+        try:
+            with open(self.index_path, "r", encoding="utf-8") as f:
+                items = json.load(f) or []
+        except Exception:  # noqa: BLE001
+            items = []
+        size = 0
+        for entry in items:
+            try:
+                k, v = entry
+                key = (k[0], k[1]); ctype, sz, fname = v
+            except Exception:  # noqa: BLE001
+                continue
+            if os.path.exists(os.path.join(self.dir, fname)):  # 文件还在才算数
+                self.meta[key] = (ctype, sz, fname)
+                size += sz
+        self.size = size
+        # 清掉 index 里没有的孤儿文件（崩溃残留 / 半截 .tmp），避免白占盘
+        keep = {m[2] for m in self.meta.values()}
+        keep.add("index.json")
+        try:
+            for fn in os.listdir(self.dir):
+                if fn not in keep:
+                    try:
+                        os.remove(os.path.join(self.dir, fn))
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+
+    def _save_index(self):
+        if not self.persist:
+            return
+        with self.lock:
+            if not self._dirty:
+                return
+            items = [[list(k), [v[0], v[1], v[2]]] for k, v in self.meta.items()]
+            self._dirty = False
+        with self._io_lock:
+            tmp = self.index_path + ".tmp"
+            try:
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(items, f)
+                os.replace(tmp, self.index_path)   # 原子替换，避免半截 index
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _flush_loop(self):
+        while True:
+            time.sleep(8)      # 每 8s 落盘一次（脏了才写）；硬杀最多丢 8s 内新写的几片
+            self._save_index()
+
+    def set_protect_vid(self, vid):
+        with self.lock:
+            self.protect_vid = vid
+
+    def _pick_victim(self):
+        # 持锁调用。meta 头部=最久未用。优先丢最久未用的“非保护集”分片；
+        # 没有非保护项时（全是保护集）才丢最旧的保护集分片。key 形如 (url, vid)。
+        pv = self.protect_vid
+        if pv is not None:
+            for key in self.meta:
+                if key[1] != pv:
+                    return key
+        return next(iter(self.meta))
 
     @staticmethod
     def _fname(key):
@@ -128,12 +217,16 @@ class _DiskLRU:
             self.size += n
             self.meta.move_to_end(key)
             while self.size > self.max and len(self.meta) > 1:
-                _, (_, s, f) = self.meta.popitem(last=False)
+                victim = self._pick_victim()
+                if victim == key:   # 别把刚写入的这片当场淘汰（极端：单片即超限）
+                    break
+                _, s, f = self.meta.pop(victim)
                 self.size -= s
                 try:
                     os.remove(os.path.join(self.dir, f))
                 except OSError:
                     pass
+            self._dirty = True   # 内容/顺序变了，待 _flush_loop 落盘
 
     def count_vid(self, vid):
         with self.lock:
@@ -968,15 +1061,46 @@ THUMB_COLS = 10
 # 缩略图持久化目录（生成后不删，跨会话复用）
 THUMB_DIR = os.path.join(os.path.expanduser("~"), ".youdao_course", "thumbs")
 THUMB_WORKERS = 3
+# 分片缓存持久化目录：固定位置 + index.json，重启不清缓存。
+CACHE_DIR = os.path.join(os.path.expanduser("~"), ".youdao_course", "cache")
 
 
 def make_handler(base_headers, default_url="", session=None, auto=None,
-                 prefetch=True, cache_bytes=SEG_CACHE_BYTES, port=8808):
+                 prefetch=True, cache_bytes=SEG_CACHE_BYTES, port=8808,
+                 cache_dir=None):
     session = session if session is not None else base_headers
     page = APP_HTML.replace("__AUTO__", json.dumps(auto) if auto else "null")
     video_headers = {}
     vh_lock = threading.Lock()
-    seg_cache = _DiskLRU(cache_bytes)
+    seg_cache = _DiskLRU(cache_bytes, cache_dir)
+
+    # 三档优先级闸门：0=LIVE(观看) > 1=AUTO(自动缓存) > 2=MANUAL(手动缓存)。
+    # 某档回源前先 pri_acquire(档)：只等更高档活跃或在 grace，自己永不被同/低档挡。
+    # 这样观看永远抢先，自动缓存其次，手动缓存只在更高档空闲时才用带宽。
+    net_cond = threading.Condition()
+    _pri_n = {0: 0, 1: 0, 2: 0}        # 各档在途回源数
+    _pri_until = {0: 0.0, 1: 0.0, 2: 0.0}  # 各档活跃后的 grace 截止时刻
+
+    def pri_acquire(t):
+        with net_cond:
+            # wait 与自增同一临界区：避免 wait 后、自增前被更高档插队（TOCTOU）。
+            while any(_pri_n[h] > 0 or time.time() < _pri_until[h] for h in range(t)):
+                net_cond.wait(0.2)     # grace 靠时钟到期，必须超时轮询
+            _pri_n[t] += 1
+
+    def pri_release(t):
+        with net_cond:
+            _pri_n[t] -= 1
+            _pri_until[t] = time.time() + PRI_GRACE[t]
+            net_cond.notify_all()
+
+    def pri_fetch(t, hdrs, url, range_header=None):
+        """按优先级档位回源；try/finally 保证档计数永不泄漏。"""
+        pri_acquire(t)
+        try:
+            return upstream_fetch(hdrs, url, range_header)
+        finally:
+            pri_release(t)
 
     # 缩略图雪碧图：服务端用 ffmpeg 生成（复用已缓存分片），供 Artplayer 拖动预览。
     # 持久化到 ~/.youdao_course/thumbs，生成后不删，跨会话复用。
@@ -1006,16 +1130,16 @@ def make_handler(base_headers, default_url="", session=None, auto=None,
 
     def _thumb_worker():
         while True:
-            vid, m3u8, duration = thumb_q.get()
+            vid, m3u8, duration, tier = thumb_q.get()
             try:
-                _gen_thumbs(vid, m3u8, duration)
+                _gen_thumbs(vid, m3u8, duration, tier)
             except Exception as e:  # noqa: BLE001
                 with thumb_lock:
                     thumb_meta[vid] = {"state": "error", "reason": str(e)}
             finally:
                 thumb_q.task_done()
 
-    def _gen_thumbs(vid, m3u8, duration):
+    def _gen_thumbs(vid, m3u8, duration, tier):
         if duration <= 0:
             duration = 600
         number = max(1, int(duration // THUMB_INTERVAL))
@@ -1028,9 +1152,9 @@ def make_handler(base_headers, default_url="", session=None, auto=None,
             with thumb_lock:
                 thumb_meta[vid] = {"state": "error", "reason": "no headers"}
             return
-        # 先并行把低清分片+密钥灌进缓存，ffmpeg 再顺序读缓存就很快
+        # 先按档位把低清分片+密钥灌进缓存，ffmpeg 再顺序读缓存就很快
         try:
-            pl, _, _ = upstream_fetch(th, m3u8)
+            pl, _, _ = pri_fetch(tier, th, m3u8)
             text = pl.decode("utf-8", "replace")
             urls = [urllib.parse.urljoin(m3u8, ln.strip())
                     for ln in text.splitlines() if ln.strip() and not ln.startswith("#")]
@@ -1042,11 +1166,12 @@ def make_handler(base_headers, default_url="", session=None, auto=None,
                 if seg_cache.has((u, tvid)):
                     return
                 try:
-                    d, c, _ = upstream_fetch(th, u)
+                    d, c, _ = pri_fetch(tier, th, u)
                     seg_cache.put((u, tvid), (c or "video/mp2t", d))
                 except Exception:  # noqa: BLE001
                     pass
-            with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+            # 并发收紧到 1：受限下行下，高档抢占时不可取消的在途下载越少越好。
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
                 list(ex.map(_grab, urls))
         except Exception:  # noqa: BLE001
             pass
@@ -1056,7 +1181,11 @@ def make_handler(base_headers, default_url="", session=None, auto=None,
               "crop=%d:%d,tile=%dx%d" % (THUMB_INTERVAL, THUMB_W, THUMB_H,
                                          THUMB_W, THUMB_H, THUMB_COLS, rows))
         # -skip_frame nokey：只解关键帧，配合 fps 过滤器既保持均匀间隔又大幅加速
-        cmd = ["ffmpeg", "-y", "-nostdin", "-skip_frame", "nokey", "-i", proxied,
+        # -allowed_extensions ALL + -extension_picky 0：ffmpeg 8 默认按扩展名校验，会拒绝
+        # 代理段地址（…&vid=t_xxx，无 .ts 后缀），不加这俩缩略图会 rc=183 失败。
+        cmd = ["ffmpeg", "-y", "-nostdin",
+               "-allowed_extensions", "ALL", "-extension_picky", "0",
+               "-skip_frame", "nokey", "-i", proxied,
                "-an", "-vf", vf, "-frames:v", "1", "-q:v", "6", out, "-loglevel", "error"]
         rc = subprocess.call(cmd)
         if rc == 0 and os.path.exists(out):
@@ -1069,8 +1198,9 @@ def make_handler(base_headers, default_url="", session=None, auto=None,
             with thumb_lock:
                 thumb_meta[vid] = {"state": "error", "reason": "ffmpeg rc=%d" % rc}
 
-    def start_thumbs(video, m3u8, duration):
-        """video: {videoId,contentId,cardPackageId,productId}; m3u8: 低清地址。"""
+    def start_thumbs(video, m3u8, duration, tier=2):
+        """video: {videoId,contentId,cardPackageId,productId}; m3u8: 低清地址。
+        tier: 播放时自动触发=1(AUTO)，手动批量=2(MANUAL)。"""
         vid = str(video["videoId"])
         if not have_ffmpeg:
             return {"state": "error", "reason": "no ffmpeg"}
@@ -1081,7 +1211,7 @@ def make_handler(base_headers, default_url="", session=None, auto=None,
             thumb_meta[vid] = {"state": "gen"}
         with vh_lock:
             video_headers["t_" + vid] = play_headers(session, video, m3u8)
-        thumb_q.put((vid, m3u8, duration))
+        thumb_q.put((vid, m3u8, duration, tier))
         return {"state": "gen"}
 
     for _ in range(max(1, THUMB_WORKERS)):
@@ -1094,11 +1224,14 @@ def make_handler(base_headers, default_url="", session=None, auto=None,
     buf_q = queue.Queue()
 
     def _buffer_one(video, m3u8):
+        # 手动缓存（MANUAL，档 2）：让位给观看(0)和自动缓存(1)。注意：要和自动缓存
+        # 合并到同一集，二者须用同一清晰度——目前前端 pickM3u8/MK_BUF 与播放都取最高清，
+        # key 同为 (seg_url, vid) 故天然合并；若改播放器清晰度选择，需同步前端取值。
         vid = str(video["videoId"])
         th = play_headers(session, video, m3u8)
         with vh_lock:
             video_headers[vid] = th
-        pl, _, _ = upstream_fetch(th, m3u8)
+        pl, _, _ = pri_fetch(2, th, m3u8)
         text = pl.decode("utf-8", "replace")
         segs = [urllib.parse.urljoin(m3u8, ln.strip())
                 for ln in text.splitlines() if ln.strip() and not ln.startswith("#")]
@@ -1112,11 +1245,12 @@ def make_handler(base_headers, default_url="", session=None, auto=None,
             if seg_cache.has((u, vid)):
                 return
             try:
-                d, c, _ = upstream_fetch(th, u)
-                seg_cache.put((u, vid), (c or "video/mp2t", d))
+                d, c, _ = pri_fetch(2, th, u)
+                seg_cache.put((u, vid), (c or "video/mp2t", d))  # 每片下完即可被播放器命中
             except Exception:  # noqa: BLE001
                 pass
-        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+        # 并发收紧到 1：手动缓存最低优先，抢占时在途下载越少观看越稳。
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
             list(ex.map(_grab, urls))
 
     def _buffer_worker():
@@ -1143,20 +1277,23 @@ def make_handler(base_headers, default_url="", session=None, auto=None,
             buf_state[vid] = "queued"
         buf_q.put((video, m3u8))
 
-    for _ in range(2):
-        threading.Thread(target=_buffer_worker, daemon=True).start()
+    # 单工作线程 = 严格 FIFO 队列、一次缓一集；手动最低优先，越不抢越好。
+    threading.Thread(target=_buffer_worker, daemon=True).start()
 
-    # 整集后台预缓存：边看边把整节课下到磁盘缓存；切走的那节自动暂停
+    # 自动缓存（AUTO，档 1）：以“播放头”为中心、向前后双向不停补未缓存的分片（缓一点用
+    # 一点）。让位给观看(0)、压过手动(1>2)；已缓存的不删除非顶到 LRU 上限。切走的那节自动暂停。
     pf_lock = threading.Lock()
     pf_active = {"vid": None}
-    pf_threads = {}  # vid -> (thread, stop_event)
+    pf_threads = {}   # vid -> (thread, stop_event)
+    pf_segidx = {}    # vid -> {seg_url: index}（把直播请求映射到播放头下标）
+    playhead = {}     # vid -> 最近一次直播请求到的分片下标（预缓存以它为中心扩散）
 
     def _prefetch_worker(vid, m3u8, stop):
         hdrs = video_headers.get(vid)
         if not hdrs:
             return
         try:
-            data, _, _ = upstream_fetch(hdrs, m3u8)
+            data, _, _ = pri_fetch(1, hdrs, m3u8)
         except Exception:  # noqa: BLE001
             return
         text = data.decode("utf-8", "replace")
@@ -1166,23 +1303,52 @@ def make_handler(base_headers, default_url="", session=None, auto=None,
                 kabs = urllib.parse.urljoin(m3u8, re.search(r'URI="([^"]+)"', line).group(1))
                 if not seg_cache.has((kabs, vid)):
                     try:
-                        kd, kc, _ = upstream_fetch(hdrs, kabs)
+                        kd, kc, _ = pri_fetch(1, hdrs, kabs)
                         seg_cache.put((kabs, vid), (kc or "application/octet-stream", kd))
                     except Exception:  # noqa: BLE001
                         pass
         segs = [urllib.parse.urljoin(m3u8, ln.strip())
                 for ln in text.splitlines() if ln.strip() and not ln.startswith("#")]
-        seg_total[vid] = len(segs)
-        for s in segs:
-            if stop.is_set() or pf_active["vid"] != vid:
-                return  # 被切走 -> 暂停（已缓存的保留，回来可续）
-            if seg_cache.has((s, vid)):
+        n = len(segs)
+        seg_total[vid] = n
+        if n == 0:
+            return
+        pf_segidx[vid] = {u: i for i, u in enumerate(segs)}
+
+        def _order(center):
+            # 以播放头为中心、前后交替向外扩散的下标序（前方优先一格）。
+            if 0 <= center < n:
+                yield center
+            for d in range(1, n):
+                f, b = center + d, center - d
+                if f < n:
+                    yield f
+                if b >= 0:
+                    yield b
+
+        # 不停地以播放头为中心、前后双向补未缓存分片；播放头一动就立刻重新居中。
+        while not stop.is_set() and pf_active["vid"] == vid:
+            center = playhead.get(vid, 0)
+            fetched = recenter = False
+            for idx in _order(center):
+                if stop.is_set() or pf_active["vid"] != vid:
+                    return  # 被切走 -> 停（已缓存的保留，回来可续）
+                if playhead.get(vid, 0) != center:
+                    recenter = True
+                    break  # 播放头移动了 -> 重新居中
+                s = segs[idx]
+                if seg_cache.has((s, vid)):
+                    continue
+                try:
+                    d, c, _ = pri_fetch(1, hdrs, s)
+                    seg_cache.put((s, vid), (c or "video/mp2t", d))
+                    fetched = True
+                except Exception:  # noqa: BLE001
+                    pass
+            if recenter:
                 continue
-            try:
-                d, c, _ = upstream_fetch(hdrs, s)
-                seg_cache.put((s, vid), (c or "video/mp2t", d))
-            except Exception:  # noqa: BLE001
-                pass
+            if not fetched:
+                time.sleep(2.0)  # 整集已在缓存里，歇会儿再巡（播放头移动/被淘汰后回补）
 
     def start_prefetch(vid, m3u8):
         with pf_lock:
@@ -1346,7 +1512,7 @@ def make_handler(base_headers, default_url="", session=None, auto=None,
             if not tv:
                 self._send_json({"state": "error", "reason": "need ids+src"}, 400)
                 return
-            self._send_json(start_thumbs(*tv))
+            self._send_json(start_thumbs(*tv, tier=1))  # 播放时自动触发 → AUTO
 
         def _api_thumbs_batch(self):
             try:
@@ -1364,7 +1530,7 @@ def make_handler(base_headers, default_url="", session=None, auto=None,
                     continue
                 tv = self._thumb_video(d)
                 if tv:
-                    start_thumbs(*tv)
+                    start_thumbs(*tv, tier=2)  # 手动批量 → MANUAL
                     queued += 1
                 else:
                     skipped += 1
@@ -1443,6 +1609,8 @@ def make_handler(base_headers, default_url="", session=None, auto=None,
             hdrs = play_headers(session, video, m3u8)
             with vh_lock:
                 video_headers[vid] = hdrs
+            # 当前在看的这集设为缓存“保护集”：顶到上限淘汰时最后才动它（防被挤出）。
+            seg_cache.set_protect_vid(vid)
             if prefetch:
                 start_prefetch(vid, m3u8)  # 后台整集预缓存；切走会自动暂停
             self._send_json({"url": _proxify(m3u8, video["videoId"]), "m3u8": m3u8})
@@ -1450,7 +1618,8 @@ def make_handler(base_headers, default_url="", session=None, auto=None,
         def _fetch_upstream(self, target, vid, range_header=None):
             with vh_lock:
                 hdrs = video_headers.get(vid, base_headers) if vid else base_headers
-            return upstream_fetch(hdrs, target, range_header)
+            # 观看路径的回源 = 最高档 LIVE(0)：压过一切后台缓存。
+            return pri_fetch(0, hdrs, target, range_header)
 
         def _proxy(self, qs):
             if "u" not in qs:
@@ -1458,6 +1627,14 @@ def make_handler(base_headers, default_url="", session=None, auto=None,
                 return
             target = qs["u"][0]
             vid = (qs.get("vid") or [None])[0]
+
+            # 记录播放头：把这次直播分片请求映射到下标，预缓存据此向两边扩散。
+            # （密钥/缩略图等不在 pf_segidx 里，pos 为 None，自然不影响。）
+            si = pf_segidx.get(vid)
+            if si is not None:
+                pos = si.get(target)
+                if pos is not None:
+                    playhead[vid] = pos
 
             # m3u8 播放列表：不缓存，取来改写
             if _looks_like_m3u8(target, ""):
@@ -1518,10 +1695,10 @@ class _QuietServer(ThreadingHTTPServer):
 
 
 def start_proxy(headers, port, default_url="", session=None, auto=None,
-                prefetch=True, cache_bytes=SEG_CACHE_BYTES):
+                prefetch=True, cache_bytes=SEG_CACHE_BYTES, cache_dir=None):
     server = _QuietServer(("127.0.0.1", port),
                           make_handler(headers, default_url, session, auto,
-                                       prefetch, cache_bytes, port))
+                                       prefetch, cache_bytes, port, cache_dir))
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     return server
@@ -1736,17 +1913,22 @@ def cmd_serve(args):
         else:
             print("没找到该 videoId，将正常打开课程列表。")
     prefetch = not args.no_prefetch
+    # 让 kill(SIGTERM) 也走 KeyboardInterrupt 优雅退出路径，从而触发 index 落盘。
+    signal.signal(signal.SIGTERM, signal.default_int_handler)
     server = start_proxy(session, args.port, "", session, auto,
-                         prefetch, args.cache_mb * 1024 * 1024)
+                         prefetch, args.cache_mb * 1024 * 1024, args.cache_dir)
     print("课程网页已启动： http://127.0.0.1:%d" % args.port)
     print("左侧选课、选讲即可播放，支持搜索 / 倍速 / 上下一讲。Ctrl-C 退出。")
+    print("缓存持久化目录：%s（重启不清，上限 %d MB，到顶按 LRU 淘汰）"
+          % (args.cache_dir, args.cache_mb))
     if prefetch:
-        print("整集预缓存：已开（边看边下整节课，切走自动暂停；缓存上限 %d MB）" % args.cache_mb)
+        print("后台预缓存：已开（以播放头为中心前后双向补片，给观看让路）")
     try:
         while True:
             time.sleep(3600)
     except KeyboardInterrupt:
-        print("\n已退出。")
+        # 正常退出 -> atexit 触发 _DiskLRU._save_index 落盘（kill 已被路由到这里）。
+        print("\n正在保存缓存索引并退出……")
         server.shutdown()
 
 
@@ -1806,8 +1988,10 @@ def build_parser():
     sp.add_argument("--video", "-V", help="打开时自动播放的 videoId（用 list 查到）。")
     sp.add_argument("--no-prefetch", action="store_true",
                     help="关闭整集后台预缓存（默认开启：边看边下整节课，切走自动暂停）。")
-    sp.add_argument("--cache-mb", type=int, default=3072,
-                    help="磁盘分片缓存上限 MB（默认 3072）。")
+    sp.add_argument("--cache-mb", type=int, default=5120,
+                    help="磁盘分片缓存上限 MB（默认 5120≈5G，到顶才按 LRU 淘汰）。")
+    sp.add_argument("--cache-dir", default=CACHE_DIR,
+                    help="缓存持久化目录（默认 ~/.youdao_course/cache，重启不清）。")
     sp.set_defaults(func=cmd_serve)
 
     dp = sub.add_parser("download", parents=[common], help="下载并合并成 mp4（需要 ffmpeg）。")
