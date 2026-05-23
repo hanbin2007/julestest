@@ -1,6 +1,6 @@
 "use client";
 import * as React from "react";
-import { drawAll, type Stroke, type Tool, WIDTHS } from "./strokes";
+import { renderStrokes, type Stroke, type Tool, WIDTHS } from "./strokes";
 
 // 批注状态：当前工具/颜色/线宽 + 笔画列表 + 撤销/重做。
 // 画布绘制在 AnnotationLayer，本 hook 只管数据与历史。
@@ -84,27 +84,20 @@ export async function bakeWithServerFrame(
     const res = await fetch(`/api/frame?src=${encodeURIComponent(src)}&t=${Math.floor(t)}`);
     if (!res.ok) return null;
     const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
-    try {
-      const img = await new Promise<HTMLImageElement>((resolve, reject) => {
-        const im = new Image();
-        im.onload = () => resolve(im);
-        im.onerror = reject;
-        im.src = url;
-      });
-      const cw = img.naturalWidth || 1280;
-      const ch = img.naturalHeight || 720;
-      const c = document.createElement("canvas");
-      c.width = cw;
-      c.height = ch;
-      const ctx = c.getContext("2d");
-      if (!ctx) return null;
-      ctx.drawImage(img, 0, 0, cw, ch);
-      drawAll(ctx, strokes, cw, ch);
-      return c.toDataURL("image/jpeg", 0.85);
-    } finally {
-      URL.revokeObjectURL(url);
-    }
+    if (!blob.size) return null;
+    // createImageBitmap 比 Image+objectURL 可靠（后者在部分浏览器/无头里会静默失败）。
+    const bmp = await createImageBitmap(blob);
+    const cw = bmp.width || 1280;
+    const ch = bmp.height || 720;
+    const c = document.createElement("canvas");
+    c.width = cw;
+    c.height = ch;
+    const ctx = c.getContext("2d");
+    if (!ctx) return null;
+    ctx.drawImage(bmp, 0, 0, cw, ch);
+    bmp.close?.();
+    renderStrokes(ctx, strokes, cw, ch); // 在帧之上画笔迹（不要 clear，否则擦掉帧）
+    return c.toDataURL("image/jpeg", 0.85);
   } catch {
     return null;
   }
@@ -133,7 +126,7 @@ export function bakeAnnotation(video: HTMLVideoElement | null | undefined, strok
   if (video && vw && (video.readyState ?? 0) >= 2) {
     try {
       ctx.drawImage(video, 0, 0, cw, ch);
-      drawAll(ctx, strokes, cw, ch);
+      renderStrokes(ctx, strokes, cw, ch); // 不要 clear，否则擦掉刚画的帧
       return { image: c.toDataURL("image/jpeg", 0.85), kind: "composite" };
     } catch {
       /* 跨源污染 → 退化 */
@@ -142,7 +135,7 @@ export function bakeAnnotation(video: HTMLVideoElement | null | undefined, strok
   // 兜底（拿不到画面帧 / 跨源污染）：中性底 + 笔迹，仍导出 JPEG（与截图通道一致）。
   ctx.fillStyle = "#1b1b1f";
   ctx.fillRect(0, 0, cw, ch);
-  drawAll(ctx, strokes, cw, ch);
+  renderStrokes(ctx, strokes, cw, ch);
   try {
     return { image: c.toDataURL("image/jpeg", 0.85), kind: "ink" };
   } catch {

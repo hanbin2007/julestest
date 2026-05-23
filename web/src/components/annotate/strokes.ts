@@ -96,9 +96,15 @@ export function drawStroke(ctx: CanvasRenderingContext2D, s: Stroke, w: number, 
   ctx.restore();
 }
 
+// 只画笔迹，不清画布——合成「画面帧 + 笔迹」时用（否则会把帧擦掉）。
+export function renderStrokes(ctx: CanvasRenderingContext2D, strokes: Stroke[], w: number, h: number) {
+  for (const s of strokes) drawStroke(ctx, s, w, h);
+}
+
+// 清空后重画全部笔迹——给实时叠加画布（AnnotationLayer）用。
 export function drawAll(ctx: CanvasRenderingContext2D, strokes: Stroke[], w: number, h: number) {
   ctx.clearRect(0, 0, w, h);
-  for (const s of strokes) drawStroke(ctx, s, w, h);
+  renderStrokes(ctx, strokes, w, h);
 }
 
 // ---- 橡皮：命中测试（归一化点到笔画的距离，单位回到 px 比较）----

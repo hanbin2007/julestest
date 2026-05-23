@@ -188,14 +188,20 @@ export default function AnnotationToolbar({
         {/* 动作 */}
         <Tooltip title="存入笔记">
           <span>
-            <IconButton size="small" color="primary" disabled={busy || (!hasInk && !text.trim())} onClick={onSaveNote}>
+            <IconButton
+              size="small"
+              color="primary"
+              aria-label="存入笔记"
+              disabled={busy || (!hasInk && !text.trim())}
+              onClick={onSaveNote}
+            >
               <NoteAddRoundedIcon fontSize="small" />
             </IconButton>
           </span>
         </Tooltip>
         <Tooltip title="问 Claude">
           <span>
-            <IconButton size="small" color="primary" disabled={busy} onClick={onAskClaude}>
+            <IconButton size="small" color="primary" aria-label="问 Claude" disabled={busy} onClick={onAskClaude}>
               <AutoAwesomeRoundedIcon fontSize="small" />
             </IconButton>
           </span>
