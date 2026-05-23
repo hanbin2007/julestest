@@ -1,7 +1,7 @@
 "use client";
-import useSWR from "swr";
+import useSWR, { mutate as globalMutate } from "swr";
 import * as api from "@/lib/api";
-import type { LastWatched, Note, Prefs, ProgressMap } from "@/lib/store";
+import type { EnrichedNote, LastWatched, Note, NotesStats, Prefs, ProgressMap } from "@/lib/store";
 
 // 状态全部走服务端（SQLite），SWR 缓存 + 焦点重验 = 跨设备同步。
 
@@ -60,6 +60,76 @@ export function useNotes(videoId: number | null) {
   };
 
   return { notes, add, update, remove };
+}
+
+// 统一管理：全量富化笔记 + 统计。改/删复用单讲端点，删按全局唯一 id 批量。
+// 每次变更顺带重验对应单讲 key(/api/notes?videoId=)，让看课页抽屉同步。
+export function useAllNotes() {
+  const { data, mutate } = useSWR("/api/notes/all", () => api.getAllNotes(), {
+    revalidateOnFocus: true,
+  });
+  const notes: EnrichedNote[] = data?.notes ?? [];
+  const stats: NotesStats = data?.stats ?? { total: 0, videos: 0, courses: 0 };
+
+  const revalidateVideo = (videoId: number) => globalMutate(`/api/notes?videoId=${videoId}`);
+
+  const update = async (videoId: number, id: string, text: string) => {
+    const next = text.trim();
+    if (!next) return;
+    await mutate(
+      async () => {
+        await api.updateNote(videoId, id, next);
+        void revalidateVideo(videoId);
+        return api.getAllNotes();
+      },
+      {
+        optimisticData: data
+          ? { ...data, notes: notes.map((n) => (n.id === id ? { ...n, text: next } : n)) }
+          : undefined,
+        rollbackOnError: true,
+        revalidate: false,
+      },
+    );
+  };
+
+  const remove = async (videoId: number, id: string) => {
+    await mutate(
+      async () => {
+        await api.deleteNote(videoId, id);
+        void revalidateVideo(videoId);
+        return api.getAllNotes();
+      },
+      {
+        optimisticData: data
+          ? { ...data, notes: notes.filter((n) => n.id !== id) }
+          : undefined,
+        rollbackOnError: true,
+        revalidate: false,
+      },
+    );
+  };
+
+  const removeBatch = async (ids: string[]) => {
+    if (ids.length === 0) return;
+    const idset = new Set(ids);
+    const affected = new Set(notes.filter((n) => idset.has(n.id)).map((n) => n.videoId));
+    await mutate(
+      async () => {
+        await api.deleteNotesBatch(ids);
+        affected.forEach((v) => void revalidateVideo(v));
+        return api.getAllNotes();
+      },
+      {
+        optimisticData: data
+          ? { ...data, notes: notes.filter((n) => !idset.has(n.id)) }
+          : undefined,
+        rollbackOnError: true,
+        revalidate: false,
+      },
+    );
+  };
+
+  return { notes, stats, update, remove, removeBatch };
 }
 
 export function usePrefs() {

@@ -24,6 +24,37 @@ export interface Note {
   at: number; // ms
 }
 
+// 缩略图雪碧图元数据（多为 null，前端按常量回退）。
+export interface ThumbMeta {
+  url?: string | null;
+  number?: number | null;
+  column?: number | null;
+  width?: number | null;
+  height?: number | null;
+}
+
+// 跨讲富化的笔记：附带所属课程/讲次/时长/缩略图状态，供统一管理界面。
+export interface EnrichedNote {
+  id: string;
+  videoId: number;
+  t: number; // 时间戳（秒）
+  text: string;
+  at: number; // ms
+  courseId: number;
+  courseName: string;
+  lessonTitle: string;
+  duration: number | null;
+  kind: "vod" | "live";
+  thumbState: string | null; // gen/ready/error/null
+  thumb?: ThumbMeta;
+}
+
+export interface NotesStats {
+  total: number; // 笔记总数
+  videos: number; // 已标注的讲数（distinct videoId）
+  courses: number; // 覆盖课程数（distinct courseId）
+}
+
 export interface Prefs {
   rate: number;
   density: "comfortable" | "compact";

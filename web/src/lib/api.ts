@@ -14,8 +14,10 @@ import type {
   Video,
 } from "@/types/api";
 import type {
+  EnrichedNote,
   LastWatched,
   Note,
+  NotesStats,
   Prefs,
   ProgressEntry,
   ProgressMap,
@@ -107,6 +109,12 @@ export const updateNote = (videoId: number, id: string, text: string) =>
   postJson<{ ok: boolean; notes: Note[] }>("/api/notes/update", { videoId, id, text });
 export const deleteNote = (videoId: number, id: string) =>
   postJson<{ ok: boolean; notes: Note[] }>("/api/notes/delete", { videoId, id });
+
+// 统一管理：全量富化笔记 + 统计；批量删除（按全局唯一 id）。
+export const getAllNotes = () =>
+  fetcher<{ notes: EnrichedNote[]; stats: NotesStats }>("/api/notes/all");
+export const deleteNotesBatch = (ids: string[]) =>
+  postJson<{ ok: boolean; deleted: number }>("/api/notes/delete-batch", { ids });
 
 export const getSettings = () =>
   fetcher<{ prefs: Prefs; last: LastWatched | null }>("/api/settings");
