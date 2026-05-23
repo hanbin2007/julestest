@@ -195,8 +195,8 @@ def build_parser():
     sp.add_argument("--video", "-V", help="打开时自动播放的 videoId（用 list 查到）。")
     sp.add_argument("--no-prefetch", action="store_true",
                     help="关闭整集后台预缓存（默认开启：边看边下整节课，切走自动暂停）。")
-    sp.add_argument("--cache-mb", type=int, default=5120,
-                    help="磁盘分片缓存上限 MB（默认 5120≈5G，到顶才按 LRU 淘汰）。")
+    sp.add_argument("--cache-mb", type=int, default=20480,
+                    help="磁盘分片缓存上限 MB（默认 20480≈20G，到顶才按 LRU 淘汰）。")
     sp.add_argument("--cache-dir", default=None,
                     help="缓存持久化目录（一次性覆盖，不写回配置；缺省读 config.json，"
                          "再退回 ~/.youdao_course/cache）。常驻设置请在网页「设置」里改。")
