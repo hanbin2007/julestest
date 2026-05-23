@@ -19,15 +19,18 @@ function TaskRow({ task }: { task: TaskItem }) {
   const working = task.state === "working";
   const pct = task.cached != null && task.total ? Math.min(100, (task.cached / task.total) * 100) : null;
   return (
-    <Box sx={{ display: "flex", alignItems: "center", gap: 1, py: 0.6, px: 0.5 }}>
+    <Box sx={{ display: "flex", alignItems: "center", gap: 1, py: 0.75, px: 0.5 }}>
+      {/* State indicator: spinner for working, muted dot for queued */}
       {working ? (
         <CircularProgress size={14} thickness={6} />
       ) : (
-        <Box sx={{ width: 14, display: "flex", justifyContent: "center" }}>
+        <Box sx={{ width: 14, display: "flex", justifyContent: "center", flexShrink: 0 }}>
           <Box sx={{ width: 6, height: 6, borderRadius: "50%", bgcolor: "text.disabled" }} />
         </Box>
       )}
-      <k.Icon sx={{ fontSize: 16, color: `${k.color}.main` }} />
+      {/* Kind icon — consistent color per task type */}
+      <k.Icon sx={{ fontSize: 16, color: `${k.color}.main`, flexShrink: 0 }} />
+      {/* Title + course name + progress bar */}
       <Box sx={{ minWidth: 0, flex: 1 }}>
         <Typography variant="body2" noWrap title={task.title}>
           {task.title}
@@ -36,10 +39,11 @@ function TaskRow({ task }: { task: TaskItem }) {
           {task.courseName}
         </Typography>
         {pct != null && (
-          <LinearProgress variant="determinate" value={pct} sx={{ mt: 0.4, height: 4, borderRadius: 2 }} />
+          <LinearProgress variant="determinate" value={pct} sx={{ mt: 0.5, height: 4, borderRadius: 2 }} />
         )}
       </Box>
-      <Box sx={{ textAlign: "right" }}>
+      {/* Right column: status chip + segment count, right-aligned and vertically stacked */}
+      <Box sx={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 0.25, flexShrink: 0 }}>
         <Chip
           size="small"
           variant={working ? "filled" : "outlined"}
@@ -48,7 +52,7 @@ function TaskRow({ task }: { task: TaskItem }) {
           sx={{ height: 18, fontSize: 10 }}
         />
         {task.cached != null && (
-          <Typography variant="caption" color="text.secondary" sx={{ display: "block", fontVariantNumeric: "tabular-nums" }}>
+          <Typography variant="caption" color="text.secondary" sx={{ fontVariantNumeric: "tabular-nums" }}>
             {task.cached}
             {task.total ? `/${task.total}` : ""} 段
           </Typography>
@@ -74,7 +78,19 @@ function TaskQueuePanel({
   const total = tasks.length;
   return (
     <Box sx={{ display: "flex", flexDirection: "column", minHeight: 0, height: "100%" }}>
-      <Box sx={{ display: "flex", alignItems: "center", gap: 1, mb: 0.5 }}>
+      {/* Header: title + count chip + rate + sparkline.
+          flexWrap lets the right-side group wrap below the title on narrow widths
+          instead of squeezing or overflowing. */}
+      <Box
+        sx={{
+          display: "flex",
+          alignItems: "center",
+          flexWrap: "wrap",
+          gap: 1,
+          rowGap: 0.5,
+          mb: 0.75,
+        }}
+      >
         <Typography variant="subtitle2">任务队列</Typography>
         <Chip size="small" label={`${working} 进行 · ${total} 总`} sx={{ height: 18, fontSize: 10 }} />
         <Box sx={{ ml: "auto", display: "flex", alignItems: "center", gap: 1 }}>
@@ -90,6 +106,8 @@ function TaskQueuePanel({
           )}
         </Box>
       </Box>
+
+      {/* Scrollable task list */}
       <Box
         sx={{
           flex: 1,
@@ -102,13 +120,26 @@ function TaskQueuePanel({
         }}
       >
         {total === 0 ? (
-          <Typography variant="caption" color="text.disabled" sx={{ display: "block", textAlign: "center", py: 3 }}>
-            暂无进行中的任务
-          </Typography>
+          // Empty state: fill the container and center vertically so it
+          // looks intentional rather than a misaligned short label.
+          <Box
+            sx={{
+              height: "100%",
+              minHeight: 80,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+          >
+            <Typography variant="caption" color="text.disabled">
+              暂无进行中的任务
+            </Typography>
+          </Box>
         ) : (
           tasks.map((t) => <MemoRow key={`${t.kind}-${t.vid}`} task={t} />)
         )}
       </Box>
+
       {(queue.thumb > 0 || queue.buffer > 0) && (
         <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5, fontVariantNumeric: "tabular-nums" }}>
           队列深度：缓冲 {queue.buffer} · 缩略图 {queue.thumb}

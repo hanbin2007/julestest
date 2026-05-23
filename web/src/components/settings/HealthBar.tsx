@@ -16,32 +16,52 @@ function HealthBar({ health }: { health: CoursesStatus["health"] | undefined }) 
     ? `${String(t.getHours()).padStart(2, "0")}:${String(t.getMinutes()).padStart(2, "0")}:${String(t.getSeconds()).padStart(2, "0")}`
     : "—";
   return (
-    <Box sx={{ display: "flex", alignItems: "center", gap: 1, flexWrap: "wrap", opacity: stale ? 0.7 : 1 }}>
-      <Chip
-        size="small"
-        icon={online ? <CloudDoneRoundedIcon /> : <CloudOffRoundedIcon />}
-        color={online ? "success" : "error"}
-        variant={online ? "filled" : "outlined"}
-        label={online ? "网关在线" : "网关离线"}
-      />
-      <Tooltip title={`最近更新 ${hhmmss}`}>
+    // height 100% fills the stretched flex column from parent; justify center so content
+    // sits midway instead of leaving a void at the bottom when siblings are taller.
+    <Box
+      sx={{
+        height: "100%",
+        minWidth: 0,
+        display: "flex",
+        flexDirection: "column",
+        justifyContent: "center",
+        gap: 1,
+        opacity: stale ? 0.7 : 1,
+      }}
+    >
+      {/* Row 1: status chips */}
+      <Box sx={{ display: "flex", alignItems: "center", gap: 1, flexWrap: "wrap", rowGap: 0.75 }}>
+        <Chip
+          size="small"
+          icon={online ? <CloudDoneRoundedIcon /> : <CloudOffRoundedIcon />}
+          color={online ? "success" : "error"}
+          variant={online ? "filled" : "outlined"}
+          label={online ? "网关在线" : "网关离线"}
+        />
+        {/* Freshness chip — tooltip reveals the exact timestamp */}
+        <Tooltip title={`最近更新 ${hhmmss}`}>
+          <Chip
+            size="small"
+            variant="outlined"
+            color={stale ? "warning" : "default"}
+            label={stale ? "数据陈旧" : "实时"}
+          />
+        </Tooltip>
         <Chip
           size="small"
           variant="outlined"
-          color={stale ? "warning" : "default"}
-          label={stale ? "数据陈旧" : "实时"}
-          sx={{ fontVariantNumeric: "tabular-nums" }}
+          icon={<MovieFilterRoundedIcon />}
+          color={ffmpeg ? "default" : "warning"}
+          label={ffmpeg ? "ffmpeg 可用" : "ffmpeg 未装"}
         />
-      </Tooltip>
-      <Chip
-        size="small"
-        variant="outlined"
-        icon={<MovieFilterRoundedIcon />}
-        color={ffmpeg ? "default" : "warning"}
-        label={ffmpeg ? "ffmpeg 可用" : "ffmpeg 未装"}
-      />
-      <Typography variant="caption" color="text.disabled" sx={{ ml: "auto", fontVariantNumeric: "tabular-nums" }}>
-        {hhmmss}
+      </Box>
+      {/* Row 2: single timestamp caption — removes the redundant inline duplicate */}
+      <Typography
+        variant="caption"
+        color="text.disabled"
+        sx={{ fontVariantNumeric: "tabular-nums" }}
+      >
+        更新于 {hhmmss}
       </Typography>
     </Box>
   );

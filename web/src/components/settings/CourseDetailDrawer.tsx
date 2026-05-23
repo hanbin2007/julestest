@@ -57,8 +57,23 @@ export default function CourseDetailDrawer({
     setSelected(on ? new Set(rows.map((r) => r.id)) : new Set());
 
   return (
-    <Drawer anchor="right" open={open} onClose={onClose} PaperProps={{ sx: { width: { xs: "100%", md: 760 } } }}>
-      <Box sx={{ display: "flex", alignItems: "center", gap: 1, p: 1.5, borderBottom: (t) => `1px solid ${t.palette.divider}` }}>
+    <Drawer
+      anchor="right"
+      open={open}
+      onClose={onClose}
+      PaperProps={{ sx: { width: { xs: "100%", md: 760 }, display: "flex", flexDirection: "column" } }}
+    >
+      {/* Header — auto height, never pushes grid off-screen */}
+      <Box
+        sx={{
+          flexShrink: 0,
+          display: "flex",
+          alignItems: "center",
+          gap: 1,
+          p: 1.5,
+          borderBottom: (t) => `1px solid ${t.palette.divider}`,
+        }}
+      >
         <Box sx={{ flex: 1, minWidth: 0 }}>
           <Typography variant="subtitle1" sx={{ fontWeight: 700 }} noWrap>
             {course?.name}
@@ -69,24 +84,27 @@ export default function CourseDetailDrawer({
             </Typography>
           )}
         </Box>
-        <IconButton onClick={onClose} aria-label="关闭">
+        <IconButton onClick={onClose} aria-label="关闭" sx={{ flexShrink: 0 }}>
           <CloseRoundedIcon />
         </IconButton>
       </Box>
-      <Box sx={{ flex: 1, minHeight: 0, height: "calc(100% - 64px)" }}>
-        <LectureGrid
-          rows={rows}
-          selected={selected}
-          onToggle={toggle}
-          onToggleAll={toggleAll}
-          onRowThumb={onRowThumb}
-          onRowBuf={onRowBuf}
-          density={density}
-        />
-        {isLoading && rows.length === 0 && (
-          <Typography variant="caption" color="text.secondary" sx={{ p: 2 }}>
+
+      {/* Grid body — flex:1 fills whatever remains after the header */}
+      <Box sx={{ flex: 1, minHeight: 0 }}>
+        {isLoading && rows.length === 0 ? (
+          <Typography variant="caption" color="text.secondary" sx={{ display: "block", p: 2 }}>
             加载讲次中…
           </Typography>
+        ) : (
+          <LectureGrid
+            rows={rows}
+            selected={selected}
+            onToggle={toggle}
+            onToggleAll={toggleAll}
+            onRowThumb={onRowThumb}
+            onRowBuf={onRowBuf}
+            density={density}
+          />
         )}
       </Box>
     </Drawer>

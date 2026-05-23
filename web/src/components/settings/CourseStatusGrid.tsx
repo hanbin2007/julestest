@@ -55,12 +55,17 @@ function CourseStatusGrid({
     return (
       <Box sx={GRID_SX}>
         {Array.from({ length: 6 }).map((_, i) => (
-          <Card key={i} sx={{ p: 1.5, height: 168 }}>
-            <Skeleton width="70%" />
-            <Box sx={{ display: "flex", gap: 1.5, mt: 1 }}>
+          // Height matches realistic card: 2-line title (~35px) + dial row + chip row + actions
+          <Card key={i} sx={{ p: 1.5, height: 196 }}>
+            {/* Two-line title placeholder to match clamped header */}
+            <Skeleton width="85%" />
+            <Skeleton width="55%" sx={{ mb: 1 }} />
+            <Box sx={{ display: "flex", gap: 1.5 }}>
               <Skeleton variant="circular" width={76} height={76} />
               <Box sx={{ flex: 1 }}>
-                <Skeleton /> <Skeleton width="80%" /> <Skeleton width="60%" />
+                <Skeleton />
+                <Skeleton width="80%" />
+                <Skeleton width="60%" />
               </Box>
             </Box>
           </Card>

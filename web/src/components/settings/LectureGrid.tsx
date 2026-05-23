@@ -92,30 +92,38 @@ export default function LectureGrid({
         />
       ),
     },
-    { field: "courseName", headerName: "课程", flex: 1.1, minWidth: 160 },
-    { field: "title", headerName: "讲次", flex: 1.6, minWidth: 200 },
+    { field: "courseName", headerName: "课程", flex: 1.1, minWidth: 120 },
+    { field: "title", headerName: "讲次", flex: 1.6, minWidth: 160 },
     {
       field: "kind",
       headerName: "类型",
       width: 92,
       renderCell: (p) =>
         p.row.kind === "live" ? (
-          <Chip size="small" variant="outlined" icon={<ReplayRoundedIcon />} label="回放" sx={{ height: 22 }} />
+          <Chip size="small" variant="outlined" icon={<ReplayRoundedIcon />} label="回放" />
         ) : (
-          <Chip size="small" variant="outlined" icon={<OndemandVideoRoundedIcon />} label="点播" sx={{ height: 22 }} />
+          <Chip size="small" variant="outlined" icon={<OndemandVideoRoundedIcon />} label="点播" />
         ),
     },
     {
       field: "duration",
       headerName: "时长",
       width: 90,
+      headerAlign: "right",
+      align: "right",
       valueGetter: (_v, r) => r.duration ?? 0,
-      renderCell: (p) => <span>{fmtDur(p.row.duration) || "—"}</span>,
+      renderCell: (p) => (
+        <Typography variant="caption" color="text.secondary" sx={{ fontVariantNumeric: "tabular-nums" }}>
+          {fmtDur(p.row.duration) || "—"}
+        </Typography>
+      ),
     },
     {
       field: "bytes",
       headerName: "占用",
       width: 96,
+      headerAlign: "right",
+      align: "right",
       valueGetter: (_v, r) => r.bytes ?? 0,
       renderCell: (p) => (
         <Typography variant="caption" color="text.secondary" sx={{ fontVariantNumeric: "tabular-nums" }}>
@@ -169,8 +177,12 @@ export default function LectureGrid({
       initialState={{ pagination: { paginationModel: { pageSize: 100 } } }}
       sx={{
         border: "none",
+        // Header: use MD3 surface token for subtle elevation cue
         "& .MuiDataGrid-columnHeaders": { bgcolor: "md3.surfaceContainerHighest" },
-        "& .MuiDataGrid-cell": { alignItems: "center", display: "flex" },
+        // Cells: vertically centered, no overflow bleed
+        "& .MuiDataGrid-cell": { display: "flex", alignItems: "center" },
+        // Prevent horizontal scroll leak on narrow containers
+        overflow: "hidden",
       }}
     />
   );

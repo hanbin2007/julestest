@@ -17,13 +17,41 @@ function StorageStrip({
   const usedPct = Math.min(100, (bufferBytes / limit) * 100);
   const near = usedPct >= 90;
   return (
-    <Box>
-      <Box sx={{ display: "flex", alignItems: "baseline", gap: 1, mb: 0.75 }}>
+    // height 100% + justify center mirrors HealthBar so both short components
+    // sit vertically centered rather than leaving a void when TaskQueuePanel is taller.
+    <Box
+      sx={{
+        height: "100%",
+        minWidth: 0,
+        display: "flex",
+        flexDirection: "column",
+        justifyContent: "center",
+        gap: 1,
+      }}
+    >
+      {/* Row 1: section label + detail labels that wrap gracefully when narrow */}
+      <Box
+        sx={{
+          display: "flex",
+          alignItems: "baseline",
+          flexWrap: "wrap",
+          gap: 1,
+          rowGap: 0.5,
+        }}
+      >
         <Typography variant="subtitle2">存储</Typography>
-        <Typography variant="caption" color="text.secondary" sx={{ ml: "auto", fontVariantNumeric: "tabular-nums" }}>
+        {/* ml: "auto" pushes the detail text right on wide containers;
+            flexWrap lets it drop to a new line rather than overflow on narrow ones. */}
+        <Typography
+          variant="caption"
+          color="text.secondary"
+          sx={{ ml: "auto", fontVariantNumeric: "tabular-nums" }}
+        >
           缓冲 {fmtBytes(bufferBytes)} / {fmtBytes(bufferLimit)}　·　缩略图 {fmtBytes(thumbBytes)}
         </Typography>
       </Box>
+
+      {/* Row 2: progress bar with full tooltip */}
       <Tooltip title={`缓冲缓存：${fmtBytes(bufferBytes)} / 上限 ${fmtBytes(bufferLimit)}（${usedPct.toFixed(1)}%）`}>
         <Box
           sx={{
@@ -46,6 +74,16 @@ function StorageStrip({
           />
         </Box>
       </Tooltip>
+
+      {/* Row 3: percent readout beneath the bar — gives the column a third visual row
+          so it balances against the taller TaskQueuePanel. Warning color at ≥90%. */}
+      <Typography
+        variant="caption"
+        color={near ? "warning.main" : "text.disabled"}
+        sx={{ fontVariantNumeric: "tabular-nums" }}
+      >
+        已使用 {usedPct.toFixed(0)}%
+      </Typography>
     </Box>
   );
 }

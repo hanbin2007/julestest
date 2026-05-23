@@ -157,9 +157,17 @@ export default function SettingsView() {
 
   return (
     <Box sx={{ maxWidth: 1240, mx: "auto", p: { xs: 1.5, md: 3 } }}>
-      <Stack direction="row" alignItems="baseline" sx={{ mb: 1.5 }}>
-        <Typography variant="h5">课程状态</Typography>
-        <Typography variant="body2" color="text.secondary" sx={{ ml: 1.5 }}>
+      <Stack
+        direction={{ xs: "column", sm: "row" }}
+        alignItems={{ xs: "flex-start", sm: "baseline" }}
+        sx={{ mb: 1.5 }}
+      >
+        <Typography variant="h5" sx={{ flexShrink: 0 }}>课程状态</Typography>
+        <Typography
+          variant="body2"
+          color="text.secondary"
+          sx={{ ml: { xs: 0, sm: 1.5 }, mt: { xs: 0.5, sm: 0 } }}
+        >
           每门课的缓存 / 缩略图 / 观看进度，实时反映任何来源的缓存（观看、预缓存、手动、重启后残留）。
         </Typography>
       </Stack>
@@ -226,13 +234,14 @@ export default function SettingsView() {
               </TextField>
             </>
           )}
-          <Box sx={{ flex: 1 }} />
-          <ToggleButtonGroup size="small" exclusive value={prefs.density} onChange={(_e, v) => v && setPrefs({ density: v })}>
-            <ToggleButton value="comfortable">宽松</ToggleButton>
-            <ToggleButton value="compact">紧凑</ToggleButton>
-          </ToggleButtonGroup>
-          <Button variant="contained" onClick={() => submit(targets(), "thumb")}>生成缩略图</Button>
-          <Button variant="outlined" onClick={() => submit(targets(), "buffer")}>缓冲整集</Button>
+          <Stack direction="row" spacing={1} sx={{ ml: { md: "auto" }, flexWrap: "wrap", gap: 1, alignItems: "center" }}>
+            <ToggleButtonGroup size="small" exclusive value={prefs.density} onChange={(_e, v) => v && setPrefs({ density: v })}>
+              <ToggleButton value="comfortable">宽松</ToggleButton>
+              <ToggleButton value="compact">紧凑</ToggleButton>
+            </ToggleButtonGroup>
+            <Button variant="contained" onClick={() => submit(targets(), "thumb")}>生成缩略图</Button>
+            <Button variant="outlined" onClick={() => submit(targets(), "buffer")}>缓冲整集</Button>
+          </Stack>
         </Stack>
         <Stack direction="row" sx={{ mt: 1, alignItems: "center" }}>
           <Tabs value={tab} onChange={(_e, v) => setTab(v)}>
@@ -261,7 +270,7 @@ export default function SettingsView() {
           onThumbs={(c) => courseAction(c, "thumb")}
         />
       ) : (
-        <Card sx={{ p: 0, height: 600 }}>
+        <Card sx={{ p: 0, height: { xs: "calc(100vh - 320px)", md: "min(72vh, 820px)" }, minHeight: 420 }}>
           <LectureGrid
             rows={gridRows}
             selected={selected}
