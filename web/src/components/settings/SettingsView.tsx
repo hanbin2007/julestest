@@ -235,7 +235,20 @@ export default function SettingsView() {
             </>
           )}
           <Stack direction="row" spacing={1} sx={{ ml: { md: "auto" }, flexWrap: "wrap", gap: 1, alignItems: "center" }}>
-            <ToggleButtonGroup size="small" exclusive value={prefs.density} onChange={(_e, v) => v && setPrefs({ density: v })}>
+            <ToggleButtonGroup
+              size="small"
+              exclusive
+              value={prefs.density}
+              onChange={(_e, v) => v && setPrefs({ density: v })}
+              sx={{
+                borderRadius: "999px",
+                overflow: "hidden",
+                "& .MuiToggleButtonGroup-grouped": {
+                  border: 0,
+                  borderRadius: 0,
+                },
+              }}
+            >
               <ToggleButton value="comfortable">宽松</ToggleButton>
               <ToggleButton value="compact">紧凑</ToggleButton>
             </ToggleButtonGroup>
@@ -270,7 +283,7 @@ export default function SettingsView() {
           onThumbs={(c) => courseAction(c, "thumb")}
         />
       ) : (
-        <Card sx={{ p: 0, height: { xs: "calc(100vh - 320px)", md: "min(72vh, 820px)" }, minHeight: 420 }}>
+        <Card sx={{ p: 0, height: { xs: "calc(100vh - 320px)", md: "min(72vh, 820px)" }, minHeight: 420, overflow: "hidden" }}>
           <LectureGrid
             rows={gridRows}
             selected={selected}

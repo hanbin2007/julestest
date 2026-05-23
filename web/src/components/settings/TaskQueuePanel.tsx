@@ -39,7 +39,7 @@ function TaskRow({ task }: { task: TaskItem }) {
           {task.courseName}
         </Typography>
         {pct != null && (
-          <LinearProgress variant="determinate" value={pct} sx={{ mt: 0.5, height: 4, borderRadius: 2 }} />
+          <LinearProgress variant="determinate" value={pct} sx={{ mt: 0.5, height: 4, borderRadius: "999px" }} />
         )}
       </Box>
       {/* Right column: status chip + segment count, right-aligned and vertically stacked */}
@@ -115,7 +115,7 @@ function TaskQueuePanel({
           maxHeight: 168,
           overflowY: "auto",
           border: (t) => `1px solid ${t.palette.divider}`,
-          borderRadius: 2,
+          borderRadius: "12px",
           px: 0.5,
         }}
       >
