@@ -25,12 +25,14 @@ export default function NotesPanel({
   onClose,
   videoId,
   getCurrentTime,
+  getSnapshot,
   onSeek,
 }: {
   open: boolean;
   onClose: () => void;
   videoId: number | null;
   getCurrentTime: () => number;
+  getSnapshot?: () => string | null;
   onSeek: (t: number) => void;
 }) {
   const { notes, add: addNote, update: updateNote, remove: removeNote } = useNotes(videoId);
@@ -40,7 +42,8 @@ export default function NotesPanel({
 
   const add = () => {
     if (!videoId || !text.trim()) return;
-    void addNote(Math.floor(getCurrentTime()), text.trim());
+    // 同一刻读时间戳 + 抓画面，保证 t 与截图一致
+    void addNote(Math.floor(getCurrentTime()), text.trim(), getSnapshot?.());
     setText("");
   };
 

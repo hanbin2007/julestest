@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
 import { prisma } from "@/lib/db";
+import { deleteSnaps } from "@/lib/noteSnaps";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -10,5 +11,6 @@ export async function POST(req: NextRequest) {
   const ids: string[] = Array.isArray(d.ids) ? d.ids.map(String).filter(Boolean) : [];
   if (ids.length === 0) return Response.json({ error: "need ids[]" }, { status: 400 });
   const r = await prisma.note.deleteMany({ where: { id: { in: ids } } });
+  await deleteSnaps(ids); // 连带删手动截图，避免孤儿文件
   return Response.json({ ok: true, deleted: r.count });
 }

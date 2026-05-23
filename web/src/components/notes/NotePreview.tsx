@@ -2,12 +2,14 @@
 import * as React from "react";
 import { Box, CircularProgress, Popper, Typography } from "@mui/material";
 import MovieRoundedIcon from "@mui/icons-material/MovieRounded";
-import { getNoteThumb } from "@/lib/api";
+import { getNoteThumb, noteSnapshotUrl } from "@/lib/api";
 import { fmtDur, thumbSheetUrl, thumbTile } from "@/lib/media";
 import type { ThumbMeta } from "@/lib/store";
 
 const PREVIEW_W = 132; // 卡片内小图宽（16:9 → 高约 74）
 const POPPER_W = 360; // 悬停放大图宽
+const PREVIEW_H = (PREVIEW_W * 9) / 16;
+const POPPER_H = (POPPER_W * 9) / 16;
 
 // 时间戳角标
 function TimeBadge({ t }: { t: number }) {
@@ -30,18 +32,22 @@ function TimeBadge({ t }: { t: number }) {
   );
 }
 
-// 某条笔记时间戳处的视频帧预览：就绪则裁雪碧图；缺图时进入视口后现场生成(网关落盘保存)，
-// 生成中显示转菊花，就绪后自动显示真实帧；只有真出错才回退占位。悬停(有 hover 的设备)放大。
+// 笔记预览，优先级：① 记笔记时抓的手动截图(hasSnap，精确即时) → ② 雪碧图帧(就绪) →
+// ③ 缺图时进入视口后现场生成(网关落盘) → ④ 占位。悬停(有 hover 的设备)放大。
 export default function NotePreview({
+  noteId,
   videoId,
   t,
   ready,
+  hasSnap,
   meta,
   color,
 }: {
+  noteId: string;
   videoId: number;
   t: number;
   ready: boolean;
+  hasSnap: boolean;
   meta?: ThumbMeta;
   color: string;
 }) {
@@ -49,11 +55,14 @@ export default function NotePreview({
   const [inView, setInView] = React.useState(false);
   const [liveMeta, setLiveMeta] = React.useState<ThumbMeta | null>(null);
   const [gen, setGen] = React.useState<"idle" | "gen" | "error">("idle");
-  const [errored, setErrored] = React.useState(false);
+  const [errored, setErrored] = React.useState(false); // 雪碧图缺失
+  const [snapErrored, setSnapErrored] = React.useState(false); // 截图缺失
   const [anchor, setAnchor] = React.useState<HTMLElement | null>(null);
   const hoverTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const ok = (ready || !!liveMeta) && !errored;
+  const showSnap = hasSnap && !snapErrored;
+  const spriteOk = (ready || !!liveMeta) && !errored;
+  const canZoom = showSnap || spriteOk;
   const effMeta = liveMeta ?? meta;
   const url = thumbSheetUrl(videoId);
   const small = thumbTile(t, PREVIEW_W, effMeta ?? undefined);
@@ -76,9 +85,9 @@ export default function NotePreview({
     return () => io.disconnect();
   }, [inView]);
 
-  // 缺图则现场生成 + 轮询，直到就绪/出错（网关 ffmpeg 切片后落盘持久保存）
+  // 无截图且无雪碧图 → 进入视口后现场生成 + 轮询，直到就绪/出错
   React.useEffect(() => {
-    if (ready || liveMeta || errored || !inView) return;
+    if (showSnap || ready || liveMeta || errored || !inView) return;
     let cancelled = false;
     let tries = 0;
     let timer: ReturnType<typeof setTimeout>;
@@ -109,9 +118,10 @@ export default function NotePreview({
       clearTimeout(timer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [inView, videoId, ready]);
+  }, [inView, videoId, ready, showSnap]);
 
   const enter = (e: React.MouseEvent<HTMLElement>) => {
+    if (!canZoom) return;
     const el = e.currentTarget;
     hoverTimer.current = setTimeout(() => setAnchor(el), 150); // 入场延迟，滚动时不闪
   };
@@ -130,38 +140,52 @@ export default function NotePreview({
     <>
       <Box
         ref={rootRef}
-        onMouseEnter={ok ? enter : undefined}
-        onMouseLeave={ok ? leave : undefined}
+        onMouseEnter={enter}
+        onMouseLeave={leave}
         sx={{
           width: PREVIEW_W,
-          height: (PREVIEW_W * 9) / 16,
+          height: PREVIEW_H,
           flex: "0 0 auto",
           position: "relative",
           overflow: "hidden",
           borderRadius: (th) => th.radius.sm,
           bgcolor: `color-mix(in srgb, ${color} 20%, transparent)`,
-          cursor: ok ? "zoom-in" : "default",
+          cursor: canZoom ? "zoom-in" : "default",
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
-          ...(ok && {
-            backgroundImage: `url("${url}")`,
-            backgroundSize: small.backgroundSize,
-            backgroundPosition: small.backgroundPosition,
-            backgroundRepeat: "no-repeat",
-          }),
         }}
       >
-        {!ok &&
-          (gen === "gen" ? (
-            <CircularProgress size={20} sx={{ color }} />
-          ) : (
-            <MovieRoundedIcon sx={{ color, opacity: 0.6, fontSize: 26 }} />
-          ))}
+        {showSnap ? (
+          <Box
+            component="img"
+            src={noteSnapshotUrl(noteId)}
+            alt=""
+            onError={() => setSnapErrored(true)}
+            sx={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+          />
+        ) : spriteOk ? (
+          <Box
+            sx={{
+              position: "absolute",
+              inset: 0,
+              backgroundImage: `url("${url}")`,
+              backgroundSize: small.backgroundSize,
+              backgroundPosition: small.backgroundPosition,
+              backgroundRepeat: "no-repeat",
+            }}
+          />
+        ) : gen === "gen" ? (
+          <CircularProgress size={20} sx={{ color }} />
+        ) : (
+          <MovieRoundedIcon sx={{ color, opacity: 0.6, fontSize: 26 }} />
+        )}
         <TimeBadge t={t} />
       </Box>
-      {/* 探测雪碧图是否真的存在（state=ready 但文件可能缺失）→ 回退占位/重生成 */}
-      {ok && <img src={url} alt="" style={{ display: "none" }} onError={() => setErrored(true)} />}
+      {/* 探测雪碧图是否真的存在（state=ready 但文件可能缺失）→ 回退 */}
+      {!showSnap && spriteOk && (
+        <img src={url} alt="" style={{ display: "none" }} onError={() => setErrored(true)} />
+      )}
       <Popper
         open={!!anchor}
         anchorEl={anchor}
@@ -175,19 +199,28 @@ export default function NotePreview({
             overflow: "hidden",
             boxShadow: 8,
             border: (th) => `1px solid ${th.palette.divider}`,
+            bgcolor: "#000",
           }}
         >
-          <Box
-            sx={{
-              width: POPPER_W,
-              height: (POPPER_W * 9) / 16,
-              bgcolor: "#000",
-              backgroundImage: `url("${url}")`,
-              backgroundSize: big.backgroundSize,
-              backgroundPosition: big.backgroundPosition,
-              backgroundRepeat: "no-repeat",
-            }}
-          />
+          {showSnap ? (
+            <Box
+              component="img"
+              src={noteSnapshotUrl(noteId)}
+              alt=""
+              sx={{ width: POPPER_W, height: POPPER_H, objectFit: "cover", display: "block" }}
+            />
+          ) : (
+            <Box
+              sx={{
+                width: POPPER_W,
+                height: POPPER_H,
+                backgroundImage: `url("${url}")`,
+                backgroundSize: big.backgroundSize,
+                backgroundPosition: big.backgroundPosition,
+                backgroundRepeat: "no-repeat",
+              }}
+            />
+          )}
         </Box>
       </Popper>
     </>

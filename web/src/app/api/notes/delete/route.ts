@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
 import { prisma } from "@/lib/db";
+import { deleteSnaps } from "@/lib/noteSnaps";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -11,6 +12,7 @@ export async function POST(req: NextRequest) {
   const id = String(d.id ?? "");
   if (!videoId || !id) return Response.json({ error: "need videoId+id" }, { status: 400 });
   await prisma.note.deleteMany({ where: { videoId, id } });
+  await deleteSnaps([id]); // 连带删手动截图，避免孤儿文件
   const rows = await prisma.note.findMany({ where: { videoId }, orderBy: { t: "asc" } });
   return Response.json({
     ok: true,

@@ -102,9 +102,11 @@ export default function NoteCard({
 
       <Box sx={{ display: "flex", gap: 1.5, minWidth: 0 }}>
         <NotePreview
+          noteId={note.id}
           videoId={note.videoId}
           t={note.t}
           ready={note.thumbState === "ready"}
+          hasSnap={note.hasSnap}
           meta={note.thumb}
           color={color}
         />

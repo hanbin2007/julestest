@@ -47,6 +47,7 @@ export interface EnrichedNote {
   kind: "vod" | "live";
   thumbState: string | null; // gen/ready/error/null
   thumb?: ThumbMeta;
+  hasSnap: boolean; // 记笔记时抓的手动截图（优先于雪碧图作预览）
 }
 
 export interface NotesStats {

@@ -21,11 +21,22 @@ export function useNotes(videoId: number | null) {
   );
   const notes: Note[] = data?.notes ?? [];
 
-  const add = async (t: number, text: string) => {
+  const add = async (t: number, text: string, snap?: string | null) => {
     if (videoId == null || !text.trim()) return;
     const optimistic: Note = { id: `tmp-${Date.now()}`, t, text: text.trim(), at: Date.now() };
     await mutate(
-      async () => ({ notes: (await api.addNote(videoId, t, text.trim())).notes }),
+      async () => {
+        const r = await api.addNote(videoId, t, text.trim());
+        // 拿到服务端分配的 id 后，把记笔记那一刻抓的画面存为该笔记的截图
+        if (snap && r.note) {
+          try {
+            await api.saveNoteSnapshot(r.note.id, snap);
+          } catch {
+            /* 截图失败不影响笔记本身 */
+          }
+        }
+        return { notes: r.notes };
+      },
       {
         optimisticData: { notes: [...notes, optimistic].sort((a, b) => a.t - b.t) },
         rollbackOnError: true,

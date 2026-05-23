@@ -20,7 +20,7 @@ import { useCourses, useCourseVideos } from "@/hooks/data";
 import { useThumbPoll } from "@/hooks/useThumbPoll";
 import { useSegmentMaps } from "@/hooks/useSegmentMaps";
 import { useHotkeys } from "@/hooks/useHotkeys";
-import { play, pickM3u8, postProgress, addNote as apiAddNote, patchSettings, refreshCatalog } from "@/lib/api";
+import { play, pickM3u8, postProgress, addNote as apiAddNote, saveNoteSnapshot as apiSaveNoteSnapshot, patchSettings, refreshCatalog } from "@/lib/api";
 import { themeForSeed, hashSeed } from "@/lib/color";
 import { useProgressMap, useLast } from "@/hooks/persist";
 import type { Course, Video, VideoRow } from "@/types/api";
@@ -168,6 +168,26 @@ export default function PlayerView() {
 
   // 播放快捷键
   const a = () => artRef.current;
+  // 记笔记时对「没有缩略图的课」抓当前画面作预览（已有雪碧图则返回 null，用雪碧图）。
+  const captureSnapshot = (): string | null => {
+    if (thumbnails) return null; // 当前讲已有缩略图 → 不重复截图
+    const v = a()?.video as HTMLVideoElement | undefined;
+    if (!v || v.readyState < 2 || !v.videoWidth) return null;
+    try {
+      const scale = Math.min(1, 400 / v.videoWidth);
+      const w = Math.round(v.videoWidth * scale);
+      const h = Math.round(v.videoHeight * scale);
+      const c = document.createElement("canvas");
+      c.width = w;
+      c.height = h;
+      const ctx = c.getContext("2d");
+      if (!ctx) return null;
+      ctx.drawImage(v, 0, 0, w, h);
+      return c.toDataURL("image/jpeg", 0.72); // 跨源/MSE 污染会抛错 → null
+    } catch {
+      return null;
+    }
+  };
   useHotkeys({
     " ": () => {
       const v = a()?.video as HTMLVideoElement | undefined;
@@ -191,7 +211,14 @@ export default function PlayerView() {
     p: () => prev && course && selectVideo(prev, course),
     c: () => copyDownload(),
     b: () => {
-      const v = a()?.video; if (v && video) { void apiAddNote(video.videoId, Math.floor(v.currentTime), "书签"); toast("已记书签"); }
+      const v = a()?.video;
+      if (v && video) {
+        const snap = captureSnapshot();
+        void apiAddNote(video.videoId, Math.floor(v.currentTime), "书签").then((r) => {
+          if (snap && r.note) void apiSaveNoteSnapshot(r.note.id, snap);
+        });
+        toast("已记书签");
+      }
     },
     "?": () => setScOpen(true),
     ...Object.fromEntries(
@@ -345,6 +372,7 @@ export default function PlayerView() {
         onClose={() => setNotesOpen(false)}
         videoId={video?.videoId ?? null}
         getCurrentTime={() => artRef.current?.video?.currentTime ?? 0}
+        getSnapshot={captureSnapshot}
         onSeek={(t) => {
           setSeekOverride(undefined);
           const p = artRef.current;
