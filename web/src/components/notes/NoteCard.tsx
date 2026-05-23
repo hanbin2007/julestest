@@ -76,17 +76,7 @@ export default function NoteCard({
         gap: 1,
         cursor: editing ? "default" : "pointer",
         transition: "transform .15s, box-shadow .15s",
-        // 左侧课程色条：圆角药丸竖直内缩，避开卡片圆角
-        "&::before": {
-          content: '""',
-          position: "absolute",
-          left: 0,
-          top: "12px",
-          bottom: "12px",
-          width: "3px",
-          borderRadius: "999px",
-          backgroundColor: color,
-        },
+        // 课程色不在卡上重复（与分组标题色点冗余）；仅选中时描边强调
         ...(selected && { outline: `2px solid ${color}`, outlineOffset: "-1px" }),
         "&:hover": editing ? {} : { transform: "translateY(-2px)", boxShadow: "0 6px 20px rgba(0,0,0,.18)" },
         "&:focus-visible": { outline: "2px solid", outlineColor: color, outlineOffset: 2 },

@@ -300,7 +300,7 @@ export default function NotesView() {
                 <Typography variant="subtitle1" sx={{ fontWeight: 700, minWidth: 0 }} noWrap title={g.courseName}>
                   {g.courseName}
                 </Typography>
-                <Chip size="small" label={g.items.length} sx={{ height: 22 }} />
+                <Chip size="small" variant="outlined" label={g.items.length} sx={{ height: 22 }} />
               </Stack>
               <Box sx={GRID_SX}>
                 {g.items.map((n) => (
