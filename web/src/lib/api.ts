@@ -80,6 +80,19 @@ export const postProgress = (
   meta?: ProgressMeta,
 ) => postJson<{ ok: boolean }>("/api/progress", { videoId, t, d, ...meta });
 
+export interface YoudaoSyncResult {
+  ok: boolean;
+  courses: { total: number; ok: number; failed: number };
+  videos: { scanned: number; created: number; updated: number; skipped: number };
+  failedProducts: number[];
+}
+// 从有道同步观看状态并按「不回退、已学完为准」合并进本地进度。productId 缺省同步全部课程。
+export const syncYoudaoProgress = (productId?: number) =>
+  postJson<YoudaoSyncResult>(
+    "/api/progress/sync-youdao",
+    productId ? { productId } : {},
+  );
+
 export const getNotes = (videoId: number) =>
   fetcher<{ notes: Note[] }>(`/api/notes?videoId=${videoId}`);
 export const addNote = (videoId: number, t: number, text: string) =>

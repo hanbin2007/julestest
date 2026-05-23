@@ -13,6 +13,7 @@ import {
   ToggleButtonGroup,
   Typography,
 } from "@mui/material";
+import { useSWRConfig } from "swr";
 import { useCourses, useAllCourseVideos, useCoursesStatus } from "@/hooks/data";
 import { usePrefs } from "@/hooks/persist";
 import { useToast } from "@/components/common/Toast";
@@ -22,7 +23,7 @@ import StorageStrip from "./StorageStrip";
 import TaskQueuePanel from "./TaskQueuePanel";
 import CourseStatusGrid, { type CourseSort } from "./CourseStatusGrid";
 import CourseDetailDrawer from "./CourseDetailDrawer";
-import { batchThumbs, batchBuffer, getCourseVideos } from "@/lib/api";
+import { batchThumbs, batchBuffer, getCourseVideos, syncYoudaoProgress } from "@/lib/api";
 import { pickLow, pickM3u8 } from "@/lib/media";
 import type { CourseStatus, Video, VideoRow } from "@/types/api";
 
@@ -37,10 +38,12 @@ const MK_BUF = (v: Video) => ({
 
 export default function SettingsView() {
   const toast = useToast();
+  const { mutate } = useSWRConfig();
   const { courses } = useCourses();
   const { data, refresh, bps } = useCoursesStatus();
 
   const { prefs, setPrefs } = usePrefs();
+  const [syncing, setSyncing] = React.useState(false);
   const [tab, setTab] = React.useState(0);
   const [q, setQ] = React.useState("");
   const [courseId, setCourseId] = React.useState("");
@@ -115,6 +118,30 @@ export default function SettingsView() {
       refresh();
     } catch (e) {
       toast("提交失败：" + (e as Error).message, { severity: "error" });
+    }
+  };
+
+  // 从有道同步观看状态：拉每门课的 playDuration/study，按「不回退、已学完为准」合并进本地进度。
+  const doSyncYoudao = async () => {
+    if (syncing) return;
+    setSyncing(true);
+    toast("正在从有道同步观看状态…");
+    try {
+      const r = await syncYoudaoProgress();
+      const { created, updated, skipped } = r.videos;
+      const failed = r.courses.failed
+        ? `，${r.courses.failed} 门课失败`
+        : "";
+      toast(
+        `同步完成：新增 ${created}、更新 ${updated} 讲（跳过 ${skipped}）${failed}`,
+        { severity: r.courses.failed ? "warning" : "success" },
+      );
+      // 进度变了 → 重拉续看进度 + 课程状态（看得多/已看计数）。
+      await Promise.all([mutate("/api/progress"), refresh()]);
+    } catch (e) {
+      toast("同步失败：" + (e as Error).message, { severity: "error" });
+    } finally {
+      setSyncing(false);
     }
   };
 
@@ -252,6 +279,9 @@ export default function SettingsView() {
               <ToggleButton value="comfortable">宽松</ToggleButton>
               <ToggleButton value="compact">紧凑</ToggleButton>
             </ToggleButtonGroup>
+            <Button variant="text" onClick={doSyncYoudao} disabled={syncing}>
+              {syncing ? "同步中…" : "从有道同步观看"}
+            </Button>
             <Button variant="contained" onClick={() => submit(targets(), "thumb")}>生成缩略图</Button>
             <Button variant="outlined" onClick={() => submit(targets(), "buffer")}>缓冲整集</Button>
           </Stack>

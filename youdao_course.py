@@ -1420,6 +1420,8 @@ def make_handler(base_headers, default_url="", session=None, auto=None,
                 self._api_courses()
             elif path == "/api/course":
                 self._api_course(qs)
+            elif path == "/api/watch_state":
+                self._api_watch_state(qs)
             elif path == "/api/play":
                 self._api_play(qs)
             elif path == "/api/thumb":
@@ -1639,6 +1641,16 @@ def make_handler(base_headers, default_url="", session=None, auto=None,
                 return
             try:
                 self._send_json({"videos": get_product_videos(session, pid)})
+            except Exception as e:  # noqa: BLE001
+                self._send_json({"error": str(e)}, 502)
+
+        def _api_watch_state(self, qs):
+            pid = (qs.get("productId") or [None])[0]
+            if not pid:
+                self._send_json({"error": "missing productId"}, 400)
+                return
+            try:
+                self._send_json({"watch": get_product_watch_state(session, pid)})
             except Exception as e:  # noqa: BLE001
                 self._send_json({"error": str(e)}, 502)
 
@@ -1879,6 +1891,60 @@ def get_product_videos(session, product_id):
     for live in (d.get("servicePackage") or {}).get("videoLiveTab") or []:
         _walk_live(live.get("outlines"), product_id, out, tab=live.get("title"))
     return out
+
+
+def _num(x):
+    return x if isinstance(x, (int, float)) else 0
+
+
+def _collect_watch_state(node, out):
+    """递归整条 product detail，把任何带 videoId 的节点的观看字段收集出来。
+    点播项挂在 videos[]、直播项挂在 subOutlines；二者都会被这棵遍历覆盖。
+    有道的观看字段（每讲，无时间戳）：
+      playDuration         上次播放到的位置（秒）≈ 本地 t，用于续看；是「最后位置」非「看过的最远处」
+      accumulativeDuration 累计观看秒数（含重看，噪声大，仅作统计）
+      videoStudyTag.study  是否已学完（完成标记，合并时以此为准）
+      duration             时长（秒）
+    """
+    if isinstance(node, list):
+        for it in node:
+            _collect_watch_state(it, out)
+        return
+    if not isinstance(node, dict):
+        return
+    vid = node.get("videoId")
+    if vid is not None:
+        tag = node.get("videoStudyTag")
+        study = bool(tag.get("study")) if isinstance(tag, dict) else False
+        cur = out.get(vid)
+        ws = {
+            "videoId": vid,
+            "playDuration": node.get("playDuration"),
+            "accumulativeDuration": node.get("accumulativeDuration"),
+            "duration": node.get("duration"),
+            "study": study,
+            "title": node.get("title"),
+        }
+        # 同一 videoId 偶有多处出现：合并取「更靠前/已学完」，避免空节点覆盖有值节点。
+        if cur:
+            ws["playDuration"] = max(_num(cur.get("playDuration")), _num(ws.get("playDuration"))) or None
+            ws["accumulativeDuration"] = max(_num(cur.get("accumulativeDuration")), _num(ws.get("accumulativeDuration"))) or None
+            ws["duration"] = max(_num(cur.get("duration")), _num(ws.get("duration"))) or None
+            ws["study"] = bool(cur.get("study")) or study
+            ws["title"] = ws["title"] or cur.get("title")
+        out[vid] = ws
+    for v in node.values():
+        if isinstance(v, (dict, list)):
+            _collect_watch_state(v, out)
+
+
+def get_product_watch_state(session, product_id):
+    """返回某课程下每讲的有道观看状态：{videoId: {playDuration, accumulativeDuration, duration, study, title}}。
+    与目录(get_product_videos)分开：目录极少变、可长缓存；观看状态每次同步都要新鲜地拉。"""
+    d = (api_get_json(session, API_PRODUCT_DETAIL % product_id).get("data") or {})
+    out = {}
+    _collect_watch_state(d, out)
+    return list(out.values())
 
 
 def find_video(session, video_id):
