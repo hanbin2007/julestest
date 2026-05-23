@@ -2,12 +2,15 @@
 import atexit
 import hashlib
 import json
+import logging
 import os
 import shutil
 import tempfile
 import threading
 import time
 from collections import OrderedDict
+
+_log = logging.getLogger(__name__)
 
 SEG_CACHE_BYTES = 256 * 1024 * 1024  # 分片缓存上限（约 256MB，够前后拖动很大范围）
 
@@ -47,7 +50,10 @@ class DiskLRU:
         try:
             with open(self.index_path, "r", encoding="utf-8") as f:
                 items = json.load(f) or []
+        except FileNotFoundError:
+            items = []   # 首次运行：尚无索引，正常
         except Exception:  # noqa: BLE001
+            _log.warning("缓存索引损坏，按空缓存启动：%s", self.index_path, exc_info=True)
             items = []
         size = 0
         for entry in items:
@@ -55,6 +61,7 @@ class DiskLRU:
                 k, v = entry
                 key = (k[0], k[1]); ctype, sz, fname = v
             except Exception:  # noqa: BLE001
+                _log.debug("跳过损坏的缓存索引条目：%r", entry)
                 continue
             if os.path.exists(os.path.join(self.dir, fname)):  # 文件还在才算数
                 self.meta[key] = (ctype, sz, fname)
@@ -88,7 +95,7 @@ class DiskLRU:
                     json.dump(items, f)
                 os.replace(tmp, self.index_path)   # 原子替换，避免半截 index
             except Exception:  # noqa: BLE001
-                pass
+                _log.warning("缓存索引落盘失败：%s", self.index_path, exc_info=True)
 
     def _flush_loop(self):
         while True:

@@ -1,4 +1,6 @@
 """磁盘 LRU 缓存的行为锁定测试（命中 / 字节淘汰 / 保护集 / 统计 / 持久化重载）。"""
+import logging
+
 from ydcore.cache import DiskLRU as _CLS
 
 
@@ -76,3 +78,19 @@ def test_persistence_reload(tmp_path):
 def test_dir_ok(tmp_path):
     c = _CLS(1024, persist_dir=str(tmp_path))
     assert c.dir_ok() is True
+
+
+def test_corrupt_index_logs_warning(tmp_path, caplog):
+    # 损坏的 index.json：应记 WARNING 并按空缓存启动，而不是静默吞掉。
+    (tmp_path / "index.json").write_text("{not valid json", encoding="utf-8")
+    with caplog.at_level(logging.WARNING):
+        c = _CLS(1024, persist_dir=str(tmp_path))
+    assert c.size == 0
+    assert any("缓存索引损坏" in r.message for r in caplog.records)
+
+
+def test_missing_index_is_silent(tmp_path, caplog):
+    # 首次运行（无 index.json）属正常，不该刷 WARNING。
+    with caplog.at_level(logging.WARNING):
+        _CLS(1024, persist_dir=str(tmp_path))
+    assert not any("缓存索引损坏" in r.message for r in caplog.records)

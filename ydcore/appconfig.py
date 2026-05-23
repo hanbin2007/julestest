@@ -4,8 +4,11 @@ config.json 刻意放在缓存目录之外：换盘/缓存目录整体丢失时�
 "目录被删"(报错) 还是"首次启用"(创建)。
 """
 import json
+import logging
 import os
 import sys
+
+_log = logging.getLogger(__name__)
 
 # 分片缓存持久化目录：固定位置 + index.json，重启不清缓存。
 CACHE_DIR = os.path.join(os.path.expanduser("~"), ".youdao_course", "cache")
@@ -19,7 +22,10 @@ def load_config():
         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
             d = json.load(f)
         return d if isinstance(d, dict) else {}
+    except FileNotFoundError:
+        return {}   # 尚未保存过配置，正常
     except Exception:  # noqa: BLE001
+        _log.warning("配置文件损坏，按默认配置启动：%s", CONFIG_PATH, exc_info=True)
         return {}
 
 

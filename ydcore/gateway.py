@@ -16,6 +16,7 @@ buf_state(buf_lock)、pf_threads(pf_lock)、seg_cache(自带锁)。
 """
 import concurrent.futures
 import json
+import logging
 import os
 import queue
 import re
@@ -37,6 +38,8 @@ from ydcore.youdao_api import (
     get_product_videos, get_product_watch_state, list_products,
     play_headers, resolve_m3u8,
 )
+
+_log = logging.getLogger(__name__)
 
 # ---- 前端单页 + 依赖资源 -------------------------------------------------
 _WEB_UI_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web_ui")
@@ -66,6 +69,7 @@ def asset_bytes(name):
             with urllib.request.urlopen(req, timeout=30) as r:
                 _ASSET_CACHE[name] = r.read()
         except Exception:  # noqa: BLE001
+            _log.warning("前端依赖拉取失败（将返回空）：%s", name, exc_info=True)
             _ASSET_CACHE[name] = b""
     return _ASSET_CACHE[name]
 
@@ -111,8 +115,10 @@ class Gateway:
                 for vid, m in (json.load(f) or {}).items():
                     if os.path.exists(os.path.join(self.thumb_dir, "%s.jpg" % vid)):
                         self.thumb_meta[vid] = m
+        except FileNotFoundError:
+            pass   # 首次运行：尚无缩略图索引，正常
         except Exception:  # noqa: BLE001
-            pass
+            _log.warning("缩略图索引损坏，忽略：%s", self.thumb_index_path, exc_info=True)
 
         # 整集缓冲（把整节课分片下到服务端磁盘缓存）：批量预缓冲 + 状态
         self.seg_total = {}      # vid -> 总分片数（已知时）
@@ -144,7 +150,7 @@ class Gateway:
             with open(self.thumb_index_path, "w", encoding="utf-8") as f:
                 json.dump(snap, f)
         except Exception:  # noqa: BLE001
-            pass
+            _log.warning("缩略图索引落盘失败：%s", self.thumb_index_path, exc_info=True)
 
     def _thumb_worker(self):
         while True:
@@ -154,6 +160,7 @@ class Gateway:
             try:
                 self._gen_thumbs(vid, m3u8, duration, tier)
             except Exception as e:  # noqa: BLE001
+                _log.warning("缩略图生成失败 vid=%s", vid, exc_info=True)
                 with self.thumb_lock:
                     self.thumb_meta[vid] = {"state": "error", "reason": str(e)}
             finally:
@@ -191,12 +198,12 @@ class Gateway:
                     d, c, _ = self.pri_fetch(tier, th, u)
                     self.seg_cache.put((u, tvid), (c or "video/mp2t", d))
                 except Exception:  # noqa: BLE001
-                    pass
+                    _log.debug("缩略图源分片预取失败：%s", u, exc_info=True)
             # 并发收紧到 1：受限下行下，高档抢占时不可取消的在途下载越少越好。
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
                 list(ex.map(_grab, urls))
         except Exception:  # noqa: BLE001
-            pass
+            _log.debug("缩略图源 m3u8 预取失败 vid=%s（仍尝试 ffmpeg 直读）", vid, exc_info=True)
         proxied = "http://127.0.0.1:%d/p?u=%s&vid=%s" % (
             self.port, urllib.parse.quote(m3u8, safe=""), tvid)
         vf = ("fps=1/%d,scale=%d:%d:force_original_aspect_ratio=increase,"
@@ -262,7 +269,7 @@ class Gateway:
                 d, c, _ = self.pri_fetch(2, th, u)
                 self.seg_cache.put((u, vid), (c or "video/mp2t", d))  # 每片下完即可被命中
             except Exception:  # noqa: BLE001
-                pass
+                _log.debug("整集缓冲分片失败 vid=%s：%s", vid, u, exc_info=True)
         # 并发收紧到 1：手动缓存最低优先，抢占时在途下载越少观看越稳。
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
             list(ex.map(_grab, urls))
@@ -278,6 +285,7 @@ class Gateway:
                 with self.buf_lock:
                     self.buf_state[vid] = "done"
             except Exception:  # noqa: BLE001
+                _log.warning("整集缓冲失败 vid=%s", vid, exc_info=True)
                 with self.buf_lock:
                     self.buf_state[vid] = "error"
             finally:
@@ -299,6 +307,7 @@ class Gateway:
         try:
             data, _, _ = self.pri_fetch(1, hdrs, m3u8)
         except Exception:  # noqa: BLE001
+            _log.warning("预缓存取 m3u8 失败 vid=%s（观看不受影响）", vid, exc_info=True)
             return
         text = data.decode("utf-8", "replace")
         # 先把密钥缓存好
@@ -310,7 +319,7 @@ class Gateway:
                         kd, kc, _ = self.pri_fetch(1, hdrs, kabs)
                         self.seg_cache.put((kabs, vid), (kc or "application/octet-stream", kd))
                     except Exception:  # noqa: BLE001
-                        pass
+                        _log.debug("预缓存取密钥失败 vid=%s：%s", vid, kabs, exc_info=True)
         segs = parse_segments(text, m3u8)
         n = len(segs)
         self.seg_total[vid] = n
@@ -348,7 +357,7 @@ class Gateway:
                     self.seg_cache.put((s, vid), (c or "video/mp2t", d))
                     fetched = True
                 except Exception:  # noqa: BLE001
-                    pass
+                    _log.debug("预缓存分片失败 vid=%s：%s", vid, s, exc_info=True)
             if recenter:
                 continue
             if not fetched:
@@ -461,6 +470,7 @@ def make_handler(gateway):
             try:
                 payload = self._read_json()
             except Exception as e:  # noqa: BLE001
+                _log.debug("请求体解析失败：%s", e)
                 self._send_json({"error": str(e)}, 400)
                 return
             queued = skipped = 0
@@ -518,6 +528,7 @@ def make_handler(gateway):
             try:
                 payload = self._read_json()
             except Exception as e:  # noqa: BLE001
+                _log.debug("请求体解析失败：%s", e)
                 self._send_json({"error": str(e)}, 400)
                 return
             raw = (payload.get("dir") or "").strip()
@@ -636,6 +647,7 @@ def make_handler(gateway):
                 length = int(self.headers.get("Content-Length") or 0)
                 payload = json.loads(self.rfile.read(length).decode("utf-8"))
             except Exception as e:  # noqa: BLE001
+                _log.debug("缩略图批量请求体解析失败：%s", e)
                 self._send_json({"error": str(e)}, 400)
                 return
             queued = skipped = 0
@@ -687,6 +699,7 @@ def make_handler(gateway):
             try:
                 prods = list_products(self.gw.session)
             except Exception as e:  # noqa: BLE001
+                _log.warning("拉取课程列表失败（会话过期？）", exc_info=True)
                 self._send_json({"error": str(e)}, 502)
                 return
             courses = [{
@@ -705,6 +718,7 @@ def make_handler(gateway):
             try:
                 self._send_json({"videos": get_product_videos(self.gw.session, pid)})
             except Exception as e:  # noqa: BLE001
+                _log.warning("拉取课程视频失败 productId=%s", pid, exc_info=True)
                 self._send_json({"error": str(e)}, 502)
 
         def _api_watch_state(self, qs):
@@ -715,6 +729,7 @@ def make_handler(gateway):
             try:
                 self._send_json({"watch": get_product_watch_state(self.gw.session, pid)})
             except Exception as e:  # noqa: BLE001
+                _log.warning("拉取观看状态失败 productId=%s", pid, exc_info=True)
                 self._send_json({"error": str(e)}, 502)
 
         def _api_play(self, qs):
@@ -771,6 +786,7 @@ def make_handler(gateway):
                 try:
                     data, _, _ = self._fetch_upstream(target, vid)
                 except Exception as e:  # noqa: BLE001
+                    _log.warning("取播放列表失败（会话过期？）：%s", target, exc_info=True)
                     self._send_bytes(502, str(e).encode("utf-8"), "text/plain")
                     return
                 text = data.decode("utf-8", "replace")
@@ -796,6 +812,7 @@ def make_handler(gateway):
                                      e.headers.get("Content-Type", "text/plain"))
                     return
                 except Exception as e:  # noqa: BLE001
+                    _log.debug("取分片失败：%s", target, exc_info=True)
                     self._send_bytes(502, str(e).encode("utf-8"), "text/plain")
                     return
                 ctype = ctype or "application/octet-stream"

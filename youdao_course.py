@@ -33,6 +33,7 @@ youdao_course.py
 """
 
 import argparse
+import logging
 import os
 import signal
 import subprocess
@@ -182,6 +183,9 @@ def build_parser():
     common.add_argument("--request", "-r",
                         help="抓包复制出来的请求原文文件（含 .m3u8 那条）。不传则从 stdin 读。")
     common.add_argument("--port", type=int, default=8808, help="本地代理端口（默认 8808）。")
+    common.add_argument("--log-level", default=os.environ.get("YDCOURSE_LOG_LEVEL", "INFO"),
+                        help="日志级别 DEBUG/INFO/WARNING/ERROR（默认 INFO；也可用环境变量 "
+                             "YDCOURSE_LOG_LEVEL）。DEBUG 会打印逐片预取等细节。")
 
     lp = sub.add_parser("list", parents=[common],
                         help="列出所有已购课程和视频（只需会话 Cookie）。")
@@ -210,8 +214,17 @@ def build_parser():
     return p
 
 
+def _setup_logging(level):
+    logging.basicConfig(
+        level=getattr(logging, str(level).upper(), logging.INFO),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
+
 def main():
     args = build_parser().parse_args()
+    _setup_logging(getattr(args, "log_level", "INFO"))
     args.func(args)
 
 

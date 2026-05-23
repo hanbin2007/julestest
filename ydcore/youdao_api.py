@@ -4,8 +4,11 @@
 状态(get_product_watch_state)分开：目录极少变、可长缓存；观看状态每次同步都要新鲜地拉。
 """
 import json
+import logging
 import time
 import urllib.request
+
+_log = logging.getLogger(__name__)
 
 API_PRODUCTS = "https://ai.ydshengxue.com/ai-product/api/app/v2/products/after-sale"
 API_PRODUCT_DETAIL = "https://ai.ydshengxue.com/ai-product/api/app/v3/products/after-sale/%s"
@@ -37,6 +40,7 @@ def api_get_json(session, url, retries=3):
                 return json.loads(r.read().decode("utf-8"))
         except Exception as e:  # noqa: BLE001  (上游偶发抖动，退避重试)
             last = e
+            _log.debug("有道 API 第 %d 次重试：%s（%s）", attempt + 1, url, e)
             time.sleep(0.6 * (attempt + 1))
     raise last
 
@@ -216,7 +220,7 @@ def resolve_m3u8(session, video, quality="highest"):
             if url:
                 return url
     except Exception:  # noqa: BLE001
-        pass
+        _log.debug("outline 接口取 m3u8 失败 videoId=%s", video.get("videoId"), exc_info=True)
     return None
 
 
