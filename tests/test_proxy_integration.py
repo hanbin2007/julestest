@@ -9,6 +9,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from contextlib import contextmanager
 
 import pytest
 
@@ -38,8 +39,8 @@ def _free_port():
     return port
 
 
-@pytest.fixture
-def server(tmp_path, monkeypatch):
+@contextmanager
+def _running_gateway(tmp_path, monkeypatch, prefetch):
     calls = {}
 
     def fake(headers, target, range_header=None, retries=3):
@@ -57,12 +58,24 @@ def server(tmp_path, monkeypatch):
     monkeypatch.setattr(httpio, "upstream_fetch", fake)
     monkeypatch.setattr(gateway, "THUMB_DIR", str(tmp_path / "thumbs"))  # 别污染真实缩略图目录
     port = _free_port()
-    srv = start_proxy({"Cookie": "x"}, port, session={"Cookie": "x"}, prefetch=False)
+    srv = start_proxy({"Cookie": "x"}, port, session={"Cookie": "x"}, prefetch=prefetch)
     try:
         yield "http://127.0.0.1:%d" % port, calls
     finally:
         srv.shutdown()
         srv.server_close()
+
+
+@pytest.fixture
+def server(tmp_path, monkeypatch):
+    with _running_gateway(tmp_path, monkeypatch, prefetch=False) as s:
+        yield s
+
+
+@pytest.fixture
+def server_prefetch(tmp_path, monkeypatch):
+    with _running_gateway(tmp_path, monkeypatch, prefetch=True) as s:
+        yield s
 
 
 def _get(url, headers=None):
@@ -164,3 +177,23 @@ def test_buffer_batch_then_segments(server):
     assert seg.get("total") == 2 and seg.get("cached") == 2
     assert seg.get("buckets") is not None
     assert calls.get(SEG0) == 1 and calls.get(SEG1) == 1   # 每片只回源一次
+
+
+def test_prefetch_caches_whole_episode(server_prefetch):
+    # prefetch=True：/api/play 触发后台预缓存 worker，以播放头为中心补完整集分片。
+    # 覆盖 start_prefetch -> _prefetch_worker -> _order 居中扩散 -> 落缓存这条最大未测路径。
+    base, _ = server_prefetch
+    q = urllib.parse.urlencode({
+        "videoId": 42, "contentId": 1, "cardPackageId": 2, "productId": 3, "m3u8": M3U8,
+    })
+    st, _, _ = _get(base + "/api/play?" + q)
+    assert st == 200
+    deadline = time.time() + 5
+    seg = {}
+    while time.time() < deadline:
+        st, body, _ = _get(base + "/api/buffer/segments?vid=42")
+        seg = json.loads(body)["segments"].get("42") or {}
+        if seg.get("cached") == 2:
+            break
+        time.sleep(0.05)
+    assert seg.get("total") == 2 and seg.get("cached") == 2
