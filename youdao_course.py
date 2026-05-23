@@ -249,6 +249,16 @@ class _DiskLRU:
                     d["segments"] += 1
         return {"real": real, "thumb": thumb}
 
+    def cached_segs_by_vid(self):
+        """{vid: set(seg_url)}，仅 .ts 分片，一次持锁快照。逐片 bitmap 查询用，
+        避免对每个 url 单独加锁 has()（一门课几百片 × 几十讲会很碎）。"""
+        out = {}
+        with self.lock:
+            for (url, vid), _meta in self.meta.items():
+                if url.endswith(".ts"):
+                    out.setdefault(vid, set()).add(url)
+        return out
+
     def cleanup(self):
         shutil.rmtree(self.dir, ignore_errors=True)
 
@@ -363,6 +373,13 @@ def _looks_like_m3u8(url, content_type):
         return True
     path = urllib.parse.urlparse(url).path.lower()
     return path.endswith(".m3u8") or path.endswith(".m3u")
+
+
+def parse_segments(body_text, base_url):
+    """从 m3u8 文本里按播放顺序解析出分片绝对地址（跳过注释/标签行）。
+    用的 urljoin 与缓存 key、rewrite_m3u8 完全一致，故据此查 seg_cache 即得逐片缓存 bitmap。"""
+    return [urllib.parse.urljoin(base_url, ln.strip())
+            for ln in body_text.splitlines() if ln.strip() and not ln.startswith("#")]
 
 
 APP_HTML = r"""<!doctype html>
@@ -1241,6 +1258,7 @@ def make_handler(base_headers, default_url="", session=None, auto=None,
 
     # 整集缓冲（把整节课分片下到服务端磁盘缓存）：批量预缓冲 + 状态
     seg_total = {}        # vid -> 总分片数（已知时）
+    seg_urls = {}         # vid -> 按播放顺序的分片绝对地址列表（任何来源解析到 m3u8 时填充）
     buf_state = {}        # vid -> "queued"/"working"/"done"/"error"
     buf_lock = threading.Lock()
     buf_q = queue.Queue()
@@ -1255,9 +1273,9 @@ def make_handler(base_headers, default_url="", session=None, auto=None,
             video_headers[vid] = th
         pl, _, _ = pri_fetch(2, th, m3u8)
         text = pl.decode("utf-8", "replace")
-        segs = [urllib.parse.urljoin(m3u8, ln.strip())
-                for ln in text.splitlines() if ln.strip() and not ln.startswith("#")]
+        segs = parse_segments(text, m3u8)
         seg_total[vid] = len(segs)
+        seg_urls[vid] = list(segs)  # 供逐片缓存 bitmap 查询
         urls = list(segs)
         for ln in text.splitlines():
             if ln.startswith("#EXT-X-KEY") and 'URI="' in ln:
@@ -1329,10 +1347,10 @@ def make_handler(base_headers, default_url="", session=None, auto=None,
                         seg_cache.put((kabs, vid), (kc or "application/octet-stream", kd))
                     except Exception:  # noqa: BLE001
                         pass
-        segs = [urllib.parse.urljoin(m3u8, ln.strip())
-                for ln in text.splitlines() if ln.strip() and not ln.startswith("#")]
+        segs = parse_segments(text, m3u8)
         n = len(segs)
         seg_total[vid] = n
+        seg_urls[vid] = list(segs)  # 供逐片缓存 bitmap 查询
         if n == 0:
             return
         pf_segidx[vid] = {u: i for i, u in enumerate(segs)}
@@ -1430,6 +1448,8 @@ def make_handler(base_headers, default_url="", session=None, auto=None,
                 self._api_thumbs_status()
             elif path == "/api/status":
                 self._api_status(qs)
+            elif path == "/api/buffer/segments":
+                self._api_buffer_segments(qs)
             elif path.startswith("/thumbs/"):
                 self._serve_thumb(path)
             elif path == "/p":
@@ -1482,6 +1502,43 @@ def make_handler(base_headers, default_url="", session=None, auto=None,
                 start_buffer(*bv)
                 queued += 1
             self._send_json({"queued": queued, "skipped": skipped})
+
+        def _api_buffer_segments(self, qs):
+            """逐片缓存 bitmap（"已缓存的地方"）。可传多个 vid；用 buckets 把分片压成
+            定长格子(每格=该区间已缓存占比 0..1)，无论分片多少都给定长、可上色的一条。
+            没有有序分片列表(如重启后只看过一次还没复看)时 buckets=null，前端回退到比例条。"""
+            vids = qs.get("vid") or qs.get("videoId") or []
+            try:
+                nb = int((qs.get("buckets") or ["60"])[0])
+            except (ValueError, TypeError):
+                nb = 60
+            nb = max(1, min(nb, 400))
+            snap = seg_cache.cached_segs_by_vid()  # 一次持锁快照，避免逐 url 加锁
+            stats = seg_cache.vid_stats()["real"]
+            out = {}
+            for vid in vids:
+                vid = str(vid)
+                urls = seg_urls.get(vid)
+                disk = (stats.get(vid) or {}).get("segments", 0)
+                if urls:
+                    n = len(urls)
+                    cset = snap.get(vid) or set()
+                    flags = [1 if u in cset else 0 for u in urls]
+                    cached = sum(flags)
+                    b = min(nb, n)
+                    cells = []
+                    for i in range(b):
+                        lo, hi = i * n // b, (i + 1) * n // b
+                        seg = flags[lo:hi]
+                        cells.append(round(sum(seg) / len(seg), 3) if seg else 0)
+                    ph = playhead.get(vid)
+                    pos = (ph / n) if (ph is not None and n) else None
+                    out[vid] = {"total": n, "cached": cached, "buckets": cells, "playhead": pos}
+                else:
+                    # 无有序列表：只能给磁盘计数与已知总数，buckets=null
+                    out[vid] = {"total": seg_total.get(vid), "cached": disk,
+                                "buckets": None, "playhead": None}
+            self._send_json({"segments": out})
 
         def _api_status(self, qs):
             with thumb_lock:
@@ -1710,7 +1767,14 @@ def make_handler(base_headers, default_url="", session=None, auto=None,
                 except Exception as e:  # noqa: BLE001
                     self._send_bytes(502, str(e).encode("utf-8"), "text/plain")
                     return
-                rewritten = rewrite_m3u8(data.decode("utf-8", "replace"), target, vid)
+                text = data.decode("utf-8", "replace")
+                # 观看路径顺带记下分片顺序：仅媒体播放列表(#EXTINF)，避免把 master 的子列表当分片。
+                if vid and "#EXTINF" in text:
+                    segs = parse_segments(text, target)
+                    if segs:
+                        seg_urls[vid] = segs
+                        seg_total[vid] = len(segs)
+                rewritten = rewrite_m3u8(text, target, vid)
                 self._send_bytes(200, rewritten.encode("utf-8"),
                                  "application/vnd.apple.mpegurl")
                 return

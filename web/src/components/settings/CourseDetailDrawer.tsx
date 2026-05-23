@@ -3,6 +3,7 @@ import * as React from "react";
 import { Box, Drawer, IconButton, Typography } from "@mui/material";
 import CloseRoundedIcon from "@mui/icons-material/CloseRounded";
 import { useCourseVideos } from "@/hooks/data";
+import { useSegmentMaps } from "@/hooks/useSegmentMaps";
 import LectureGrid, { type GridRow } from "./LectureGrid";
 import type { CourseStatus, CoursesStatus, VideoRow } from "@/types/api";
 
@@ -27,6 +28,9 @@ export default function CourseDetailDrawer({
   const [selected, setSelected] = React.useState<Set<number>>(new Set());
   React.useEffect(() => setSelected(new Set()), [course?.productId]);
 
+  // 只为打开的这门课拉逐片 bitmap（有界），平铺视图不拉 → 缓存条按比例填充兜底。
+  const segMaps = useSegmentMaps(open ? videos.map((v) => v.videoId) : [], { buckets: 48 });
+
   const rows: GridRow[] = React.useMemo(() => {
     if (!course) return [];
     return videos.map((v) => {
@@ -42,10 +46,11 @@ export default function CourseDetailDrawer({
         bufCached: b?.cached ?? 0,
         bufTotal: b?.total ?? null,
         bufState: b?.state ?? null,
+        segMap: segMaps[String(v.videoId)],
         vrow: { v, courseId: course.productId, courseName: course.name },
       };
     });
-  }, [course, videos, perVid]);
+  }, [course, videos, perVid, segMaps]);
 
   const toggle = (id: number, on: boolean) =>
     setSelected((s) => {

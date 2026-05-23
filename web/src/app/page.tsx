@@ -14,9 +14,11 @@ import ContinueWatchingRail from "@/components/home/ContinueWatchingRail";
 import CommandPalette from "@/components/common/CommandPalette";
 import ShortcutsOverlay from "@/components/common/ShortcutsOverlay";
 import { PlayerSkeleton } from "@/components/common/Skeletons";
+import CacheBar from "@/components/common/CacheBar";
 import { useToast } from "@/components/common/Toast";
 import { useCourses, useCourseVideos } from "@/hooks/data";
 import { useThumbPoll } from "@/hooks/useThumbPoll";
+import { useSegmentMaps } from "@/hooks/useSegmentMaps";
 import { useHotkeys } from "@/hooks/useHotkeys";
 import { play, pickM3u8, postProgress, addNote as apiAddNote, patchSettings, refreshCatalog } from "@/lib/api";
 import { themeForSeed, hashSeed } from "@/lib/color";
@@ -57,6 +59,9 @@ export default function PlayerView() {
   const next = idx >= 0 && idx < curList.length - 1 ? curList[idx + 1] : null;
 
   const thumbnails = useThumbPoll(video ?? null);
+  // 本讲逐片缓存：观看/预缓存会持续补片，快一点刷新让缓存条像在“长”。
+  const segMaps = useSegmentMaps(video ? [video.videoId] : [], { buckets: 100, refreshInterval: 1500 });
+  const segMap = video ? segMaps[String(video.videoId)] : undefined;
   const startTime = React.useMemo(
     () => (sel ? progressMap[String(sel.videoId)]?.t : undefined),
     [sel, progressMap]
@@ -285,6 +290,17 @@ export default function PlayerView() {
                     onCancel={() => setUpNext(null)}
                   />
                 </Box>
+                {/* 本讲缓存条：已缓存的位置标绿，竖线为预缓存播放头。条宽对齐视频，格子≈时间位置。 */}
+                {video && (
+                  <Box sx={{ display: "flex", alignItems: "center", gap: 1.5, mt: 1 }}>
+                    <Typography variant="caption" color="text.secondary" sx={{ flexShrink: 0 }}>
+                      本讲缓存
+                    </Typography>
+                    <Box sx={{ flex: 1, minWidth: 0 }}>
+                      <CacheBar map={segMap} height={10} showPlayhead showLabel />
+                    </Box>
+                  </Box>
+                )}
               </Box>
               {video && course && (
                 <PlayerMeta

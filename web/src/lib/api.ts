@@ -7,6 +7,7 @@ import type {
   Course,
   CoursesStatus,
   PlayResponse,
+  SegmentsResponse,
   StatusResponse,
   ThumbResponse,
   ThumbsStatus,
@@ -51,6 +52,11 @@ export const getStatus = () => fetcher<StatusResponse>("/api/status");
 export const getThumbsStatus = () => fetcher<ThumbsStatus>("/api/thumbs/status");
 // 设置页：每门课实时状态汇总（网关 per-vid + 目录 + 进度 的服务端聚合）
 export const getCoursesStatus = () => fetcher<CoursesStatus>("/api/courses/status");
+// 单讲逐片缓存 bitmap（可批量）：缓存条用。经兜底代理透传给网关 /api/buffer/segments。
+export const getSegmentMaps = (vids: number[], buckets = 60) => {
+  const q = vids.map((v) => `vid=${v}`).join("&") + `&buckets=${buckets}`;
+  return fetcher<SegmentsResponse>(`/api/buffer/segments?${q}`);
+};
 
 async function postJson<T>(url: string, body: unknown): Promise<T> {
   const r = await fetch(url, {

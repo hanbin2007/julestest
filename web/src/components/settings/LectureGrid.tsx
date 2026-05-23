@@ -1,11 +1,12 @@
 "use client";
 import * as React from "react";
 import { DataGrid, type GridColDef } from "@mui/x-data-grid";
-import { Box, Button, Checkbox, Chip, LinearProgress, Typography } from "@mui/material";
+import { Box, Button, Checkbox, Chip, Typography } from "@mui/material";
 import OndemandVideoRoundedIcon from "@mui/icons-material/OndemandVideoRounded";
 import ReplayRoundedIcon from "@mui/icons-material/ReplayRounded";
+import CacheBar from "@/components/common/CacheBar";
 import { fmtDur, fmtBytes } from "@/lib/media";
-import type { VideoRow } from "@/types/api";
+import type { SegmentMap, VideoRow } from "@/types/api";
 
 export interface GridRow {
   id: number;
@@ -18,6 +19,7 @@ export interface GridRow {
   bufCached: number;
   bufTotal: number | null;
   bufState: string | null;
+  segMap?: SegmentMap; // 详情抽屉里附逐片 bitmap；平铺视图无此字段 → 缓存条回退到比例填充
   vrow: VideoRow;
 }
 
@@ -30,22 +32,20 @@ function ThumbChip({ s }: { s: GridRow["thumbState"] }) {
   return <Chip size="small" label="— 未生成" />;
 }
 
+// 缓存列：统一用缓存条。有 bitmap 显示"已缓存的地方"分布；否则比例填充；缓冲中扫光、失败红条。
 function BufferCell({ r }: { r: GridRow }) {
-  if (r.bufState === "working") return <Chip size="small" color="primary" label="⏳ 缓冲中" />;
-  if (r.bufState === "error") return <Chip size="small" color="error" label="✗ 失败" />;
-  if (r.bufTotal) {
-    const pct = Math.round((r.bufCached / r.bufTotal) * 100);
-    return (
-      <Box sx={{ display: "flex", alignItems: "center", gap: 1, width: "100%" }}>
-        <LinearProgress variant="determinate" value={pct} sx={{ flex: 1, "& .MuiLinearProgress-bar": { bgcolor: "success.main" } }} />
-        <Typography variant="caption" color="text.secondary" sx={{ fontVariantNumeric: "tabular-nums" }}>
-          {r.bufCached}/{r.bufTotal}
-        </Typography>
-      </Box>
-    );
-  }
-  if (r.bufCached) return <Typography variant="caption" color="text.secondary">{r.bufCached} 段</Typography>;
-  return <Chip size="small" label="—" />;
+  return (
+    <Box sx={{ width: "100%" }}>
+      <CacheBar
+        map={r.segMap}
+        cached={r.bufCached}
+        total={r.bufTotal}
+        state={r.bufState}
+        height={10}
+        showLabel
+      />
+    </Box>
+  );
 }
 
 export default function LectureGrid({

@@ -149,6 +149,19 @@ export interface TaskItem {
   cached?: number;
   total?: number | null;
 }
+// ---- 单讲逐片缓存 bitmap（/api/buffer/segments）：看课页 + 设置页缓存条 ----
+export interface SegmentMap {
+  total: number | null; // 总分片数（已知时）
+  cached: number; // 已缓存分片数
+  // 定长格子，每格 = 该区间已缓存占比 0..1（无论分片多少都给定长、可上色的一条）。
+  // null 表示没有有序分片列表（如重启后只看过一次还没复看）→ 前端回退到比例条。
+  buckets: number[] | null;
+  playhead: number | null; // 预缓存播放头位置 0..1（仅当前自动预缓存那讲有值）
+}
+export interface SegmentsResponse {
+  segments: Record<string, SegmentMap>;
+}
+
 export interface CoursesStatus {
   courses: CourseStatus[];
   perVid: Record<string, VidStatusDetail>;
