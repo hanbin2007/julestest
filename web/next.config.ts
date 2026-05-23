@@ -1,8 +1,8 @@
 import type { NextConfig } from "next";
 
-// 后端(Python 代理) 地址。同源 rewrites 把 /api、/p、/thumbs 透传给它，
-// 因此浏览器始终只跟 Next 同源通信（无 CORS），且 Range/206 在网络层原样透传。
-const BACKEND = process.env.BACKEND_ORIGIN ?? "http://127.0.0.1:8808";
+// Python 有道网关地址。/api/* 现由 Next route handlers 处理（DB 支撑），不再 rewrite；
+// 仅媒体字节 /p、/thumbs 在网络层透传给网关（支持 Range/206、流式，零拷贝）。
+const GATEWAY = process.env.GATEWAY_ORIGIN ?? process.env.BACKEND_ORIGIN ?? "http://127.0.0.1:8808";
 
 const nextConfig: NextConfig = {
   // 把工作区根锁定在本目录，避免 Next 误把 ~ 下的 lockfile 当成项目根。
@@ -11,9 +11,8 @@ const nextConfig: NextConfig = {
   allowedDevOrigins: ["192.168.0.126"],
   async rewrites() {
     return [
-      { source: "/api/:path*", destination: `${BACKEND}/api/:path*` },
-      { source: "/p", destination: `${BACKEND}/p` },
-      { source: "/thumbs/:path*", destination: `${BACKEND}/thumbs/:path*` },
+      { source: "/p", destination: `${GATEWAY}/p` },
+      { source: "/thumbs/:path*", destination: `${GATEWAY}/thumbs/:path*` },
     ];
   },
 };

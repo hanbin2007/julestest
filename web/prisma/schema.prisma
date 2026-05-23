@@ -1,0 +1,86 @@
+// Next.js 主后端的数据层（SQLite）。课程目录用 raw(JSON 文本)整存，避免字段漂移；
+// 进度/笔记/状态等是我们自有的结构化数据。DB 文件落在 ~/.youdao_course/app.db。
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ---- 目录（从 Python 网关同步而来，之后从 DB 读，不再每次打有道）----
+model Course {
+  productId Int      @id
+  name      String
+  raw       String // 整条 course JSON（authors/cardType 等都在里面）
+  syncedAt  DateTime @default(now())
+  videos    Video[]
+}
+
+model Video {
+  videoId   Int      @id
+  productId Int
+  title     String?
+  idx       Int      @default(0) // 在课程内的顺序
+  raw       String // 整条 video JSON（clarity/contentId/cardPackageId/duration/locked…）
+  syncedAt  DateTime @default(now())
+  course    Course   @relation(fields: [productId], references: [productId], onDelete: Cascade)
+
+  @@index([productId])
+}
+
+// ---- 自有结构化状态 ----
+model Progress {
+  videoId    Int      @id
+  productId  Int?
+  t          Float    @default(0) // 已看到（秒）
+  d          Float    @default(0) // 时长（秒）
+  title      String?
+  courseName String?
+  at         DateTime @updatedAt
+}
+
+model Note {
+  id      String   @id
+  videoId Int
+  t       Int      @default(0) // 时间戳（秒）
+  text    String
+  at      DateTime @default(now())
+
+  @@index([videoId])
+}
+
+// 网关缓存/缓冲状态的镜像（真相在网关，这里供 UI 直读 + 跨设备）
+model CacheStatus {
+  videoId        Int      @id
+  cachedSegments Int      @default(0)
+  totalSegments  Int?
+  state          String? // queued/working/done/error
+  bytes          Int      @default(0)
+  updatedAt      DateTime @updatedAt
+}
+
+model ThumbStatus {
+  videoId   Int      @id
+  state     String // gen/ready/error
+  url       String?
+  number    Int?
+  column    Int?
+  width     Int?
+  height    Int?
+  updatedAt DateTime @updatedAt
+}
+
+// 偏好（rate/density）、last-watched 等：key -> JSON 文本
+model Setting {
+  key   String @id
+  value String
+}
+
+model SyncMeta {
+  key   String   @id
+  value String?
+  at    DateTime @updatedAt
+}
