@@ -18,9 +18,9 @@ import { useToast } from "@/components/common/Toast";
 import { useCourses, useCourseVideos } from "@/hooks/data";
 import { useThumbPoll } from "@/hooks/useThumbPoll";
 import { useHotkeys } from "@/hooks/useHotkeys";
-import { play, pickM3u8 } from "@/lib/api";
+import { play, pickM3u8, postProgress, addNote as apiAddNote, patchSettings } from "@/lib/api";
 import { themeForSeed, hashSeed } from "@/lib/color";
-import { getProgress, setProgress, setLast, getLast, addNote } from "@/lib/store";
+import { useProgressMap, useLast } from "@/hooks/persist";
 import type { Course, Video, VideoRow } from "@/types/api";
 
 const ArtPlayer = dynamic(() => import("@/components/player/ArtPlayer"), {
@@ -36,6 +36,8 @@ interface Sel {
 export default function PlayerView() {
   const toast = useToast();
   const { courses, isLoading } = useCourses();
+  const progressMap = useProgressMap();
+  const last = useLast();
   const [sel, setSel] = React.useState<Sel | null>(null);
   const [drawer, setDrawer] = React.useState(false);
   const [notesOpen, setNotesOpen] = React.useState(false);
@@ -55,8 +57,8 @@ export default function PlayerView() {
 
   const thumbnails = useThumbPoll(video ?? null);
   const startTime = React.useMemo(
-    () => (sel ? getProgress(sel.videoId)?.t : undefined),
-    [sel]
+    () => (sel ? progressMap[String(sel.videoId)]?.t : undefined),
+    [sel, progressMap]
   );
   const accentTheme = React.useMemo(
     () => themeForSeed(course ? hashSeed(course.name) : "#4f8cff"),
@@ -64,16 +66,22 @@ export default function PlayerView() {
   );
 
   // 深链 / 上次观看 初始化
+  const resumedRef = React.useRef(false);
   React.useEffect(() => {
     const sp = new URLSearchParams(window.location.search);
     const p = Number(sp.get("productId"));
     const v = Number(sp.get("videoId"));
-    if (p && v) setSel({ courseId: p, videoId: v });
-    else {
-      const last = getLast();
-      if (last) setSel({ courseId: last.productId, videoId: last.videoId });
+    if (p && v) {
+      setSel({ courseId: p, videoId: v });
+      resumedRef.current = true;
     }
   }, []);
+  // last-watched 从服务端(SWR)加载后再自动续看；只续一次，不覆盖用户已选。
+  React.useEffect(() => {
+    if (resumedRef.current || sel || !last) return;
+    resumedRef.current = true;
+    setSel({ courseId: last.productId, videoId: last.videoId });
+  }, [last, sel]);
 
   // 取流
   React.useEffect(() => {
@@ -97,7 +105,7 @@ export default function PlayerView() {
 
   const selectVideo = React.useCallback((v: Video, c: Course) => {
     setSel({ courseId: c.id, videoId: v.videoId });
-    setLast({ productId: c.id, videoId: v.videoId });
+    void patchSettings({ last: { productId: c.id, videoId: v.videoId } });
     setDrawer(false);
   }, []);
 
@@ -107,13 +115,13 @@ export default function PlayerView() {
 
   const pickFromPalette = React.useCallback((row: VideoRow) => {
     setSel({ courseId: row.courseId, videoId: row.v.videoId });
-    setLast({ productId: row.courseId, videoId: row.v.videoId });
+    void patchSettings({ last: { productId: row.courseId, videoId: row.v.videoId } });
   }, []);
 
   const onTime = React.useCallback(
     (t: number, d: number) => {
       if (!video || !course) return;
-      setProgress(video.videoId, t, d, {
+      void postProgress(video.videoId, t, d, {
         productId: course.id,
         title: video.title ?? `视频 ${video.videoId}`,
         courseName: course.name,
@@ -166,7 +174,7 @@ export default function PlayerView() {
     p: () => prev && course && selectVideo(prev, course),
     c: () => copyDownload(),
     b: () => {
-      const v = a()?.video; if (v && video) { addNote(video.videoId, Math.floor(v.currentTime), "书签"); toast("已记书签"); }
+      const v = a()?.video; if (v && video) { void apiAddNote(video.videoId, Math.floor(v.currentTime), "书签"); toast("已记书签"); }
     },
     "?": () => setScOpen(true),
     ...Object.fromEntries(

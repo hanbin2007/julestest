@@ -1,0 +1,42 @@
+import { NextRequest } from "next/server";
+import { prisma } from "@/lib/db";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+// 观看进度（跨设备）。GET 返回按 videoId 索引的 map（续看轨/侧栏用）；POST 上报一条。
+export async function GET() {
+  const rows = await prisma.progress.findMany();
+  const progress: Record<string, unknown> = {};
+  for (const r of rows) {
+    progress[String(r.videoId)] = {
+      t: r.t,
+      d: r.d,
+      at: r.at.getTime(),
+      videoId: r.videoId,
+      productId: r.productId ?? undefined,
+      title: r.title ?? undefined,
+      courseName: r.courseName ?? undefined,
+    };
+  }
+  return Response.json({ progress });
+}
+
+export async function POST(req: NextRequest) {
+  const d = await req.json().catch(() => ({}));
+  const videoId = Number(d.videoId);
+  if (!videoId) return Response.json({ error: "missing videoId" }, { status: 400 });
+  const data = {
+    t: Number(d.t) || 0,
+    d: Number(d.d) || 0,
+    productId: d.productId != null ? Number(d.productId) : null,
+    title: d.title ?? null,
+    courseName: d.courseName ?? null,
+  };
+  await prisma.progress.upsert({
+    where: { videoId },
+    create: { videoId, ...data },
+    update: data,
+  });
+  return Response.json({ ok: true });
+}

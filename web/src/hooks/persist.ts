@@ -1,36 +1,80 @@
 "use client";
-import { useEffect, useMemo, useState } from "react";
-import * as store from "@/lib/store";
+import useSWR from "swr";
+import * as api from "@/lib/api";
+import type { LastWatched, Note, Prefs, ProgressMap } from "@/lib/store";
 
-function useStoreVersion() {
-  const [v, setV] = useState(0);
-  useEffect(() => {
-    const h = () => setV((x) => x + 1);
-    window.addEventListener("ydc-store", h as EventListener);
-    window.addEventListener("storage", h);
-    return () => {
-      window.removeEventListener("ydc-store", h as EventListener);
-      window.removeEventListener("storage", h);
-    };
-  }, []);
-  return v;
-}
+// 状态全部走服务端（SQLite），SWR 缓存 + 焦点重验 = 跨设备同步。
 
-export function useProgressMap() {
-  const v = useStoreVersion();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  return useMemo(() => store.getProgressMap(), [v]);
+export function useProgressMap(): ProgressMap {
+  const { data } = useSWR("/api/progress", () => api.getProgressAll(), {
+    revalidateOnFocus: true,
+  });
+  return data?.progress ?? {};
 }
 
 export function useNotes(videoId: number | null) {
-  const v = useStoreVersion();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  return useMemo(() => (videoId == null ? [] : store.getNotes(videoId)), [v, videoId]);
+  const key = videoId == null ? null : `/api/notes?videoId=${videoId}`;
+  const { data, mutate } = useSWR(
+    key,
+    () => api.getNotes(videoId as number),
+    { revalidateOnFocus: true },
+  );
+  const notes: Note[] = data?.notes ?? [];
+
+  const add = async (t: number, text: string) => {
+    if (videoId == null || !text.trim()) return;
+    const optimistic: Note = { id: `tmp-${Date.now()}`, t, text: text.trim(), at: Date.now() };
+    await mutate(
+      async () => ({ notes: (await api.addNote(videoId, t, text.trim())).notes }),
+      {
+        optimisticData: { notes: [...notes, optimistic].sort((a, b) => a.t - b.t) },
+        rollbackOnError: true,
+        revalidate: false,
+      },
+    );
+  };
+
+  const remove = async (id: string) => {
+    if (videoId == null) return;
+    await mutate(
+      async () => ({ notes: (await api.deleteNote(videoId, id)).notes }),
+      {
+        optimisticData: { notes: notes.filter((n) => n.id !== id) },
+        rollbackOnError: true,
+        revalidate: false,
+      },
+    );
+  };
+
+  return { notes, add, remove };
 }
 
 export function usePrefs() {
-  const v = useStoreVersion();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  const prefs = useMemo(() => store.getPrefs(), [v]);
-  return { prefs, setPrefs: store.setPrefs };
+  const { data, mutate } = useSWR("/api/settings", () => api.getSettings(), {
+    revalidateOnFocus: false,
+  });
+  const prefs: Prefs = data?.prefs ?? { rate: 1, density: "comfortable" };
+  const setPrefs = async (p: Partial<Prefs>) => {
+    await mutate(
+      async () => {
+        await api.patchSettings({ prefs: p });
+        return api.getSettings();
+      },
+      {
+        optimisticData: data
+          ? { ...data, prefs: { ...prefs, ...p } }
+          : { prefs: { ...prefs, ...p }, last: null },
+        rollbackOnError: true,
+        revalidate: false,
+      },
+    );
+  };
+  return { prefs, setPrefs };
+}
+
+export function useLast(): LastWatched | null {
+  const { data } = useSWR("/api/settings", () => api.getSettings(), {
+    revalidateOnFocus: false,
+  });
+  return data?.last ?? null;
 }

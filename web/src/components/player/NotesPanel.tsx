@@ -14,7 +14,6 @@ import {
 import AddRoundedIcon from "@mui/icons-material/AddRounded";
 import DeleteOutlineRoundedIcon from "@mui/icons-material/DeleteOutlineRounded";
 import { useNotes } from "@/hooks/persist";
-import { addNote, removeNote } from "@/lib/store";
 import { fmtDur } from "@/lib/media";
 
 export default function NotesPanel({
@@ -30,11 +29,11 @@ export default function NotesPanel({
   getCurrentTime: () => number;
   onSeek: (t: number) => void;
 }) {
-  const notes = useNotes(videoId);
+  const { notes, add: addNote, remove: removeNote } = useNotes(videoId);
   const [text, setText] = React.useState("");
   const add = () => {
     if (!videoId || !text.trim()) return;
-    addNote(videoId, Math.floor(getCurrentTime()), text.trim());
+    void addNote(Math.floor(getCurrentTime()), text.trim());
     setText("");
   };
   return (
@@ -67,7 +66,7 @@ export default function NotesPanel({
               key={n.id}
               disablePadding
               secondaryAction={
-                <IconButton edge="end" size="small" onClick={() => videoId && removeNote(videoId, n.id)}>
+                <IconButton edge="end" size="small" onClick={() => void removeNote(n.id)}>
                   <DeleteOutlineRoundedIcon fontSize="small" />
                 </IconButton>
               }
