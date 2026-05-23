@@ -1,0 +1,50 @@
+import { z } from "zod";
+
+// 写接口(POST)入参的集中校验。原先各路由用裸 Number()/String() 手工兜底，容易漏判；
+// 这里收敛为 zod schema，解析失败统一返回 400 + 可读的字段错误。
+// 数值用 z.coerce 保留原先 Number() 的宽松（前端偶尔传字符串数字也能过）。
+
+export const noteAddSchema = z.object({
+  videoId: z.coerce.number().int().positive(),
+  text: z.string().trim().min(1),
+  t: z.coerce.number().int().min(0).catch(0), // 时间戳秒，非法→0（同原 Math.floor(Number||0)）
+});
+
+export const noteUpdateSchema = z.object({
+  videoId: z.coerce.number().int().positive(),
+  id: z.string().min(1),
+  text: z.string().trim().min(1),
+});
+
+export const noteDeleteSchema = z.object({
+  videoId: z.coerce.number().int().positive(),
+  id: z.string().min(1),
+});
+
+export const progressSchema = z.object({
+  videoId: z.coerce.number().int().positive(),
+  t: z.coerce.number().min(0).catch(0),
+  d: z.coerce.number().min(0).catch(0),
+  productId: z.coerce.number().int().nullish().catch(null),
+  title: z.string().nullish(),
+  courseName: z.string().nullish(),
+});
+
+/**
+ * 解析并校验请求体。成功返回 {data}；失败返回 {error: 400 Response}，调用方直接 return。
+ * 请求体非 JSON 时按空对象处理（由 schema 决定缺字段是否报错）。
+ */
+export async function parseBody<T>(
+  req: Request,
+  schema: z.ZodType<T>,
+): Promise<{ data: T; error?: undefined } | { data?: undefined; error: Response }> {
+  const raw = await req.json().catch(() => ({}));
+  const r = schema.safeParse(raw);
+  if (!r.success) {
+    const msg =
+      r.error.issues.map((i) => `${i.path.join(".") || "body"}: ${i.message}`).join("; ") ||
+      "invalid body";
+    return { error: Response.json({ error: msg }, { status: 400 }) };
+  }
+  return { data: r.data };
+}
