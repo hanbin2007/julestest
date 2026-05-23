@@ -1,5 +1,6 @@
 import { prisma } from "./db";
 import { gatewayGet } from "./gateway";
+import { invalidateCatalogRollup } from "./catalogRollup";
 
 // 目录数据(课程/视频)从 Python 网关同步进 SQLite，之后从 DB 读，不再每次打有道。
 // 课程/视频整条 JSON 存进 raw，按原样回吐给前端，避免字段漂移。
@@ -38,6 +39,7 @@ export async function syncCourses(): Promise<GwCourse[]> {
     create: { key: "courses", value: String(courses.length) },
     update: { value: String(courses.length) },
   });
+  invalidateCatalogRollup();
   return courses;
 }
 
@@ -74,6 +76,7 @@ export async function syncCourseVideos(productId: number): Promise<GwVideo[]> {
       update: { value: VIDEOS_SCHEMA },
     }),
   ]);
+  invalidateCatalogRollup();
   return videos;
 }
 
@@ -95,5 +98,6 @@ export async function getCourseVideos(productId: number): Promise<GwVideo[]> {
 export async function refreshCatalog(): Promise<number> {
   const courses = await syncCourses();
   await prisma.video.deleteMany({});
+  invalidateCatalogRollup();
   return courses.length;
 }

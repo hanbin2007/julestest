@@ -5,6 +5,7 @@ import type {
   BatchResult,
   BatchThumbVideo,
   Course,
+  CoursesStatus,
   PlayResponse,
   StatusResponse,
   ThumbResponse,
@@ -48,6 +49,8 @@ export function getThumb(v: Video, src: string): Promise<ThumbResponse> {
 
 export const getStatus = () => fetcher<StatusResponse>("/api/status");
 export const getThumbsStatus = () => fetcher<ThumbsStatus>("/api/thumbs/status");
+// 设置页：每门课实时状态汇总（网关 per-vid + 目录 + 进度 的服务端聚合）
+export const getCoursesStatus = () => fetcher<CoursesStatus>("/api/courses/status");
 
 async function postJson<T>(url: string, body: unknown): Promise<T> {
   const r = await fetch(url, {

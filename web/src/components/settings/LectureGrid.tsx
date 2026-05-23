@@ -2,7 +2,9 @@
 import * as React from "react";
 import { DataGrid, type GridColDef } from "@mui/x-data-grid";
 import { Box, Button, Checkbox, Chip, LinearProgress, Typography } from "@mui/material";
-import { fmtDur } from "@/lib/media";
+import OndemandVideoRoundedIcon from "@mui/icons-material/OndemandVideoRounded";
+import ReplayRoundedIcon from "@mui/icons-material/ReplayRounded";
+import { fmtDur, fmtBytes } from "@/lib/media";
 import type { VideoRow } from "@/types/api";
 
 export interface GridRow {
@@ -10,6 +12,8 @@ export interface GridRow {
   courseName: string;
   title: string;
   duration: number | null;
+  kind: "vod" | "live";
+  bytes: number;
   thumbState: "ready" | "gen" | "error" | "none";
   bufCached: number;
   bufTotal: number | null;
@@ -91,11 +95,33 @@ export default function LectureGrid({
     { field: "courseName", headerName: "课程", flex: 1.1, minWidth: 160 },
     { field: "title", headerName: "讲次", flex: 1.6, minWidth: 200 },
     {
+      field: "kind",
+      headerName: "类型",
+      width: 92,
+      renderCell: (p) =>
+        p.row.kind === "live" ? (
+          <Chip size="small" variant="outlined" icon={<ReplayRoundedIcon />} label="回放" sx={{ height: 22 }} />
+        ) : (
+          <Chip size="small" variant="outlined" icon={<OndemandVideoRoundedIcon />} label="点播" sx={{ height: 22 }} />
+        ),
+    },
+    {
       field: "duration",
       headerName: "时长",
       width: 90,
       valueGetter: (_v, r) => r.duration ?? 0,
       renderCell: (p) => <span>{fmtDur(p.row.duration) || "—"}</span>,
+    },
+    {
+      field: "bytes",
+      headerName: "占用",
+      width: 96,
+      valueGetter: (_v, r) => r.bytes ?? 0,
+      renderCell: (p) => (
+        <Typography variant="caption" color="text.secondary" sx={{ fontVariantNumeric: "tabular-nums" }}>
+          {p.row.bytes ? fmtBytes(p.row.bytes) : "—"}
+        </Typography>
+      ),
     },
     {
       field: "thumbState",

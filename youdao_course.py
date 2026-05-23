@@ -232,6 +232,23 @@ class _DiskLRU:
         with self.lock:
             return sum(1 for (t, v) in self.meta if v == vid and t.endswith(".ts"))
 
+    def vid_stats(self):
+        """一次遍历汇总每个 vid 的磁盘占用：真实视频段 vs 缩略图源段(t_ 前缀)。
+        segments 只算 .ts(与 count_vid 同义)；bytes 把该 vid 的所有条目(段+密钥)都计入，
+        因此 sum(real.bytes)+sum(thumb.bytes) == self.size（与存储总量自洽）。"""
+        real, thumb = {}, {}
+        with self.lock:
+            for (url, vid), (_ctype, size, _fname) in self.meta.items():
+                is_seg = url.endswith(".ts")
+                if isinstance(vid, str) and vid.startswith("t_"):
+                    d = thumb.setdefault(vid[2:], {"segments": 0, "bytes": 0})
+                else:
+                    d = real.setdefault(vid, {"segments": 0, "bytes": 0})
+                d["bytes"] += size
+                if is_seg:
+                    d["segments"] += 1
+        return {"real": real, "thumb": thumb}
+
     def cleanup(self):
         shutil.rmtree(self.dir, ignore_errors=True)
 
@@ -1108,6 +1125,7 @@ def make_handler(base_headers, default_url="", session=None, auto=None,
     os.makedirs(thumb_dir, exist_ok=True)
     thumb_index_path = os.path.join(thumb_dir, "index.json")
     thumb_meta = {}  # vid -> {"state": "gen"/"ready"/"error", ...}
+    thumb_active = set()  # 真正在 ffmpeg 生成中的 vid（区分“生成中”与“排队中”）
     thumb_lock = threading.Lock()
     thumb_q = queue.Queue()
     have_ffmpeg = _which("ffmpeg") is not None
@@ -1131,12 +1149,16 @@ def make_handler(base_headers, default_url="", session=None, auto=None,
     def _thumb_worker():
         while True:
             vid, m3u8, duration, tier = thumb_q.get()
+            with thumb_lock:
+                thumb_active.add(vid)
             try:
                 _gen_thumbs(vid, m3u8, duration, tier)
             except Exception as e:  # noqa: BLE001
                 with thumb_lock:
                     thumb_meta[vid] = {"state": "error", "reason": str(e)}
             finally:
+                with thumb_lock:
+                    thumb_active.discard(vid)
                 thumb_q.task_done()
 
     def _gen_thumbs(vid, m3u8, duration, tier):
@@ -1462,22 +1484,52 @@ def make_handler(base_headers, default_url="", session=None, auto=None,
         def _api_status(self, qs):
             with thumb_lock:
                 tstates = {k: v.get("state") for k, v in thumb_meta.items()}
+                tactive = set(thumb_active)
+            stats = seg_cache.vid_stats()  # 一次遍历拿到磁盘真相（含上次会话/观看/预缓存留下的）
+            real, thumbb = stats["real"], stats["thumb"]
             vids = qs.get("videoId") or []  # 可选：只查这些 vid 的缓冲明细
+            # 关键：枚举范围 = 磁盘已缓存 ∪ 本会话已知总数 ∪ 缓冲状态。覆盖“任何来源的缓存”。
+            target = ([str(v) for v in vids] if vids
+                      else list(set(list(real.keys()) + list(seg_total.keys()) + list(buf_state.keys()))))
+
+            def _state(vid, cached, total):
+                s = buf_state.get(vid)
+                if s:
+                    return s
+                if cached <= 0:
+                    return None
+                if total and cached >= total:
+                    return "full"
+                if total:
+                    return "partial"
+                return "cached"  # 磁盘有片但总数未知（如重启后/观看顺带缓存）
+
             buffer = {}
-            for vid in (vids if vids else list(set(list(seg_total.keys()) + list(buf_state.keys())))):
+            for vid in target:
                 vid = str(vid)
-                buffer[vid] = {"cached": seg_cache.count_vid(vid),
-                               "total": seg_total.get(vid),
-                               "state": buf_state.get(vid)}
+                r = real.get(vid) or {}
+                cached = r.get("segments", 0)
+                total = seg_total.get(vid)
+                buffer[vid] = {"cached": cached, "total": total,
+                               "state": _state(vid, cached, total),
+                               "bytes": r.get("bytes", 0),
+                               "thumbBytes": (thumbb.get(vid) or {}).get("bytes", 0)}
             tready = sum(1 for s in tstates.values() if s == "ready")
             tgen = [k for k, s in tstates.items() if s == "gen"]
             terr = sum(1 for s in tstates.values() if s == "error")
             self._send_json({
                 "thumb": {"states": tstates, "ready": tready, "generating": tgen,
+                          "working": sorted(tactive),
+                          "queued_vids": [k for k in tgen if k not in tactive],
                           "queued": thumb_q.qsize(), "errors": terr},
                 "buffer": {"perVid": buffer, "bytes": seg_cache.size, "limit": seg_cache.max,
                            "queued": buf_q.qsize(),
-                           "working": [k for k, s in buf_state.items() if s == "working"]},
+                           "working": [k for k, s in buf_state.items() if s == "working"],
+                           "queued_vids": [k for k, s in buf_state.items() if s == "queued"]},
+                "live": {"active": pf_active["vid"],
+                         "playhead": ({pf_active["vid"]: playhead.get(pf_active["vid"])}
+                                      if pf_active["vid"] else {}),
+                         "inFlight": {"live": _pri_n[0], "auto": _pri_n[1], "manual": _pri_n[2]}},
                 "ffmpeg": have_ffmpeg, "thumbDir": thumb_dir,
             })
 

@@ -110,3 +110,63 @@ export interface VideoRow {
   courseId: number;
   courseName: string;
 }
+
+// ---- 设置页：每门课实时状态汇总（/api/courses/status）----
+export interface VidStatusDetail {
+  cached: number; // 已缓存分片数（磁盘真相，含观看/预缓存/重启后残留）
+  total: number | null; // 总分片数（已知时）
+  bytes: number; // 该讲占用字节
+  state: "full" | "partial" | "cached" | "queued" | "working" | "done" | "error" | null;
+  thumb: "ready" | "gen" | "error" | null;
+}
+export interface CourseStatus {
+  productId: number;
+  name: string;
+  cardType: string | null;
+  lectures: number;
+  vod: number;
+  live: number;
+  allLocked: boolean;
+  cachedLectures: number; // ≥1 分片已缓存（含部分）
+  fullyCached: number; // 整集已缓存
+  partialRatio: number; // cachedLectures / lectures
+  fullRatio: number; // fullyCached / lectures
+  cachedBytes: number; // 本课占用字节合计
+  thumbsReady: number;
+  thumbsGen: number;
+  thumbsError: number;
+  buffering: number;
+  queued: number;
+  watched: number; // t/d ≥ 0.9 的讲数
+}
+export interface TaskItem {
+  vid: number;
+  title: string;
+  courseName: string;
+  courseId: number;
+  kind: "thumb" | "buffer" | "prefetch";
+  state: "working" | "queued";
+  cached?: number;
+  total?: number | null;
+}
+export interface CoursesStatus {
+  courses: CourseStatus[];
+  perVid: Record<string, VidStatusDetail>;
+  totals: {
+    bufferBytes: number;
+    bufferLimit: number;
+    thumbBytes: number;
+    lectures: number;
+    cachedLectures: number;
+    thumbsReady: number;
+  };
+  activity: {
+    downloadingVid: number | null;
+    title: string | null;
+    tier: "buffer" | "prefetch" | "thumb" | null;
+    queue: { thumb: number; buffer: number };
+  };
+  tasks: TaskItem[];
+  health: { gatewayOnline: boolean; stale: boolean; ffmpeg: boolean; updatedAt: number };
+  orphans: { vid: number; segments: number; bytes: number }[];
+}

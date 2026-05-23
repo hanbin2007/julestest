@@ -1,26 +1,30 @@
 "use client";
 import * as React from "react";
-import useSWR from "swr";
 import {
   Box,
   Button,
   Card,
   MenuItem,
   Stack,
+  Tab,
+  Tabs,
   TextField,
-  Typography,
-  LinearProgress,
   ToggleButton,
   ToggleButtonGroup,
+  Typography,
 } from "@mui/material";
-import { useCourses, useAllCourseVideos, useStatus } from "@/hooks/data";
+import { useCourses, useAllCourseVideos, useCoursesStatus } from "@/hooks/data";
 import { usePrefs } from "@/hooks/persist";
 import { useToast } from "@/components/common/Toast";
 import LectureGrid, { type GridRow } from "./LectureGrid";
-import StorageDonut from "./StorageDonut";
-import { batchThumbs, batchBuffer, getThumbsStatus } from "@/lib/api";
-import { pickLow, pickM3u8, fmtBytes } from "@/lib/media";
-import type { Video, VideoRow } from "@/types/api";
+import HealthBar from "./HealthBar";
+import StorageStrip from "./StorageStrip";
+import TaskQueuePanel from "./TaskQueuePanel";
+import CourseStatusGrid, { type CourseSort } from "./CourseStatusGrid";
+import CourseDetailDrawer from "./CourseDetailDrawer";
+import { batchThumbs, batchBuffer, getCourseVideos } from "@/lib/api";
+import { pickLow, pickM3u8 } from "@/lib/media";
+import type { CourseStatus, Video, VideoRow } from "@/types/api";
 
 const MK_THUMB = (v: Video) => ({
   videoId: v.videoId, contentId: v.contentId, cardPackageId: v.cardPackageId,
@@ -34,99 +38,106 @@ const MK_BUF = (v: Video) => ({
 export default function SettingsView() {
   const toast = useToast();
   const { courses } = useCourses();
-  const { rows, loaded, total } = useAllCourseVideos(courses);
-  const { status, refresh } = useStatus(true);
-  const { data: thumbsStatus } = useSWR("/api/thumbs/status", getThumbsStatus, { refreshInterval: 4000 });
-  const { prefs, setPrefs } = usePrefs();
+  const { data, refresh, bps } = useCoursesStatus();
 
+  const { prefs, setPrefs } = usePrefs();
+  const [tab, setTab] = React.useState(0);
   const [q, setQ] = React.useState("");
   const [courseId, setCourseId] = React.useState("");
+  const [sort, setSort] = React.useState<CourseSort>("default");
   const [thumbF, setThumbF] = React.useState("");
   const [bufF, setBufF] = React.useState("");
   const [selected, setSelected] = React.useState<Set<number>>(new Set());
+  const [busyIds, setBusyIds] = React.useState<Set<number>>(new Set());
+  const [drawer, setDrawer] = React.useState<CourseStatus | null>(null);
 
-  const tState = (id: number) => status?.thumb.states[String(id)];
-  const bInfo = (id: number) => status?.buffer.perVid[String(id)];
-  const isBuffered = (id: number) => {
-    const b = bInfo(id);
-    return b ? b.state === "done" || (!!b.total && b.cached >= b.total) : false;
-  };
+  const flatActive = tab === 1;
+  const { rows: allRows, loaded, total } = useAllCourseVideos(flatActive ? courses : []);
 
-  const filtered: VideoRow[] = React.useMemo(() => {
+  const perVid = data?.perVid ?? {};
+  const courseStatus = React.useMemo(() => data?.courses ?? [], [data]);
+
+  // 卡片视图：按搜索 / 课程下拉过滤
+  const filteredCourses = React.useMemo(() => {
     const s = q.trim().toLowerCase();
-    return rows.filter((r) => {
-      if (courseId && String(r.courseId) !== courseId) return false;
-      if (s && !((r.v.title ?? "").toLowerCase().includes(s) || r.courseName.toLowerCase().includes(s))) return false;
-      const ts = tState(r.v.videoId);
-      if (thumbF === "ready" && ts !== "ready") return false;
-      if (thumbF === "gen" && ts !== "gen") return false;
-      if (thumbF === "missing" && (ts === "ready" || ts === "gen")) return false;
-      const bd = isBuffered(r.v.videoId);
-      if (bufF === "done" && !bd) return false;
-      if (bufF === "missing" && bd) return false;
+    return courseStatus.filter((c) => {
+      if (courseId && String(c.productId) !== courseId) return false;
+      if (s && !c.name.toLowerCase().includes(s)) return false;
       return true;
     });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rows, q, courseId, thumbF, bufF, status]);
+  }, [courseStatus, q, courseId]);
 
-  const gridRows: GridRow[] = React.useMemo(
-    () =>
-      filtered.map((r) => {
-        const b = bInfo(r.v.videoId);
-        const ts = tState(r.v.videoId);
+  // 全部讲次视图：逐讲过滤
+  const isBuffered = (b?: { state: string | null; cached: number; total: number | null }) =>
+    !!b && (b.state === "done" || b.state === "full" || (!!b.total && b.cached >= b.total));
+  const gridRows: GridRow[] = React.useMemo(() => {
+    const s = q.trim().toLowerCase();
+    return allRows
+      .filter((r) => {
+        if (courseId && String(r.courseId) !== courseId) return false;
+        if (s && !(r.v.title ?? "").toLowerCase().includes(s) && !r.courseName.toLowerCase().includes(s)) return false;
+        const b = perVid[String(r.v.videoId)];
+        const ts = b?.thumb ?? "none";
+        if (thumbF === "ready" && ts !== "ready") return false;
+        if (thumbF === "gen" && ts !== "gen") return false;
+        if (thumbF === "missing" && (ts === "ready" || ts === "gen")) return false;
+        const bd = isBuffered(b);
+        if (bufF === "done" && !bd) return false;
+        if (bufF === "missing" && bd) return false;
+        return true;
+      })
+      .map((r) => {
+        const b = perVid[String(r.v.videoId)];
         return {
           id: r.v.videoId,
           courseName: r.courseName,
           title: r.v.title ?? `视频 ${r.v.videoId}`,
           duration: r.v.duration,
-          thumbState: (ts ?? "none") as GridRow["thumbState"],
+          kind: (r.v.kind === "live" ? "live" : "vod") as GridRow["kind"],
+          bytes: b?.bytes ?? 0,
+          thumbState: (b?.thumb ?? "none") as GridRow["thumbState"],
           bufCached: b?.cached ?? 0,
           bufTotal: b?.total ?? null,
           bufState: b?.state ?? null,
           vrow: r,
         };
-      }),
+      });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [filtered, status]
-  );
+  }, [allRows, q, courseId, thumbF, bufF, data]);
+
+  // ---- 操作 ----
+  const submit = async (vids: Video[], kind: "thumb" | "buffer") => {
+    const t = kind === "thumb" ? vids.filter((v) => pickLow(v)) : vids.filter((v) => pickM3u8(v));
+    if (!t.length) return toast("没有可处理的讲次");
+    try {
+      const r = kind === "thumb" ? await batchThumbs(t.map(MK_THUMB)) : await batchBuffer(t.map(MK_BUF));
+      toast(`已加入队列 ${r.queued}（跳过 ${r.skipped}）`, { severity: "success" });
+      refresh();
+    } catch (e) {
+      toast("提交失败：" + (e as Error).message, { severity: "error" });
+    }
+  };
+
+  const courseAction = async (c: CourseStatus, kind: "thumb" | "buffer") => {
+    setBusyIds((s) => new Set(s).add(c.productId));
+    try {
+      const { videos } = await getCourseVideos(c.productId);
+      await submit(videos.filter((v) => !v.locked), kind);
+    } finally {
+      setBusyIds((s) => {
+        const n = new Set(s);
+        n.delete(c.productId);
+        return n;
+      });
+    }
+  };
 
   const targets = (): Video[] => {
-    if (selected.size) return rows.filter((r) => selected.has(r.v.videoId)).map((r) => r.v);
-    return filtered.map((r) => r.v);
+    if (selected.size) return allRows.filter((r) => selected.has(r.v.videoId)).map((r) => r.v);
+    return gridRows.map((r) => r.vrow.v);
   };
-  const runThumb = async () => {
-    const t = targets();
-    if (!t.length) return toast("没有可处理的讲次");
-    try {
-      const r = await batchThumbs(t.map(MK_THUMB));
-      toast(`已加入队列 ${r.queued}（跳过 ${r.skipped}）`, { severity: "success" });
-      refresh();
-    } catch (e) {
-      toast("提交失败：" + (e as Error).message, { severity: "error" });
-    }
-  };
-  const runBuf = async () => {
-    const t = targets().filter((v) => pickM3u8(v));
-    if (!t.length) return toast("没有可处理的讲次");
-    try {
-      const r = await batchBuffer(t.map(MK_BUF));
-      toast(`已加入队列 ${r.queued}（跳过 ${r.skipped}）`, { severity: "success" });
-      refresh();
-    } catch (e) {
-      toast("提交失败：" + (e as Error).message, { severity: "error" });
-    }
-  };
-  const rowThumb = async (r: VideoRow) => {
-    await batchThumbs([MK_THUMB(r.v)]);
-    toast("已加入缩略图队列");
-    refresh();
-  };
-  const rowBuf = async (r: VideoRow) => {
-    if (!pickM3u8(r.v)) return;
-    await batchBuffer([MK_BUF(r.v)]);
-    toast("已加入缓冲队列");
-    refresh();
-  };
+  const rowThumb = (r: VideoRow) => submit([r.v], "thumb");
+  const rowBuf = (r: VideoRow) => submit([r.v], "buffer");
 
   const toggle = (id: number, on: boolean) =>
     setSelected((s) => {
@@ -142,115 +153,135 @@ export default function SettingsView() {
       return n;
     });
 
-  const tReady = filtered.filter((r) => tState(r.v.videoId) === "ready").length;
-  const bDone = filtered.filter((r) => isBuffered(r.v.videoId)).length;
-  const ft = filtered.length || 1;
-  const loadingCourses = total > 0 && loaded < total;
+  const loadingCourses = flatActive && total > 0 && loaded < total;
 
   return (
-    <Box sx={{ maxWidth: 1180, mx: "auto", p: { xs: 1.5, md: 3 } }}>
-      <Typography variant="h5" gutterBottom>
-        预生成 &amp; 缓冲
-      </Typography>
-      <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-        提前生成拖动缩略图、把整集缓冲到服务端，看课更顺。缩略图持久保存；整集缓冲走磁盘缓存（LRU，受上限约束）。
-        {loadingCourses ? `　课程加载中 ${loaded}/${total}…` : ""}
-      </Typography>
-
-      <Stack direction={{ xs: "column", md: "row" }} spacing={2} sx={{ mb: 2 }}>
-        <Card sx={{ p: 2, flex: 1 }}>
-          <StorageDonut used={status?.buffer.bytes ?? 0} limit={status?.buffer.limit ?? 1} />
-        </Card>
-        <Card sx={{ p: 2, flex: 1 }}>
-          <Typography variant="subtitle2" gutterBottom>信息</Typography>
-          <Info k="缩略图目录" v={status?.thumbDir ?? "—"} />
-          <Info k="缩略图占用" v={fmtBytes(thumbsStatus?.bytes)} />
-          <Info k="缓冲缓存" v={`${fmtBytes(status?.buffer.bytes)} / ${fmtBytes(status?.buffer.limit)}`} />
-          <Info k="ffmpeg" v={status ? (status.ffmpeg ? "可用" : "未安装") : "—"} />
-        </Card>
+    <Box sx={{ maxWidth: 1240, mx: "auto", p: { xs: 1.5, md: 3 } }}>
+      <Stack direction="row" alignItems="baseline" sx={{ mb: 1.5 }}>
+        <Typography variant="h5">课程状态</Typography>
+        <Typography variant="body2" color="text.secondary" sx={{ ml: 1.5 }}>
+          每门课的缓存 / 缩略图 / 观看进度，实时反映任何来源的缓存（观看、预缓存、手动、重启后残留）。
+        </Typography>
       </Stack>
 
-      <Card sx={{ p: 2, mb: 2 }}>
-        <Stack direction="row" spacing={1.5} sx={{ flexWrap: "wrap", gap: 1.5, mb: 1.5 }}>
-          <TextField size="small" placeholder="搜索讲次 / 课程…" value={q} onChange={(e) => setQ(e.target.value)} sx={{ flex: 1, minWidth: 180 }} />
+      {/* 顶部条：健康 + 存储 + 实时任务队列 */}
+      <Card sx={{ p: 2, mb: 2, position: { md: "sticky" }, top: 8, zIndex: 2 }}>
+        <Stack
+          direction={{ xs: "column", md: "row" }}
+          spacing={2}
+          divider={<Box sx={{ borderLeft: (t) => `1px solid ${t.palette.divider}` }} />}
+        >
+          <Box sx={{ flex: "0 0 auto", minWidth: 180 }}>
+            <HealthBar health={data?.health} />
+          </Box>
+          <Box sx={{ flex: 1, minWidth: 200 }}>
+            <StorageStrip
+              bufferBytes={data?.totals.bufferBytes ?? 0}
+              bufferLimit={data?.totals.bufferLimit ?? 0}
+              thumbBytes={data?.totals.thumbBytes ?? 0}
+            />
+          </Box>
+          <Box sx={{ flex: 1.3, minWidth: 240 }}>
+            <TaskQueuePanel
+              tasks={data?.tasks ?? []}
+              bps={bps.bps}
+              series={bps.series}
+              queue={data?.activity.queue ?? { thumb: 0, buffer: 0 }}
+            />
+          </Box>
+        </Stack>
+      </Card>
+
+      {/* 工具栏 */}
+      <Card sx={{ p: 1.5, mb: 2 }}>
+        <Stack direction="row" spacing={1.5} sx={{ flexWrap: "wrap", gap: 1.5, alignItems: "center" }}>
+          <TextField size="small" placeholder="搜索课程 / 讲次…" value={q} onChange={(e) => setQ(e.target.value)} sx={{ flex: 1, minWidth: 180 }} />
           <TextField size="small" select label="课程" value={courseId} onChange={(e) => setCourseId(e.target.value)} sx={{ minWidth: 150 }}>
             <MenuItem value="">全部（{courses.length}）</MenuItem>
             {courses.map((c) => (
               <MenuItem key={c.id} value={String(c.id)}>{c.name}</MenuItem>
             ))}
           </TextField>
-          <TextField size="small" select label="缩略图" value={thumbF} onChange={(e) => setThumbF(e.target.value)} sx={{ minWidth: 120 }}>
-            <MenuItem value="">全部</MenuItem>
-            <MenuItem value="ready">已生成</MenuItem>
-            <MenuItem value="gen">生成中</MenuItem>
-            <MenuItem value="missing">未生成</MenuItem>
-          </TextField>
-          <TextField size="small" select label="缓冲" value={bufF} onChange={(e) => setBufF(e.target.value)} sx={{ minWidth: 120 }}>
-            <MenuItem value="">全部</MenuItem>
-            <MenuItem value="done">已缓冲</MenuItem>
-            <MenuItem value="missing">未缓冲</MenuItem>
-          </TextField>
-        </Stack>
-        <Stack direction="row" spacing={1.2} sx={{ alignItems: "center", flexWrap: "wrap", gap: 1 }}>
-          <Typography variant="caption" color="text.secondary">
-            {selected.size ? `已选 ${selected.size}` : `显示 ${filtered.length} / 共 ${rows.length} 讲`}
-          </Typography>
+          {!flatActive && (
+            <TextField size="small" select label="排序" value={sort} onChange={(e) => setSort(e.target.value as CourseSort)} sx={{ minWidth: 120 }}>
+              <MenuItem value="default">默认</MenuItem>
+              <MenuItem value="cache">缓存多</MenuItem>
+              <MenuItem value="watched">看得多</MenuItem>
+              <MenuItem value="size">占用大</MenuItem>
+              <MenuItem value="name">名称</MenuItem>
+            </TextField>
+          )}
+          {flatActive && (
+            <>
+              <TextField size="small" select label="缩略图" value={thumbF} onChange={(e) => setThumbF(e.target.value)} sx={{ minWidth: 110 }}>
+                <MenuItem value="">全部</MenuItem>
+                <MenuItem value="ready">已生成</MenuItem>
+                <MenuItem value="gen">生成中</MenuItem>
+                <MenuItem value="missing">未生成</MenuItem>
+              </TextField>
+              <TextField size="small" select label="缓冲" value={bufF} onChange={(e) => setBufF(e.target.value)} sx={{ minWidth: 110 }}>
+                <MenuItem value="">全部</MenuItem>
+                <MenuItem value="done">已缓冲</MenuItem>
+                <MenuItem value="missing">未缓冲</MenuItem>
+              </TextField>
+            </>
+          )}
           <Box sx={{ flex: 1 }} />
-          <ToggleButtonGroup
-            size="small"
-            exclusive
-            value={prefs.density}
-            onChange={(_e, v) => v && setPrefs({ density: v })}
-          >
+          <ToggleButtonGroup size="small" exclusive value={prefs.density} onChange={(_e, v) => v && setPrefs({ density: v })}>
             <ToggleButton value="comfortable">宽松</ToggleButton>
             <ToggleButton value="compact">紧凑</ToggleButton>
           </ToggleButtonGroup>
-          <Button variant="contained" onClick={runThumb}>生成缩略图</Button>
-          <Button variant="outlined" onClick={runBuf}>缓冲整集</Button>
-          <Button variant="text" onClick={() => refresh()}>刷新</Button>
+          <Button variant="contained" onClick={() => submit(targets(), "thumb")}>生成缩略图</Button>
+          <Button variant="outlined" onClick={() => submit(targets(), "buffer")}>缓冲整集</Button>
         </Stack>
-        <Box sx={{ mt: 1.5 }}>
-          <ProgRow label="缩略图" value={(tReady / ft) * 100} text={`${tReady}/${filtered.length}　生成中 ${status?.thumb.generating.length ?? 0}　队列 ${status?.thumb.queued ?? 0}`} />
-          <ProgRow label="缓冲" value={(bDone / ft) * 100} text={`${bDone}/${filtered.length}　缓冲中 ${status?.buffer.working.length ?? 0}　队列 ${status?.buffer.queued ?? 0}`} color="success" />
-        </Box>
+        <Stack direction="row" sx={{ mt: 1, alignItems: "center" }}>
+          <Tabs value={tab} onChange={(_e, v) => setTab(v)}>
+            <Tab label="按课程" />
+            <Tab label="全部讲次" />
+          </Tabs>
+          <Box sx={{ flex: 1 }} />
+          <Typography variant="caption" color="text.secondary">
+            {flatActive
+              ? selected.size
+                ? `已选 ${selected.size}`
+                : `${gridRows.length} 讲${loadingCourses ? `（加载中 ${loaded}/${total}）` : ""}`
+              : `${filteredCourses.length} / ${courseStatus.length} 门课`}
+          </Typography>
+        </Stack>
       </Card>
 
-      <Card sx={{ p: 0, height: 560 }}>
-        <LectureGrid
-          rows={gridRows}
-          selected={selected}
-          onToggle={toggle}
-          onToggleAll={toggleAll}
-          onRowThumb={rowThumb}
-          onRowBuf={rowBuf}
-          density={prefs.density}
+      {tab === 0 ? (
+        <CourseStatusGrid
+          courses={filteredCourses}
+          loading={!data}
+          sort={sort}
+          busyIds={busyIds}
+          onOpen={setDrawer}
+          onBuffer={(c) => courseAction(c, "buffer")}
+          onThumbs={(c) => courseAction(c, "thumb")}
         />
-      </Card>
-    </Box>
-  );
-}
+      ) : (
+        <Card sx={{ p: 0, height: 600 }}>
+          <LectureGrid
+            rows={gridRows}
+            selected={selected}
+            onToggle={toggle}
+            onToggleAll={toggleAll}
+            onRowThumb={rowThumb}
+            onRowBuf={rowBuf}
+            density={prefs.density}
+          />
+        </Card>
+      )}
 
-function Info({ k, v }: { k: string; v: string }) {
-  return (
-    <Box sx={{ display: "flex", justifyContent: "space-between", py: 0.5, borderBottom: (t) => `1px solid ${t.palette.divider}` }}>
-      <Typography variant="body2" color="text.secondary">{k}</Typography>
-      <Typography variant="body2" sx={{ fontWeight: 600, ml: 2, textAlign: "right", wordBreak: "break-all" }}>{v}</Typography>
-    </Box>
-  );
-}
-function ProgRow({ label, value, text, color }: { label: string; value: number; text: string; color?: "primary" | "success" }) {
-  return (
-    <Box sx={{ display: "flex", alignItems: "center", gap: 1.5, mt: 1 }}>
-      <Typography variant="caption" color="text.secondary" sx={{ width: 42 }}>{label}</Typography>
-      <LinearProgress
-        variant="determinate"
-        value={Math.min(100, value)}
-        color={color}
-        sx={{ flex: 1 }}
+      <CourseDetailDrawer
+        course={drawer}
+        perVid={perVid}
+        density={prefs.density}
+        onRowThumb={rowThumb}
+        onRowBuf={rowBuf}
+        onClose={() => setDrawer(null)}
       />
-      <Typography variant="caption" color="text.secondary" sx={{ minWidth: 180, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
-        {text}
-      </Typography>
     </Box>
   );
 }

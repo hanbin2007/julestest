@@ -1,9 +1,9 @@
 "use client";
 import useSWR from "swr";
-import { useEffect, useState } from "react";
-import { getCourses, getCourseVideos, getStatus } from "@/lib/api";
-import { pickLow } from "@/lib/media";
-import type { Course, StatusResponse, VideoRow } from "@/types/api";
+import { useEffect, useRef, useState } from "react";
+import { getCourses, getCourseVideos, getStatus, getCoursesStatus } from "@/lib/api";
+import { pickM3u8 } from "@/lib/media";
+import type { Course, CoursesStatus, StatusResponse, VideoRow } from "@/types/api";
 
 export function useCourses() {
   const { data, error, isLoading } = useSWR("/api/courses", () => getCourses(), {
@@ -36,7 +36,7 @@ export function useAllCourseVideos(courses: Course[]) {
         try {
           const { videos } = await getCourseVideos(c.id);
           videos
-            .filter((v) => !v.locked && pickLow(v))
+            .filter((v) => !v.locked && pickM3u8(v)) // pickM3u8 含直播回放(downloadUrl 兜底)
             .forEach((v) => acc.push({ v, courseId: c.id, courseName: c.name }));
         } catch {
           /* skip */
@@ -65,4 +65,42 @@ export function useStatus(active: boolean) {
     },
   });
   return { status: data, refresh: mutate };
+}
+
+export interface BpsSample {
+  bps: number;
+  series: number[];
+}
+
+/** 设置页：每门课实时状态。忙时 1s、闲时 5s（不再像 useStatus 那样闲时停摆）。
+ *  另外按相邻两次 bufferBytes 差分出下载速率(bytes/s)，给活动面板做迷你折线。 */
+export function useCoursesStatus() {
+  const { data, mutate } = useSWR<CoursesStatus>("/api/courses/status", () => getCoursesStatus(), {
+    revalidateOnFocus: false,
+    keepPreviousData: true,
+    dedupingInterval: 800,
+    refreshInterval: (d) => {
+      if (!d) return 1000;
+      const busy = d.activity.queue.thumb + d.activity.queue.buffer + d.tasks.length > 0;
+      return busy ? 1000 : 5000;
+    },
+  });
+
+  // 客户端差分速率（服务端无状态，不在路由里算）
+  const prev = useRef<{ bytes: number; at: number } | null>(null);
+  const [bps, setBps] = useState<BpsSample>({ bps: 0, series: [] });
+  useEffect(() => {
+    if (!data) return;
+    const now = Date.now();
+    const bytes = data.totals.bufferBytes;
+    const p = prev.current;
+    prev.current = { bytes, at: now };
+    if (!p) return;
+    const dt = (now - p.at) / 1000;
+    if (dt <= 0) return;
+    const rate = Math.max(0, (bytes - p.bytes) / dt);
+    setBps((s) => ({ bps: rate, series: [...s.series, rate].slice(-30) }));
+  }, [data]);
+
+  return { data, refresh: mutate, bps };
 }
