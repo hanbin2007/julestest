@@ -57,7 +57,7 @@ function StorageStrip({
           sx={{
             position: "relative",
             height: 12,
-            borderRadius: "999px",
+            borderRadius: (t) => t.radius.full,
             overflow: "hidden",
             bgcolor: (t) => t.palette.action.hover,
           }}
@@ -67,7 +67,7 @@ function StorageStrip({
               position: "absolute",
               inset: 0,
               width: `${usedPct}%`,
-              borderRadius: "999px",
+              borderRadius: (t) => t.radius.full,
               transition: "width .4s ease",
               bgcolor: (t) => (near ? t.palette.warning.main : t.palette.primary.main),
             }}

@@ -109,7 +109,7 @@ function BoardLabel({
   count: number;
 }) {
   return (
-    <Box sx={{ display: "flex", alignItems: "center", gap: 0.75, px: 1, pt: 1.25, pb: 0.25 }}>
+    <Box sx={{ display: "flex", alignItems: "center", gap: 0.5, px: 1, pt: 1, pb: 0.5 }}>
       {icon}
       <Typography variant="caption" sx={{ fontWeight: 800, letterSpacing: 0.5, color: "text.secondary" }}>
         {label}
@@ -157,13 +157,23 @@ function VideoRow({
       disabled={v.locked}
       selected={active}
       sx={{
-        borderRadius: 2,
-        py: 0.75,
+        borderRadius: (t) => t.radius.sm,
+        py: 0.5,
         pl: 1,
         gap: 1,
         "&.Mui-selected": {
-          bgcolor: (t) => `color-mix(in srgb, ${color} 22%, transparent)`,
-          boxShadow: `inset 3px 0 0 ${color}`,
+          bgcolor: `color-mix(in srgb, ${color} 22%, transparent)`,
+        },
+        // 左侧选中指示：圆角药丸，竖直内缩避开行圆角——不再被圆角裁出怪弧
+        "&.Mui-selected::before": {
+          content: '""',
+          position: "absolute",
+          left: 0,
+          top: "20%",
+          bottom: "20%",
+          width: "3px",
+          borderRadius: "999px",
+          backgroundColor: color,
         },
       }}
     >
@@ -201,7 +211,7 @@ function GroupEl({
   const [open, setOpen] = React.useState(true);
   return (
     <Box sx={{ ml: 0.5 }}>
-      <ListItemButton onClick={() => setOpen((o) => !o)} sx={{ borderRadius: 2, py: 0.5, gap: 0.5 }}>
+      <ListItemButton onClick={() => setOpen((o) => !o)} sx={{ borderRadius: (t) => t.radius.sm, py: 0.5, gap: 0.5 }}>
         <ChevronRightIcon
           sx={{ fontSize: 16, transition: ".18s", transform: open ? "rotate(90deg)" : "none", color: "text.secondary" }}
         />
@@ -210,7 +220,7 @@ function GroupEl({
         </Typography>
       </ListItemButton>
       <Collapse in={open} unmountOnExit>
-        <Box sx={{ pl: 1.2, ml: 1.2, borderLeft: (t) => `1px solid ${t.palette.divider}` }}>
+        <Box sx={{ pl: 1.5, ml: 1.5, borderLeft: (t) => `1px solid ${t.palette.divider}` }}>
           {node.kids.map((k, i) => (
             <GroupEl key={i} node={k} render={render} />
           ))}
@@ -281,7 +291,7 @@ function CourseItem({
 
   return (
     <Box ref={rootRef} sx={{ mb: 0.5, scrollMarginTop: 8 }}>
-      <ListItemButton onClick={onToggle} sx={{ borderRadius: 2, gap: 1 }}>
+      <ListItemButton onClick={onToggle} sx={{ borderRadius: (t) => t.radius.sm, gap: 1 }}>
         <ChevronRightIcon
           sx={{ fontSize: 18, transition: ".18s", transform: wantOpen ? "rotate(90deg)" : "none", color: "text.secondary" }}
         />
@@ -297,7 +307,7 @@ function CourseItem({
             {watched}/{playable.length}
           </Typography>
         )}
-        <Chip size="small" label={course.cardType || "课程"} sx={{ height: 20, fontSize: 11 }} />
+        <Chip size="small" label={course.cardType || "课程"} sx={{ height: 22, fontSize: 11 }} />
       </ListItemButton>
       <Collapse in={wantOpen} unmountOnExit>
         <Box sx={{ pl: 0.5 }}>
@@ -465,7 +475,7 @@ export default function CourseSidebar({
         {cardTypes.length > 1 && (
           <Stack
             direction="row"
-            spacing={0.75}
+            spacing={1}
             sx={{ mt: 1, overflowX: "auto", pb: 0.5, "&::-webkit-scrollbar": { display: "none" } }}
           >
             <Chip

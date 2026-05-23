@@ -40,7 +40,7 @@ export default function PlayerMeta({
       <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
         {[video.examKey, fmtDur(video.duration) && `时长 ${fmtDur(video.duration)}`].filter(Boolean).join(" · ")}
       </Typography>
-      <Stack direction="row" spacing={1.2} sx={{ mt: 1.5, flexWrap: "wrap", gap: 1 }}>
+      <Stack direction="row" sx={{ mt: 1.5, flexWrap: "wrap", gap: 1.5 }}>
         <Button variant="outlined" startIcon={<SkipPreviousRoundedIcon />} disabled={!hasPrev} onClick={onPrev}>
           上一讲
         </Button>

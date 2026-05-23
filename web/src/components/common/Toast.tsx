@@ -39,7 +39,7 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
           variant="filled"
           severity={state.severity}
           onClose={close}
-          sx={{ borderRadius: 3, alignItems: "center" }}
+          sx={{ borderRadius: (t) => t.radius.md, alignItems: "center" }}
           action={
             state.action ? (
               <Button

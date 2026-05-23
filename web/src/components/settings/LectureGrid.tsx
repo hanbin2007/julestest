@@ -1,9 +1,11 @@
 "use client";
 import * as React from "react";
 import { DataGrid, type GridColDef } from "@mui/x-data-grid";
-import { Box, Button, Checkbox, Chip, Typography } from "@mui/material";
+import { Box, Checkbox, Chip, IconButton, Tooltip, Typography } from "@mui/material";
 import OndemandVideoRoundedIcon from "@mui/icons-material/OndemandVideoRounded";
 import ReplayRoundedIcon from "@mui/icons-material/ReplayRounded";
+import ImageRoundedIcon from "@mui/icons-material/ImageRounded";
+import DownloadRoundedIcon from "@mui/icons-material/DownloadRounded";
 import CacheBar from "@/components/common/CacheBar";
 import { fmtDur, fmtBytes } from "@/lib/media";
 import type { SegmentMap, VideoRow } from "@/types/api";
@@ -149,18 +151,24 @@ export default function LectureGrid({
     {
       field: "_act",
       headerName: "操作",
-      width: 160,
+      width: 96,
+      align: "center",
+      headerAlign: "center",
       sortable: false,
       filterable: false,
       disableColumnMenu: true,
       renderCell: (p) => (
         <Box sx={{ display: "flex", gap: 0.5 }}>
-          <Button size="small" variant="outlined" onClick={() => onRowThumb(p.row.vrow)}>
-            缩略图
-          </Button>
-          <Button size="small" variant="outlined" onClick={() => onRowBuf(p.row.vrow)}>
-            缓冲
-          </Button>
+          <Tooltip title="生成缩略图">
+            <IconButton size="small" onClick={() => onRowThumb(p.row.vrow)} aria-label="生成缩略图">
+              <ImageRoundedIcon fontSize="small" />
+            </IconButton>
+          </Tooltip>
+          <Tooltip title="缓冲整集">
+            <IconButton size="small" onClick={() => onRowBuf(p.row.vrow)} aria-label="缓冲整集">
+              <DownloadRoundedIcon fontSize="small" />
+            </IconButton>
+          </Tooltip>
         </Box>
       ),
     },

@@ -236,8 +236,8 @@ export default function SettingsView() {
       />
 
       {/* 工具栏 */}
-      <Card sx={{ p: 1.5, mb: 2 }}>
-        <Stack direction="row" spacing={1.5} sx={{ flexWrap: "wrap", gap: 1.5, alignItems: "center" }}>
+      <Card sx={{ p: 2, mb: 2 }}>
+        <Stack direction="row" sx={{ flexWrap: "wrap", gap: 1.5, alignItems: "center" }}>
           <TextField size="small" placeholder="搜索课程 / 讲次…" value={q} onChange={(e) => setQ(e.target.value)} sx={{ flex: 1, minWidth: 180 }} />
           <TextField size="small" select label="课程" value={courseId} onChange={(e) => setCourseId(e.target.value)} sx={{ minWidth: 150 }}>
             <MenuItem value="">全部（{courses.length}）</MenuItem>
@@ -269,14 +269,14 @@ export default function SettingsView() {
               </TextField>
             </>
           )}
-          <Stack direction="row" spacing={1} sx={{ ml: { md: "auto" }, flexWrap: "wrap", gap: 1, alignItems: "center" }}>
+          <Stack direction="row" sx={{ ml: { md: "auto" }, flexWrap: "wrap", gap: 1, alignItems: "center" }}>
             <ToggleButtonGroup
               size="small"
               exclusive
               value={prefs.density}
               onChange={(_e, v) => v && setPrefs({ density: v })}
               sx={{
-                borderRadius: "999px",
+                borderRadius: (t) => t.radius.full,
                 overflow: "hidden",
                 "& .MuiToggleButtonGroup-grouped": {
                   border: 0,

@@ -23,8 +23,8 @@ function Kbd({ children }: { children: React.ReactNode }) {
       component="span"
       sx={{
         px: 1,
-        py: 0.25,
-        borderRadius: 1,
+        py: 0.5,
+        borderRadius: (t) => t.radius.xs,
         bgcolor: "md3.surfaceContainerHighest",
         border: (t) => `1px solid ${t.palette.divider}`,
         fontSize: 12,
@@ -38,7 +38,7 @@ function Kbd({ children }: { children: React.ReactNode }) {
 
 export default function ShortcutsOverlay({ open, onClose }: { open: boolean; onClose: () => void }) {
   return (
-    <Dialog open={open} onClose={onClose} maxWidth="xs" fullWidth PaperProps={{ sx: { borderRadius: 4 } }}>
+    <Dialog open={open} onClose={onClose} maxWidth="xs" fullWidth PaperProps={{ sx: { borderRadius: (t) => t.radius.lg } }}>
       <DialogTitle>键盘快捷键</DialogTitle>
       <DialogContent>
         <Stack spacing={1}>

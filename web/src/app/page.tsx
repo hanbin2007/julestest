@@ -259,7 +259,7 @@ export default function PlayerView() {
                     width: "100%",
                     aspectRatio: "16/9",
                     bgcolor: "#000",
-                    borderRadius: 4,
+                    borderRadius: (t) => t.radius.lg,
                     overflow: "hidden",
                     boxShadow: 6,
                   }}
