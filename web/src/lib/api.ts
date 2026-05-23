@@ -103,6 +103,8 @@ export const getNotes = (videoId: number) =>
   fetcher<{ notes: Note[] }>(`/api/notes?videoId=${videoId}`);
 export const addNote = (videoId: number, t: number, text: string) =>
   postJson<{ note: Note; notes: Note[] }>("/api/notes/add", { videoId, t, text });
+export const updateNote = (videoId: number, id: string, text: string) =>
+  postJson<{ ok: boolean; notes: Note[] }>("/api/notes/update", { videoId, id, text });
 export const deleteNote = (videoId: number, id: string) =>
   postJson<{ ok: boolean; notes: Note[] }>("/api/notes/delete", { videoId, id });
 

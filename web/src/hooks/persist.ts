@@ -34,6 +34,19 @@ export function useNotes(videoId: number | null) {
     );
   };
 
+  const update = async (id: string, text: string) => {
+    if (videoId == null || !text.trim()) return;
+    const next = text.trim();
+    await mutate(
+      async () => ({ notes: (await api.updateNote(videoId, id, next)).notes }),
+      {
+        optimisticData: { notes: notes.map((n) => (n.id === id ? { ...n, text: next } : n)) },
+        rollbackOnError: true,
+        revalidate: false,
+      },
+    );
+  };
+
   const remove = async (id: string) => {
     if (videoId == null) return;
     await mutate(
@@ -46,7 +59,7 @@ export function useNotes(videoId: number | null) {
     );
   };
 
-  return { notes, add, remove };
+  return { notes, add, update, remove };
 }
 
 export function usePrefs() {
