@@ -189,7 +189,16 @@ export default function PlayerView() {
   });
 
   const sidebar = (
-    <CourseSidebar courses={courses} loading={isLoading} activeVideoId={sel?.videoId ?? null} onSelect={selectVideo} />
+    <CourseSidebar
+      courses={courses}
+      loading={isLoading}
+      activeVideoId={sel?.videoId ?? null}
+      activeCourseId={sel?.courseId ?? last?.productId ?? null}
+      onSelect={selectVideo}
+      onJumpToCurrent={() => {
+        if (!sel && last) resume(last.productId, last.videoId);
+      }}
+    />
   );
 
   return (

@@ -4,10 +4,13 @@ import {
   Box,
   Chip,
   Collapse,
+  IconButton,
   InputAdornment,
   List,
   ListItemButton,
+  Stack,
   TextField,
+  Tooltip,
   Typography,
   CircularProgress,
 } from "@mui/material";
@@ -19,6 +22,8 @@ import CheckCircleRoundedIcon from "@mui/icons-material/CheckCircleRounded";
 import OndemandVideoRoundedIcon from "@mui/icons-material/OndemandVideoRounded";
 import LiveTvRoundedIcon from "@mui/icons-material/LiveTvRounded";
 import ReplayRoundedIcon from "@mui/icons-material/ReplayRounded";
+import MyLocationRoundedIcon from "@mui/icons-material/MyLocationRounded";
+import UnfoldLessRoundedIcon from "@mui/icons-material/UnfoldLessRounded";
 import { useCourseVideos } from "@/hooks/data";
 import { useProgressMap } from "@/hooks/persist";
 import { fmtDur } from "@/lib/media";
@@ -221,13 +226,18 @@ function CourseItem({
   activeVideoId,
   onSelect,
   query,
+  open,
+  onToggle,
+  rootRef,
 }: {
   course: Course;
   activeVideoId: number | null;
   onSelect: SelectFn;
   query: string;
+  open: boolean;
+  onToggle: () => void;
+  rootRef?: (el: HTMLDivElement | null) => void;
 }) {
-  const [open, setOpen] = React.useState(false);
   const wantOpen = open || !!query;
   const { videos, isLoading } = useCourseVideos(wantOpen ? course.id : null);
   const progress = useProgressMap();
@@ -270,8 +280,8 @@ function CourseItem({
   );
 
   return (
-    <Box sx={{ mb: 0.5 }}>
-      <ListItemButton onClick={() => setOpen((o) => !o)} sx={{ borderRadius: 2, gap: 1 }}>
+    <Box ref={rootRef} sx={{ mb: 0.5, scrollMarginTop: 8 }}>
+      <ListItemButton onClick={onToggle} sx={{ borderRadius: 2, gap: 1 }}>
         <ChevronRightIcon
           sx={{ fontSize: 18, transition: ".18s", transform: wantOpen ? "rotate(90deg)" : "none", color: "text.secondary" }}
         />
@@ -336,23 +346,106 @@ export default function CourseSidebar({
   courses,
   loading,
   activeVideoId,
+  activeCourseId,
   onSelect,
+  onJumpToCurrent,
 }: {
   courses: Course[];
   loading: boolean;
   activeVideoId: number | null;
+  activeCourseId: number | null;
   onSelect: SelectFn;
+  onJumpToCurrent?: () => void;
 }) {
   const [query, setQuery] = React.useState("");
+  const [cardFilter, setCardFilter] = React.useState<string | null>(null);
+  // 各课展开状态上移到这里集中管理，「回到在看 / 收起其他」才能一次改完。
+  const [openIds, setOpenIds] = React.useState<Set<number>>(() => new Set());
+  // 自增令牌：每次点「回到在看」都触发滚动 effect，重复点也能再次滚到位。
+  const [jumpToken, setJumpToken] = React.useState(0);
+  const rowRefs = React.useRef<Map<number, HTMLDivElement>>(new Map());
+
+  // 去重的卡片类型（保持课程出现顺序）；只有多于一种时才显示筛选行。
+  const cardTypes = React.useMemo(() => {
+    const seen: string[] = [];
+    for (const c of courses) {
+      const t = c.cardType || "课程";
+      if (!seen.includes(t)) seen.push(t);
+    }
+    return seen;
+  }, [courses]);
+
+  const visibleCourses = React.useMemo(
+    () => (cardFilter ? courses.filter((c) => (c.cardType || "课程") === cardFilter) : courses),
+    [courses, cardFilter]
+  );
+
+  const toggle = React.useCallback((id: number) => {
+    setOpenIds((s) => {
+      const n = new Set(s);
+      if (n.has(id)) n.delete(id);
+      else n.add(id);
+      return n;
+    });
+  }, []);
+
+  // 回到在看：清掉挡住在看课程的筛选 → 展开该课 → 滚到可视区 →（无选中时）续看。
+  const jumpToCurrent = React.useCallback(() => {
+    if (activeCourseId == null) return;
+    const ac = courses.find((c) => c.id === activeCourseId);
+    if (ac && cardFilter && (ac.cardType || "课程") !== cardFilter) setCardFilter(null);
+    setOpenIds((s) => new Set(s).add(activeCourseId));
+    setJumpToken((n) => n + 1);
+    onJumpToCurrent?.();
+  }, [activeCourseId, courses, cardFilter, onJumpToCurrent]);
+
+  // 收起其他：只留在看那门课展开（没有在看就全部收起）。
+  const collapseOthers = React.useCallback(() => {
+    setOpenIds(activeCourseId != null ? new Set([activeCourseId]) : new Set());
+  }, [activeCourseId]);
+
+  // 展开动画跑完后再滚动；依赖 jumpToken 让连点也能重新滚到位。
+  React.useEffect(() => {
+    if (jumpToken === 0 || activeCourseId == null) return;
+    const t = window.setTimeout(() => {
+      rowRefs.current
+        .get(activeCourseId)
+        ?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    }, 80);
+    return () => window.clearTimeout(t);
+  }, [jumpToken, activeCourseId]);
+
   return (
     <Box sx={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
       <Box sx={{ p: 1.5, borderBottom: (t) => `1px solid ${t.palette.divider}` }}>
-        <Box sx={{ display: "flex", alignItems: "center", mb: 1 }}>
+        <Box sx={{ display: "flex", alignItems: "center", gap: 0.5, mb: 1 }}>
           <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>
             我的课程
           </Typography>
-          <Typography variant="caption" color="text.secondary" sx={{ ml: "auto" }}>
-            {courses.length} 门
+          <Box sx={{ flex: 1 }} />
+          <Tooltip title="回到正在看">
+            <span>
+              <IconButton
+                size="small"
+                aria-label="回到正在看"
+                onClick={jumpToCurrent}
+                disabled={activeCourseId == null}
+              >
+                <MyLocationRoundedIcon fontSize="small" />
+              </IconButton>
+            </span>
+          </Tooltip>
+          <Tooltip title="收起其他课程">
+            <IconButton size="small" aria-label="收起其他课程" onClick={collapseOthers}>
+              <UnfoldLessRoundedIcon fontSize="small" />
+            </IconButton>
+          </Tooltip>
+          <Typography
+            variant="caption"
+            color="text.secondary"
+            sx={{ ml: 0.5, fontVariantNumeric: "tabular-nums" }}
+          >
+            {visibleCourses.length} 门
           </Typography>
         </Box>
         <TextField
@@ -369,18 +462,56 @@ export default function CourseSidebar({
             ),
           }}
         />
+        {cardTypes.length > 1 && (
+          <Stack
+            direction="row"
+            spacing={0.75}
+            sx={{ mt: 1, overflowX: "auto", pb: 0.5, "&::-webkit-scrollbar": { display: "none" } }}
+          >
+            <Chip
+              size="small"
+              label="全部"
+              color={cardFilter === null ? "primary" : "default"}
+              variant={cardFilter === null ? "filled" : "outlined"}
+              onClick={() => setCardFilter(null)}
+              sx={{ flexShrink: 0 }}
+            />
+            {cardTypes.map((t) => (
+              <Chip
+                key={t}
+                size="small"
+                label={t}
+                color={cardFilter === t ? "primary" : "default"}
+                variant={cardFilter === t ? "filled" : "outlined"}
+                onClick={() => setCardFilter((c) => (c === t ? null : t))}
+                sx={{ flexShrink: 0 }}
+              />
+            ))}
+          </Stack>
+        )}
       </Box>
       <List sx={{ flex: 1, overflowY: "auto", p: 1 }}>
         {loading && <SidebarSkeleton />}
-        {courses.map((c) => (
+        {visibleCourses.map((c) => (
           <CourseItem
             key={c.id}
             course={c}
             activeVideoId={activeVideoId}
             onSelect={onSelect}
             query={query}
+            open={openIds.has(c.id)}
+            onToggle={() => toggle(c.id)}
+            rootRef={(el) => {
+              if (el) rowRefs.current.set(c.id, el);
+              else rowRefs.current.delete(c.id);
+            }}
           />
         ))}
+        {!loading && cardFilter && visibleCourses.length === 0 && (
+          <Typography variant="caption" color="text.secondary" sx={{ pl: 1 }}>
+            无此类型课程
+          </Typography>
+        )}
       </List>
     </Box>
   );
