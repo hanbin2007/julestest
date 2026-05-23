@@ -6,6 +6,7 @@ import { AppBar, Box, IconButton, Toolbar, Tooltip, Typography } from "@mui/mate
 import MenuRoundedIcon from "@mui/icons-material/MenuRounded";
 import SearchRoundedIcon from "@mui/icons-material/SearchRounded";
 import SettingsRoundedIcon from "@mui/icons-material/SettingsRounded";
+import NoteAltOutlinedIcon from "@mui/icons-material/NoteAltOutlined";
 import ArrowBackRoundedIcon from "@mui/icons-material/ArrowBackRounded";
 import LightModeRoundedIcon from "@mui/icons-material/LightModeRounded";
 import DarkModeRoundedIcon from "@mui/icons-material/DarkModeRounded";
@@ -35,6 +36,8 @@ export default function AppTopBar({
 }) {
   const pathname = usePathname();
   const onSettings = pathname?.startsWith("/settings");
+  const onNotes = pathname?.startsWith("/notes");
+  const onHome = !onSettings && !onNotes;
   return (
     <AppBar position="static">
       <Toolbar variant="dense" sx={{ gap: 1 }}>
@@ -56,9 +59,21 @@ export default function AppTopBar({
           </Tooltip>
         )}
         <ThemeModeToggle />
-        <Tooltip title={onSettings ? "返回播放" : "设置"}>
-          <IconButton component={Link} href={onSettings ? "/" : "/settings"} color={onSettings ? "primary" : "default"}>
-            {onSettings ? <ArrowBackRoundedIcon /> : <SettingsRoundedIcon />}
+        {!onHome && (
+          <Tooltip title="返回播放">
+            <IconButton component={Link} href="/">
+              <ArrowBackRoundedIcon />
+            </IconButton>
+          </Tooltip>
+        )}
+        <Tooltip title="笔记">
+          <IconButton component={Link} href="/notes" color={onNotes ? "primary" : "default"}>
+            <NoteAltOutlinedIcon />
+          </IconButton>
+        </Tooltip>
+        <Tooltip title="设置">
+          <IconButton component={Link} href="/settings" color={onSettings ? "primary" : "default"}>
+            <SettingsRoundedIcon />
           </IconButton>
         </Tooltip>
       </Toolbar>

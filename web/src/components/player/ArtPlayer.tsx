@@ -13,14 +13,15 @@ interface Props {
   onEnded?: () => void;
   onTime?: (t: number, d: number) => void;
   onInstance?: (art: any | null) => void;
+  onReady?: () => void;
 }
 
-export default function ArtPlayer({ src, thumbnails, startTime, onEnded, onTime, onInstance }: Props) {
+export default function ArtPlayer({ src, thumbnails, startTime, onEnded, onTime, onInstance, onReady }: Props) {
   const ref = React.useRef<HTMLDivElement>(null);
   const theme = useTheme();
   const accent = theme.palette.primary.main as string;
-  const cbs = React.useRef({ onEnded, onTime, onInstance });
-  cbs.current = { onEnded, onTime, onInstance };
+  const cbs = React.useRef({ onEnded, onTime, onInstance, onReady });
+  cbs.current = { onEnded, onTime, onInstance, onReady };
   const startRef = React.useRef(startTime);
   startRef.current = startTime;
 
@@ -95,6 +96,7 @@ export default function ArtPlayer({ src, thumbnails, startTime, onEnded, onTime,
             /* ignore */
           }
         }
+        cbs.current.onReady?.();
       });
       art.on("video:ended", () => cbs.current.onEnded?.());
       art.on("video:timeupdate", () => {

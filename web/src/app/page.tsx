@@ -62,9 +62,11 @@ export default function PlayerView() {
   // 本讲逐片缓存：观看/预缓存会持续补片，快一点刷新让缓存条像在“长”。
   const segMaps = useSegmentMaps(video ? [video.videoId] : [], { buckets: 100, refreshInterval: 1500 });
   const segMap = video ? segMaps[String(video.videoId)] : undefined;
+  // 深链跳转(/?…&t=)指定的起播位置：优先于续看进度，被播放器消费一次后清空。
+  const [seekOverride, setSeekOverride] = React.useState<number | undefined>(undefined);
   const startTime = React.useMemo(
-    () => (sel ? progressMap[String(sel.videoId)]?.t : undefined),
-    [sel, progressMap]
+    () => seekOverride ?? (sel ? progressMap[String(sel.videoId)]?.t : undefined),
+    [seekOverride, sel, progressMap]
   );
   const accentTheme = React.useMemo(
     () => themeForSeed(course ? hashSeed(course.name) : "#4f8cff"),
@@ -77,8 +79,14 @@ export default function PlayerView() {
     const sp = new URLSearchParams(window.location.search);
     const p = Number(sp.get("productId"));
     const v = Number(sp.get("videoId"));
+    const t = Number(sp.get("t"));
     if (p && v) {
       setSel({ courseId: p, videoId: v });
+      if (t > 0) {
+        setSeekOverride(t);
+        // 抹掉 t：可分享的跳转链接不该变成"刷新即丢进度"的链接
+        window.history.replaceState(null, "", `/?productId=${p}&videoId=${v}`);
+      }
       resumedRef.current = true;
     }
   }, []);
@@ -110,16 +118,19 @@ export default function PlayerView() {
   }, [video?.videoId]);
 
   const selectVideo = React.useCallback((v: Video, c: Course) => {
+    setSeekOverride(undefined);
     setSel({ courseId: c.id, videoId: v.videoId });
     void patchSettings({ last: { productId: c.id, videoId: v.videoId } });
     setDrawer(false);
   }, []);
 
   const resume = React.useCallback((productId: number, videoId: number) => {
+    setSeekOverride(undefined);
     setSel({ courseId: productId, videoId });
   }, []);
 
   const pickFromPalette = React.useCallback((row: VideoRow) => {
+    setSeekOverride(undefined);
     setSel({ courseId: row.courseId, videoId: row.v.videoId });
     void patchSettings({ last: { productId: row.courseId, videoId: row.v.videoId } });
   }, []);
@@ -272,6 +283,7 @@ export default function PlayerView() {
                       onTime={onTime}
                       onEnded={() => setUpNext(next)}
                       onInstance={(art) => (artRef.current = art)}
+                      onReady={() => setSeekOverride(undefined)}
                     />
                   ) : (
                     <Box
@@ -334,6 +346,7 @@ export default function PlayerView() {
         videoId={video?.videoId ?? null}
         getCurrentTime={() => artRef.current?.video?.currentTime ?? 0}
         onSeek={(t) => {
+          setSeekOverride(undefined);
           const p = artRef.current;
           if (p) p.currentTime = t;
         }}
