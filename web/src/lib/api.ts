@@ -115,6 +115,9 @@ export const getAllNotes = () =>
   fetcher<{ notes: EnrichedNote[]; stats: NotesStats }>("/api/notes/all");
 export const deleteNotesBatch = (ids: string[]) =>
   postJson<{ ok: boolean; deleted: number }>("/api/notes/delete-batch", { ids });
+// 缺图时按 videoId 现场生成/查询缩略图（服务端解析 src+ids 转发网关）。
+export const getNoteThumb = (videoId: number) =>
+  fetcher<ThumbResponse>(`/api/notes/thumb?videoId=${videoId}`);
 
 export const getSettings = () =>
   fetcher<{ prefs: Prefs; last: LastWatched | null }>("/api/settings");

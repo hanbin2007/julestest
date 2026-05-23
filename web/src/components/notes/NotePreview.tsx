@@ -1,14 +1,15 @@
 "use client";
 import * as React from "react";
-import { Box, Popper, Typography } from "@mui/material";
+import { Box, CircularProgress, Popper, Typography } from "@mui/material";
 import MovieRoundedIcon from "@mui/icons-material/MovieRounded";
+import { getNoteThumb } from "@/lib/api";
 import { fmtDur, thumbSheetUrl, thumbTile } from "@/lib/media";
 import type { ThumbMeta } from "@/lib/store";
 
 const PREVIEW_W = 132; // 卡片内小图宽（16:9 → 高约 74）
 const POPPER_W = 360; // 悬停放大图宽
 
-// 时间戳角标（小图/占位通用）
+// 时间戳角标
 function TimeBadge({ t }: { t: number }) {
   return (
     <Typography
@@ -29,7 +30,8 @@ function TimeBadge({ t }: { t: number }) {
   );
 }
 
-// 某条笔记时间戳处的视频帧预览：就绪则裁雪碧图，否则占位；悬停(仅有 hover 的设备)放大。
+// 某条笔记时间戳处的视频帧预览：就绪则裁雪碧图；缺图时进入视口后现场生成(网关落盘保存)，
+// 生成中显示转菊花，就绪后自动显示真实帧；只有真出错才回退占位。悬停(有 hover 的设备)放大。
 export default function NotePreview({
   videoId,
   t,
@@ -43,67 +45,123 @@ export default function NotePreview({
   meta?: ThumbMeta;
   color: string;
 }) {
-  const [anchor, setAnchor] = React.useState<HTMLElement | null>(null);
+  const rootRef = React.useRef<HTMLDivElement | null>(null);
+  const [inView, setInView] = React.useState(false);
+  const [liveMeta, setLiveMeta] = React.useState<ThumbMeta | null>(null);
+  const [gen, setGen] = React.useState<"idle" | "gen" | "error">("idle");
   const [errored, setErrored] = React.useState(false);
-  const timer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
-  const ok = ready && !errored;
+  const [anchor, setAnchor] = React.useState<HTMLElement | null>(null);
+  const hoverTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const ok = (ready || !!liveMeta) && !errored;
+  const effMeta = liveMeta ?? meta;
   const url = thumbSheetUrl(videoId);
-  const small = thumbTile(t, PREVIEW_W, meta);
-  const big = thumbTile(t, POPPER_W, meta);
+  const small = thumbTile(t, PREVIEW_W, effMeta ?? undefined);
+  const big = thumbTile(t, POPPER_W, effMeta ?? undefined);
+
+  // 进入视口才工作（懒触发，避免一次性给网关压上几十路生成）
+  React.useEffect(() => {
+    const el = rootRef.current;
+    if (!el || inView) return;
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) {
+          setInView(true);
+          io.disconnect();
+        }
+      },
+      { rootMargin: "200px" },
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, [inView]);
+
+  // 缺图则现场生成 + 轮询，直到就绪/出错（网关 ffmpeg 切片后落盘持久保存）
+  React.useEffect(() => {
+    if (ready || liveMeta || errored || !inView) return;
+    let cancelled = false;
+    let tries = 0;
+    let timer: ReturnType<typeof setTimeout>;
+    setGen("gen");
+    const tick = async () => {
+      if (cancelled) return;
+      try {
+        const r = await getNoteThumb(videoId);
+        if (cancelled) return;
+        if (r.state === "ready") {
+          setLiveMeta({ url: r.url, number: r.number, column: r.column, width: r.width, height: r.height });
+          setGen("idle");
+          return;
+        }
+        if (r.state === "error") {
+          setGen("error");
+          return;
+        }
+      } catch {
+        /* 网络抖动，重试 */
+      }
+      if (++tries < 60 && !cancelled) timer = setTimeout(tick, 2000);
+      else if (!cancelled) setGen("error");
+    };
+    tick();
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [inView, videoId, ready]);
 
   const enter = (e: React.MouseEvent<HTMLElement>) => {
-    if (!ok) return;
     const el = e.currentTarget;
-    timer.current = setTimeout(() => setAnchor(el), 150); // 入场延迟，滚动时不闪
+    hoverTimer.current = setTimeout(() => setAnchor(el), 150); // 入场延迟，滚动时不闪
   };
   const leave = () => {
-    if (timer.current) {
-      clearTimeout(timer.current);
-      timer.current = null;
+    if (hoverTimer.current) {
+      clearTimeout(hoverTimer.current);
+      hoverTimer.current = null;
     }
     setAnchor(null);
   };
   React.useEffect(() => () => {
-    if (timer.current) clearTimeout(timer.current);
+    if (hoverTimer.current) clearTimeout(hoverTimer.current);
   }, []);
-
-  const frame = {
-    width: PREVIEW_W,
-    height: (PREVIEW_W * 9) / 16,
-    flex: "0 0 auto",
-    position: "relative" as const,
-    overflow: "hidden",
-    borderRadius: (th: { radius: { sm: string } }) => th.radius.sm,
-    bgcolor: `color-mix(in srgb, ${color} 20%, transparent)`,
-  };
-
-  if (!ok) {
-    return (
-      <Box sx={{ ...frame, display: "flex", alignItems: "center", justifyContent: "center" }}>
-        <MovieRoundedIcon sx={{ color, opacity: 0.6, fontSize: 26 }} />
-        <TimeBadge t={t} />
-      </Box>
-    );
-  }
 
   return (
     <>
       <Box
-        onMouseEnter={enter}
-        onMouseLeave={leave}
+        ref={rootRef}
+        onMouseEnter={ok ? enter : undefined}
+        onMouseLeave={ok ? leave : undefined}
         sx={{
-          ...frame,
-          cursor: "zoom-in",
-          backgroundImage: `url("${url}")`,
-          backgroundSize: small.backgroundSize,
-          backgroundPosition: small.backgroundPosition,
-          backgroundRepeat: "no-repeat",
+          width: PREVIEW_W,
+          height: (PREVIEW_W * 9) / 16,
+          flex: "0 0 auto",
+          position: "relative",
+          overflow: "hidden",
+          borderRadius: (th) => th.radius.sm,
+          bgcolor: `color-mix(in srgb, ${color} 20%, transparent)`,
+          cursor: ok ? "zoom-in" : "default",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          ...(ok && {
+            backgroundImage: `url("${url}")`,
+            backgroundSize: small.backgroundSize,
+            backgroundPosition: small.backgroundPosition,
+            backgroundRepeat: "no-repeat",
+          }),
         }}
       >
+        {!ok &&
+          (gen === "gen" ? (
+            <CircularProgress size={20} sx={{ color }} />
+          ) : (
+            <MovieRoundedIcon sx={{ color, opacity: 0.6, fontSize: 26 }} />
+          ))}
         <TimeBadge t={t} />
       </Box>
-      {/* 探测雪碧图是否真的存在（state=ready 但文件可能缺失）→ 回退占位 */}
-      <img src={url} alt="" style={{ display: "none" }} onError={() => setErrored(true)} />
+      {/* 探测雪碧图是否真的存在（state=ready 但文件可能缺失）→ 回退占位/重生成 */}
+      {ok && <img src={url} alt="" style={{ display: "none" }} onError={() => setErrored(true)} />}
       <Popper
         open={!!anchor}
         anchorEl={anchor}
