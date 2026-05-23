@@ -27,6 +27,87 @@ interface GwThumbsStatus {
   bytes: number;
 }
 
+type RollupCourses = Awaited<ReturnType<typeof getCatalogRollup>>["courses"];
+// 单讲的归一化缓存视图：网关实时态与 DB 回退态收敛到同一形状，喂给 buildCourseStatus。
+type VidAgg = { cached: number; total: number | null; state: VidStatusDetail["state"] | null; bytes: number };
+
+// 把"逐讲缓存/缩略图状态 -> 每门课汇总(CourseStatus)"的聚合抽成单一实现。
+// 网关在线(build)与离线回退(fallback)只是取数来源不同：用 getVid/getThumb 注入，
+// countTasks 仅在线时统计 buffering/queued（DB 回退里无任务态，恒 0）。同时填充 perVid。
+function buildCourseStatus(
+  courses: RollupCourses,
+  watched: Set<number>,
+  perVid: Record<string, VidStatusDetail>,
+  getVid: (videoId: number) => VidAgg | null,
+  getThumb: (videoId: number) => VidStatusDetail["thumb"],
+  countTasks: boolean,
+): CourseStatus[] {
+  return courses.map((c) => {
+    let cachedLectures = 0,
+      fullyCached = 0,
+      cachedBytes = 0,
+      thumbsReady = 0,
+      thumbsGen = 0,
+      thumbsError = 0,
+      buffering = 0,
+      queued = 0,
+      watchedN = 0,
+      vod = 0,
+      live = 0,
+      lockedN = 0;
+    for (const v of c.vids) {
+      if (v.kind === "live") live++;
+      else vod++;
+      if (v.locked) lockedN++;
+      const b = getVid(v.videoId);
+      const th = getThumb(v.videoId);
+      if (b) {
+        if (b.cached > 0) cachedLectures++;
+        if (b.total && b.cached >= b.total) fullyCached++;
+        cachedBytes += b.bytes || 0;
+        if (countTasks) {
+          if (b.state === "working") buffering++;
+          else if (b.state === "queued") queued++;
+        }
+        perVid[String(v.videoId)] = {
+          cached: b.cached,
+          total: b.total,
+          bytes: b.bytes || 0,
+          state: b.state,
+          thumb: th,
+        };
+      } else if (th) {
+        perVid[String(v.videoId)] = { cached: 0, total: null, bytes: 0, state: null, thumb: th };
+      }
+      if (th === "ready") thumbsReady++;
+      else if (th === "gen") thumbsGen++;
+      else if (th === "error") thumbsError++;
+      if (watched.has(v.videoId)) watchedN++;
+    }
+    const lectures = c.vids.length;
+    return {
+      productId: c.productId,
+      name: c.name,
+      cardType: c.cardType,
+      lectures,
+      vod,
+      live,
+      allLocked: lectures > 0 && lockedN === lectures,
+      cachedLectures,
+      fullyCached,
+      partialRatio: lectures > 0 ? cachedLectures / lectures : 0,
+      fullRatio: lectures > 0 ? fullyCached / lectures : 0,
+      cachedBytes,
+      thumbsReady,
+      thumbsGen,
+      thumbsError,
+      buffering,
+      queued,
+      watched: watchedN,
+    };
+  });
+}
+
 // 多标签页同时轮询时，200ms 内合并为一次上游调用。
 let last: { at: number; data: CoursesStatus } | null = null;
 let pending: Promise<CoursesStatus> | null = null;
@@ -74,68 +155,19 @@ async function build(): Promise<CoursesStatus> {
     return s === "ready" || s === "gen" || s === "error" ? s : null;
   };
 
-  const courseStatus: CourseStatus[] = courses.map((c) => {
-    let cachedLectures = 0,
-      fullyCached = 0,
-      cachedBytes = 0,
-      thumbsReady = 0,
-      thumbsGen = 0,
-      thumbsError = 0,
-      buffering = 0,
-      queued = 0,
-      watchedN = 0,
-      vod = 0,
-      live = 0,
-      lockedN = 0;
-    for (const v of c.vids) {
-      if (v.kind === "live") live++;
-      else vod++;
-      if (v.locked) lockedN++;
-      const b = perVidGw[String(v.videoId)];
-      const th = thumbState(v.videoId);
-      if (b) {
-        if (b.cached > 0) cachedLectures++;
-        if (b.total && b.cached >= b.total) fullyCached++;
-        cachedBytes += b.bytes || 0;
-        if (b.state === "working") buffering++;
-        else if (b.state === "queued") queued++;
-        perVid[String(v.videoId)] = {
-          cached: b.cached,
-          total: b.total,
-          bytes: b.bytes || 0,
-          state: (b.state as VidStatusDetail["state"]) ?? null,
-          thumb: th,
-        };
-      } else if (th) {
-        perVid[String(v.videoId)] = { cached: 0, total: null, bytes: 0, state: null, thumb: th };
-      }
-      if (th === "ready") thumbsReady++;
-      else if (th === "gen") thumbsGen++;
-      else if (th === "error") thumbsError++;
-      if (watched.has(v.videoId)) watchedN++;
-    }
-    const lectures = c.vids.length;
-    return {
-      productId: c.productId,
-      name: c.name,
-      cardType: c.cardType,
-      lectures,
-      vod,
-      live,
-      allLocked: lectures > 0 && lockedN === lectures,
-      cachedLectures,
-      fullyCached,
-      partialRatio: lectures > 0 ? cachedLectures / lectures : 0,
-      fullRatio: lectures > 0 ? fullyCached / lectures : 0,
-      cachedBytes,
-      thumbsReady,
-      thumbsGen,
-      thumbsError,
-      buffering,
-      queued,
-      watched: watchedN,
-    };
-  });
+  const courseStatus = buildCourseStatus(
+    courses,
+    watched,
+    perVid,
+    (videoId) => {
+      const b = perVidGw[String(videoId)];
+      return b
+        ? { cached: b.cached, total: b.total, state: (b.state as VidStatusDetail["state"]) ?? null, bytes: b.bytes || 0 }
+        : null;
+    },
+    thumbState,
+    true,
+  );
 
   // 任务队列：进行中 + 排队（进行中优先）
   const mk = (vid: string, kind: TaskItem["kind"], state: TaskItem["state"]): TaskItem => {
@@ -231,67 +263,21 @@ async function fallback(
   const cacheBy = new Map(cs.map((r) => [r.videoId, r]));
   const thumbBy = new Map(ts.map((r) => [r.videoId, r.state]));
   const perVid: Record<string, VidStatusDetail> = {};
-  let totalBytes = 0;
 
-  const courseStatus: CourseStatus[] = courses.map((c) => {
-    let cachedLectures = 0,
-      fullyCached = 0,
-      cachedBytes = 0,
-      thumbsReady = 0,
-      thumbsGen = 0,
-      thumbsError = 0,
-      watchedN = 0,
-      vod = 0,
-      live = 0,
-      lockedN = 0;
-    for (const v of c.vids) {
-      if (v.kind === "live") live++;
-      else vod++;
-      if (v.locked) lockedN++;
-      const b = cacheBy.get(v.videoId);
-      const th = (thumbBy.get(v.videoId) as VidStatusDetail["thumb"]) ?? null;
-      if (b) {
-        if (b.cachedSegments > 0) cachedLectures++;
-        if (b.totalSegments && b.cachedSegments >= b.totalSegments) fullyCached++;
-        cachedBytes += b.bytes || 0;
-        totalBytes += b.bytes || 0;
-        perVid[String(v.videoId)] = {
-          cached: b.cachedSegments,
-          total: b.totalSegments,
-          bytes: b.bytes || 0,
-          state: (b.state as VidStatusDetail["state"]) ?? null,
-          thumb: th,
-        };
-      } else if (th) {
-        perVid[String(v.videoId)] = { cached: 0, total: null, bytes: 0, state: null, thumb: th };
-      }
-      if (th === "ready") thumbsReady++;
-      else if (th === "gen") thumbsGen++;
-      else if (th === "error") thumbsError++;
-      if (watched.has(v.videoId)) watchedN++;
-    }
-    const lectures = c.vids.length;
-    return {
-      productId: c.productId,
-      name: c.name,
-      cardType: c.cardType,
-      lectures,
-      vod,
-      live,
-      allLocked: lectures > 0 && lockedN === lectures,
-      cachedLectures,
-      fullyCached,
-      partialRatio: lectures > 0 ? cachedLectures / lectures : 0,
-      fullRatio: lectures > 0 ? fullyCached / lectures : 0,
-      cachedBytes,
-      thumbsReady,
-      thumbsGen,
-      thumbsError,
-      buffering: 0,
-      queued: 0,
-      watched: watchedN,
-    };
-  });
+  const courseStatus = buildCourseStatus(
+    courses,
+    watched,
+    perVid,
+    (videoId) => {
+      const b = cacheBy.get(videoId);
+      return b
+        ? { cached: b.cachedSegments, total: b.totalSegments, state: (b.state as VidStatusDetail["state"]) ?? null, bytes: b.bytes || 0 }
+        : null;
+    },
+    (videoId) => (thumbBy.get(videoId) as VidStatusDetail["thumb"]) ?? null,
+    false,
+  );
+  const totalBytes = courseStatus.reduce((a, c) => a + c.cachedBytes, 0);
 
   return {
     courses: courseStatus,
