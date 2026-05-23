@@ -70,6 +70,7 @@ export interface NotesStats {
 export interface Prefs {
   rate: number;
   density: "comfortable" | "compact";
+  floatTools?: boolean; // 播放器上常驻「批注/问AI」悬浮按钮（缺省视为开）
 }
 
 export interface LastWatched {

@@ -11,6 +11,7 @@ import PlayerMeta from "@/components/player/PlayerMeta";
 import NotesPanel from "@/components/player/NotesPanel";
 import UpNextCountdown from "@/components/player/UpNextCountdown";
 import AnnotationOverlay from "@/components/annotate/AnnotationOverlay";
+import FloatingTools from "@/components/annotate/FloatingTools";
 import { useAnnotation, bakeAnnotation, bakeWithServerFrame } from "@/components/annotate/useAnnotation";
 import { serializeStrokes, parseStrokes } from "@/components/annotate/strokes";
 import ChatPanel, { type ChatPrefill } from "@/components/chat/ChatPanel";
@@ -26,7 +27,7 @@ import { useSegmentMaps } from "@/hooks/useSegmentMaps";
 import { useHotkeys } from "@/hooks/useHotkeys";
 import { play, pickM3u8, postProgress, addNote as apiAddNote, saveNoteSnapshot as apiSaveNoteSnapshot, patchSettings, refreshCatalog } from "@/lib/api";
 import { themeForSeed, hashSeed } from "@/lib/color";
-import { useProgressMap, useLast, useNotes } from "@/hooks/persist";
+import { useProgressMap, useLast, useNotes, usePrefs } from "@/hooks/persist";
 import type { Course, Video, VideoRow } from "@/types/api";
 
 const ArtPlayer = dynamic(() => import("@/components/player/ArtPlayer"), {
@@ -73,6 +74,9 @@ export default function PlayerView() {
   const next = idx >= 0 && idx < curList.length - 1 ? curList[idx + 1] : null;
   // 批注存/改笔记复用 useNotes（与笔记抽屉同一 SWR key，自动同步）
   const notesApi = useNotes(video?.videoId ?? null);
+  // 悬浮工具开关（缺省视为开），持久化到偏好
+  const { prefs, setPrefs } = usePrefs();
+  const floatTools = prefs.floatTools !== false;
 
   const thumbnails = useThumbPoll(video ?? null);
   // 本讲逐片缓存：观看/预缓存会持续补片，快一点刷新让缓存条像在“长”。
@@ -461,6 +465,8 @@ export default function PlayerView() {
                   onAnnotate={openAnnotateFresh}
                   onChat={() => setChatOpen(true)}
                   onCopyDownload={copyDownload}
+                  floatTools={floatTools}
+                  onToggleFloat={(v) => void setPrefs({ floatTools: v })}
                 />
               )}
             </Box>
@@ -479,6 +485,12 @@ export default function PlayerView() {
           const p = artRef.current;
           if (p) p.currentTime = t;
         }}
+      />
+      <FloatingTools
+        art={art}
+        visible={floatTools && !!video && !annotateOpen}
+        onAnnotate={openAnnotateFresh}
+        onChat={() => setChatOpen(true)}
       />
       {annotateOpen && art && video && (
         <AnnotationOverlay

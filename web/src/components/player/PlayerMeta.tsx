@@ -1,5 +1,5 @@
 "use client";
-import { Box, Breadcrumbs, Button, Stack, Typography } from "@mui/material";
+import { Box, Breadcrumbs, Button, FormControlLabel, Stack, Switch, Typography } from "@mui/material";
 import SkipPreviousRoundedIcon from "@mui/icons-material/SkipPreviousRounded";
 import SkipNextRoundedIcon from "@mui/icons-material/SkipNextRounded";
 import NoteAltOutlinedIcon from "@mui/icons-material/NoteAltOutlined";
@@ -20,6 +20,8 @@ export default function PlayerMeta({
   onAnnotate,
   onChat,
   onCopyDownload,
+  floatTools,
+  onToggleFloat,
 }: {
   course: Course;
   video: Video;
@@ -31,6 +33,8 @@ export default function PlayerMeta({
   onAnnotate: () => void;
   onChat: () => void;
   onCopyDownload: () => void;
+  floatTools: boolean;
+  onToggleFloat: (v: boolean) => void;
 }) {
   const crumbs = [course.name, video.module, video.topic, video.examKey].filter(Boolean) as string[];
   return (
@@ -65,6 +69,13 @@ export default function PlayerMeta({
         <Button variant="text" startIcon={<DownloadRoundedIcon />} onClick={onCopyDownload}>
           复制下载命令
         </Button>
+        <FormControlLabel
+          sx={{ ml: "auto", mr: 0 }}
+          control={
+            <Switch size="small" checked={floatTools} onChange={(e) => onToggleFloat(e.target.checked)} />
+          }
+          label={<Typography variant="body2">悬浮工具</Typography>}
+        />
       </Stack>
     </Box>
   );
