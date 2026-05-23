@@ -18,12 +18,18 @@ declare module "@mui/material/styles" {
   }
 }
 
+// 统一的告警琥珀（MD3 无 warning 语义，固定一个克制的琥珀，避免 MUI 默认色混入）
+const WARNING = "#e0a33e";
+
 function schemePalette(t: Md3Tokens) {
   return {
     primary: { main: t.primary, contrastText: t.onPrimary },
     secondary: { main: t.secondary, contrastText: t.onSecondary },
     error: { main: t.error, contrastText: t.onError },
     success: { main: SUCCESS, contrastText: "#06291b" },
+    // info 走 MD3 tertiary、warning 走统一琥珀——不再落到 MUI 默认的蓝/琥珀
+    warning: { main: WARNING, contrastText: "#2a1d00" },
+    info: { main: t.tertiary, contrastText: t.onTertiary },
     background: { default: t.background, paper: t.surfaceContainerLow },
     text: { primary: t.onSurface, secondary: t.onSurfaceVariant },
     divider: t.outlineVariant,
@@ -102,8 +108,15 @@ export function buildTheme(seed: string = SEED) {
             backgroundColor: (theme.vars ?? theme).palette.md3.surfaceContainerHighest,
             color: (theme.vars ?? theme).palette.md3.onSurfaceVariant,
           }),
+          // outlined：真正透明 + MD3 outlineVariant 描边（彩色 outlined 由各自 color 覆盖描边/文字）
+          outlined: ({ theme }) => ({
+            backgroundColor: "transparent",
+            borderColor: (theme.vars ?? theme).palette.md3.outlineVariant,
+          }),
           // 胶囊两端会吃掉横向空间，小 Chip 多给点 label 内边距，文字不贴边
-          labelSmall: { paddingLeft: 10, paddingRight: 10 },
+          labelSmall: { paddingLeft: 11, paddingRight: 11 },
+          // 图标别贴左缘、也别紧挨文字；缩小一点给 22px 高的小 Chip 留呼吸
+          iconSmall: { marginLeft: 8, marginRight: -1, fontSize: 16 },
         },
       },
       MuiDrawer: {

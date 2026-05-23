@@ -112,17 +112,6 @@ function CourseStatusCard({
         cursor: "pointer",
         position: "relative",
         transition: "transform .15s, box-shadow .15s",
-        // 左侧分类色条：圆角药丸，竖直内缩 12px 避开卡片圆角——不再被圆角裁出怪弧
-        "&::before": {
-          content: '""',
-          position: "absolute",
-          left: 0,
-          top: "12px",
-          bottom: "12px",
-          width: "3px",
-          borderRadius: "999px",
-          backgroundColor: color,
-        },
         "&:hover": {
           transform: "translateY(-2px)",
           boxShadow: "0 6px 20px rgba(0,0,0,.18)",
@@ -227,7 +216,7 @@ function CourseStatusCard({
         <Chip
           size="small"
           color={thumbDone ? "success" : course.thumbsError ? "error" : course.thumbsGen ? "primary" : "default"}
-          variant={thumbDone ? "filled" : "outlined"}
+          variant="outlined"
           label={`缩略图 ${course.thumbsReady}/${course.lectures}`}
           sx={{ height: 22 }}
         />

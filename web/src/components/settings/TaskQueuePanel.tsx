@@ -46,7 +46,7 @@ function TaskRow({ task }: { task: TaskItem }) {
       <Box sx={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 0.5, flexShrink: 0 }}>
         <Chip
           size="small"
-          variant={working ? "filled" : "outlined"}
+          variant="outlined"
           color={working ? k.color : "default"}
           label={working ? "进行中" : "排队"}
           sx={{ height: 22, fontSize: 11 }}
