@@ -192,7 +192,7 @@ export default function PlayerView() {
     <CourseSidebar
       courses={courses}
       loading={isLoading}
-      activeVideoId={sel?.videoId ?? null}
+      activeVideoId={sel?.videoId ?? last?.videoId ?? null}
       activeCourseId={sel?.courseId ?? last?.productId ?? null}
       onSelect={selectVideo}
       onJumpToCurrent={() => {
