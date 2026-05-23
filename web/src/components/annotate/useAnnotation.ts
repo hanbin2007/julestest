@@ -71,6 +71,45 @@ export function useAnnotation() {
   };
 }
 
+// 服务端取帧 + 客户端合成笔迹：最可靠的合成路径。
+// 浏览器对 HLS/MSE 视频 drawImage 常得黑帧，所以画面帧由 /api/frame（ffmpeg）给，
+// 这里只把它当成一张普通同源图片（<img>）来 drawImage —— 不黑、不污染。
+export async function bakeWithServerFrame(
+  src: string | null,
+  t: number,
+  strokes: Stroke[]
+): Promise<string | null> {
+  if (!src) return null;
+  try {
+    const res = await fetch(`/api/frame?src=${encodeURIComponent(src)}&t=${Math.floor(t)}`);
+    if (!res.ok) return null;
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    try {
+      const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+        const im = new Image();
+        im.onload = () => resolve(im);
+        im.onerror = reject;
+        im.src = url;
+      });
+      const cw = img.naturalWidth || 1280;
+      const ch = img.naturalHeight || 720;
+      const c = document.createElement("canvas");
+      c.width = cw;
+      c.height = ch;
+      const ctx = c.getContext("2d");
+      if (!ctx) return null;
+      ctx.drawImage(img, 0, 0, cw, ch);
+      drawAll(ctx, strokes, cw, ch);
+      return c.toDataURL("image/jpeg", 0.85);
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  } catch {
+    return null;
+  }
+}
+
 export interface BakeResult {
   image: string | null; // dataURL：优先合成 JPEG，污染时退化为笔迹 PNG
   kind: "composite" | "ink" | "none";

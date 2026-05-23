@@ -11,7 +11,7 @@ import PlayerMeta from "@/components/player/PlayerMeta";
 import NotesPanel from "@/components/player/NotesPanel";
 import UpNextCountdown from "@/components/player/UpNextCountdown";
 import AnnotationOverlay from "@/components/annotate/AnnotationOverlay";
-import { useAnnotation, bakeAnnotation } from "@/components/annotate/useAnnotation";
+import { useAnnotation, bakeAnnotation, bakeWithServerFrame } from "@/components/annotate/useAnnotation";
 import { serializeStrokes, parseStrokes } from "@/components/annotate/strokes";
 import ChatPanel, { type ChatPrefill } from "@/components/chat/ChatPanel";
 import ContinueWatchingRail from "@/components/home/ContinueWatchingRail";
@@ -222,20 +222,28 @@ export default function PlayerView() {
     if (v && !v.paused) v.pause();
   }, [video, annotation]);
 
+  // 合成图：优先服务端取帧（ffmpeg，解决浏览器 HLS drawImage 黑帧）；失败再退回客户端抓帧。
+  const composeImage = React.useCallback(async (): Promise<string | null> => {
+    const t = Math.floor(artRef.current?.video?.currentTime ?? 0);
+    const server = await bakeWithServerFrame(src, t, annotation.strokes);
+    if (server) return server;
+    return bakeAnnotation(artRef.current?.video, annotation.strokes).image;
+  }, [src, annotation]);
+
   const saveAnnotation = React.useCallback(async () => {
     if (!video) return;
     if (annotation.strokes.length === 0 && !annotationText.trim()) return;
     const text = annotationText.trim() || "批注";
     setSavingAnno(true);
     try {
-      const baked = bakeAnnotation(artRef.current?.video, annotation.strokes);
+      const image = await composeImage();
       const strokesJson = serializeStrokes(annotation.strokes);
       if (editingNoteId) {
-        await notesApi.update(editingNoteId, text, strokesJson, baked.image);
+        await notesApi.update(editingNoteId, text, strokesJson, image);
         toast("批注已更新");
       } else {
         const t = Math.floor(artRef.current?.video?.currentTime ?? 0);
-        await notesApi.add(t, text, baked.image, strokesJson);
+        await notesApi.add(t, text, image, strokesJson);
         toast("批注已存入笔记");
       }
       setAnnotateOpen(false);
@@ -244,15 +252,20 @@ export default function PlayerView() {
     } finally {
       setSavingAnno(false);
     }
-  }, [video, annotation, annotationText, editingNoteId, notesApi, toast]);
+  }, [video, annotation, annotationText, editingNoteId, notesApi, toast, composeImage]);
 
-  const askClaude = React.useCallback(() => {
+  const askClaude = React.useCallback(async () => {
     if (!video) return;
-    const baked = bakeAnnotation(artRef.current?.video, annotation.strokes);
-    setChatPrefill({ text: annotationText.trim() || "请讲解一下这道题的思路。", image: baked.image ?? undefined });
-    setAnnotateOpen(false);
-    setChatOpen(true);
-  }, [video, annotation, annotationText]);
+    setSavingAnno(true);
+    try {
+      const image = await composeImage();
+      setChatPrefill({ text: annotationText.trim() || "请讲解一下这道题的思路。", image: image ?? undefined });
+      setAnnotateOpen(false);
+      setChatOpen(true);
+    } finally {
+      setSavingAnno(false);
+    }
+  }, [video, annotationText, composeImage]);
 
   // 深链「编辑批注」：等播放器就绪 + 该讲笔记加载后，载入笔迹并进入批注模式
   const annoLoad = annotation.load; // 稳定引用，避免整个 annotation 对象进 deps 引起重跑
