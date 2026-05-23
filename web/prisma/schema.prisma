@@ -20,7 +20,9 @@ model Course {
 }
 
 model Video {
-  videoId   Int      @id
+  // 同一讲（videoId）可被多门课（productId）打包售卖，故 videoId 不是全局唯一；
+  // 主键用 (productId, videoId) 复合，避免「该讲已属另一门课」时 create 撞唯一约束。
+  videoId   Int
   productId Int
   title     String?
   idx       Int      @default(0) // 在课程内的顺序
@@ -28,6 +30,7 @@ model Video {
   syncedAt  DateTime @default(now())
   course    Course   @relation(fields: [productId], references: [productId], onDelete: Cascade)
 
+  @@id([productId, videoId])
   @@index([productId])
 }
 

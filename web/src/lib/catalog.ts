@@ -56,9 +56,15 @@ export async function syncCourseVideos(productId: number): Promise<GwVideo[]> {
   const { videos } = await gatewayGet<{ videos: GwVideo[] }>(
     `/api/course?productId=${productId}`,
   );
+  // 同一讲可能在一门课里被列两次（如「点播」与「直播回放」两个 tab 指向同一 videoId），
+  // 复合主键 (productId, videoId) 仍会撞约束 -> 课程内按 videoId 去重，保留首次出现以维持顺序。
+  const seen = new Set<number>();
+  const uniqueVideos = videos.filter((v) =>
+    seen.has(v.videoId) ? false : (seen.add(v.videoId), true),
+  );
   await prisma.$transaction([
     prisma.video.deleteMany({ where: { productId } }),
-    ...videos.map((v, i) =>
+    ...uniqueVideos.map((v, i) =>
       prisma.video.create({
         data: {
           videoId: v.videoId,
@@ -77,7 +83,7 @@ export async function syncCourseVideos(productId: number): Promise<GwVideo[]> {
     }),
   ]);
   invalidateCatalogRollup();
-  return videos;
+  return uniqueVideos;
 }
 
 export async function getCourseVideos(productId: number): Promise<GwVideo[]> {
