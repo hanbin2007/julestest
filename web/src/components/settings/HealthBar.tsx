@@ -39,7 +39,7 @@ function HealthBar({ health }: { health: CoursesStatus["health"] | undefined }) 
           size="small"
           icon={online ? <CloudDoneRoundedIcon /> : <CloudOffRoundedIcon />}
           color={online ? "success" : "error"}
-          variant={online ? "filled" : "outlined"}
+          variant="outlined"
           label={online ? "网关在线" : "网关离线"}
         />
         {/* Freshness chip — tooltip reveals the exact timestamp */}
