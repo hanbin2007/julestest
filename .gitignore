@@ -1,5 +1,7 @@
 __pycache__/
 *.pyc
+.venv/
+.pytest_cache/
 *.mp4
 # downloaded HLS video segments (scoped so it doesn't catch TypeScript source under web/)
 /*.ts
