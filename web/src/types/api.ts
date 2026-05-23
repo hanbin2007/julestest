@@ -23,6 +23,14 @@ export interface Video {
   topic: string | null;
   examKey: string | null;
   duration: number | null;
+  // 点播为 "vod"；直播回放为 "live"。旧目录数据可能缺字段，读取时按 "vod" 处理。
+  kind?: "vod" | "live";
+  // 仅直播回放：解密 key 接口需要的 liveId，以及按 分栏/年/月 的分组信息。
+  liveId?: number | null;
+  liveTab?: string | null;
+  year?: string | null;
+  month?: string | null;
+  startTime?: number | null;
 }
 
 export interface PlayResponse {

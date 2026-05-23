@@ -16,6 +16,9 @@ import ChevronRightIcon from "@mui/icons-material/ChevronRight";
 import PlayArrowRoundedIcon from "@mui/icons-material/PlayArrowRounded";
 import LockOutlinedIcon from "@mui/icons-material/LockOutlined";
 import CheckCircleRoundedIcon from "@mui/icons-material/CheckCircleRounded";
+import OndemandVideoRoundedIcon from "@mui/icons-material/OndemandVideoRounded";
+import LiveTvRoundedIcon from "@mui/icons-material/LiveTvRounded";
+import ReplayRoundedIcon from "@mui/icons-material/ReplayRounded";
 import { useCourseVideos } from "@/hooks/data";
 import { useProgressMap } from "@/hooks/persist";
 import { fmtDur } from "@/lib/media";
@@ -58,6 +61,59 @@ function buildTree(videos: Video[]): { root: Video[]; groups: GroupNode[] } {
     node!.vids.push(v);
   }
   return { root, groups };
+}
+
+// 直播回放分组：有多个分栏(liveTab)时按 分栏 > 年月 两层，否则直接按 年月。
+function buildLiveGroups(videos: Video[]): GroupNode[] {
+  const monthName = (v: Video) =>
+    v.year && v.month ? `${v.year}年${Number(v.month)}月` : "其他";
+  const byMonth = (vids: Video[]): GroupNode[] => {
+    const map = new Map<string, GroupNode>();
+    const order: string[] = [];
+    for (const v of vids) {
+      const n = monthName(v);
+      let g = map.get(n);
+      if (!g) {
+        g = { name: n, kids: [], vids: [] };
+        map.set(n, g);
+        order.push(n);
+      }
+      g.vids.push(v);
+    }
+    for (const g of map.values())
+      g.vids.sort((a, b) => (a.startTime ?? 0) - (b.startTime ?? 0));
+    return order.map((n) => map.get(n)!);
+  };
+  const tabs = Array.from(new Set(videos.map((v) => v.liveTab || "")));
+  if (tabs.length <= 1) return byMonth(videos);
+  return tabs.map((t) => ({
+    name: t || "直播回放",
+    kids: byMonth(videos.filter((v) => (v.liveTab || "") === t)),
+    vids: [],
+  }));
+}
+
+// 板块标题（视频 / 直播回放）。
+function BoardLabel({
+  icon,
+  label,
+  count,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  count: number;
+}) {
+  return (
+    <Box sx={{ display: "flex", alignItems: "center", gap: 0.75, px: 1, pt: 1.25, pb: 0.25 }}>
+      {icon}
+      <Typography variant="caption" sx={{ fontWeight: 800, letterSpacing: 0.5, color: "text.secondary" }}>
+        {label}
+      </Typography>
+      <Typography variant="caption" sx={{ ml: "auto", color: "text.disabled", fontVariantNumeric: "tabular-nums" }}>
+        {count}
+      </Typography>
+    </Box>
+  );
 }
 
 function Ring({ ratio, color }: { ratio: number; color: string }) {
@@ -108,6 +164,8 @@ function VideoRow({
     >
       {v.locked ? (
         <LockOutlinedIcon sx={{ fontSize: 16, color: "text.disabled" }} />
+      ) : v.kind === "live" ? (
+        <ReplayRoundedIcon sx={{ fontSize: 17, color: active ? color : "text.secondary" }} />
       ) : (
         <PlayArrowRoundedIcon sx={{ fontSize: 18, color: active ? color : "text.secondary" }} />
       )}
@@ -190,7 +248,12 @@ function CourseItem({
   const courseMatches = q ? course.name.toLowerCase().includes(q) : true;
   if (q && !courseMatches && filtered.length === 0) return null;
 
-  const { root, groups } = buildTree(filtered);
+  // 拆成两个板块：点播视频 与 直播回放（旧目录缺 kind 时按点播处理）。
+  const liveVideos = filtered.filter((v) => v.kind === "live");
+  const vodVideos = filtered.filter((v) => v.kind !== "live");
+  const { root, groups } = buildTree(vodVideos);
+  const liveGroups = buildLiveGroups(liveVideos);
+  const hasLive = liveVideos.length > 0;
   const ratioOf = (v: Video) => {
     const e = progress[String(v.videoId)];
     return e && e.d ? Math.min(1, e.t / e.d) : 0;
@@ -229,12 +292,39 @@ function CourseItem({
       <Collapse in={wantOpen} unmountOnExit>
         <Box sx={{ pl: 0.5 }}>
           {isLoading && <SidebarSkeleton />}
-          {!isLoading && root.map(renderRow)}
-          {!isLoading && groups.map((g, i) => <GroupEl key={i} node={g} render={renderRow} />)}
-          {!isLoading && filtered.length === 0 && (
-            <Typography variant="caption" color="text.secondary" sx={{ pl: 2 }}>
-              无匹配
-            </Typography>
+          {!isLoading && (
+            <>
+              {/* 视频板块（有直播回放时才加标题，避免单板块下多余标签） */}
+              {hasLive && vodVideos.length > 0 && (
+                <BoardLabel
+                  icon={<OndemandVideoRoundedIcon sx={{ fontSize: 16, color: "text.secondary" }} />}
+                  label="视频"
+                  count={vodVideos.length}
+                />
+              )}
+              {root.map(renderRow)}
+              {groups.map((g, i) => (
+                <GroupEl key={i} node={g} render={renderRow} />
+              ))}
+              {/* 直播回放板块 */}
+              {hasLive && (
+                <>
+                  <BoardLabel
+                    icon={<LiveTvRoundedIcon sx={{ fontSize: 16, color: "text.secondary" }} />}
+                    label="直播回放"
+                    count={liveVideos.length}
+                  />
+                  {liveGroups.map((g, i) => (
+                    <GroupEl key={`live-${i}`} node={g} render={renderRow} />
+                  ))}
+                </>
+              )}
+              {filtered.length === 0 && (
+                <Typography variant="caption" color="text.secondary" sx={{ pl: 2 }}>
+                  无匹配
+                </Typography>
+              )}
+            </>
           )}
         </Box>
       </Collapse>

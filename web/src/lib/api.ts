@@ -33,6 +33,7 @@ export function play(v: Video, m3u8: string): Promise<PlayResponse> {
   const q =
     `videoId=${v.videoId}&contentId=${v.contentId}` +
     `&cardPackageId=${v.cardPackageId}&productId=${v.productId}` +
+    (v.liveId ? `&liveId=${v.liveId}` : "") + // 直播回放：解密 key 需要 Liveid 头
     `&m3u8=${encodeURIComponent(m3u8)}`;
   return fetcher<PlayResponse>(`/api/play?${q}`);
 }

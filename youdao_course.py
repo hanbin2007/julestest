@@ -1601,6 +1601,9 @@ def make_handler(base_headers, default_url="", session=None, auto=None,
             except (KeyError, ValueError):
                 self._send_json({"error": "bad params"}, 400)
                 return
+            live_id = (qs.get("liveId") or [None])[0]  # 直播回放才有；用于 Liveid 解密头
+            if live_id:
+                video["liveId"] = live_id
             m3u8 = (qs.get("m3u8") or [None])[0] or resolve_m3u8(session, video)
             if not m3u8:
                 self._send_json({"error": "no m3u8 (locked?)"}, 502)
@@ -1769,10 +1772,47 @@ def _walk_outline(node, pkg_id, product_id, out):
             "topic": (v.get("topicInfo") or {}).get("title"),
             "examKey": (v.get("examKeyInfo") or {}).get("title"),
             "duration": v.get("duration"),
+            "kind": "vod",
         })
     for key in ("subOutlines", "outlines"):
         if node.get(key):
             _walk_outline(node[key], pkg_id, product_id, out)
+
+
+def _walk_live(node, product_id, out, tab=None, year=None, month=None):
+    """递归直播回放 outline 树。与点播不同：直播项直接挂在 subOutlines 上（不在 videos 键下），
+    自带 cardPackageId/liveId、无清晰度档（只有单条 downloadUrl），按 年/月 分组。"""
+    if isinstance(node, list):
+        for it in node:
+            _walk_live(it, product_id, out, tab, year, month)
+        return
+    if not isinstance(node, dict):
+        return
+    y = node.get("year", year)
+    m = node.get("month", month)
+    # 直播项：自身带 videoId + downloadUrl/liveId（不再有子 outline）
+    if node.get("videoId") and (node.get("downloadUrl") or node.get("liveId")):
+        out.append({
+            "videoId": node.get("videoId"),
+            "contentId": node.get("id"),
+            "cardPackageId": node.get("cardPackageId"),
+            "productId": product_id,
+            "title": node.get("title"),
+            "downloadUrl": node.get("downloadUrl"),
+            "clarity": [],  # 直播回放无清晰度档
+            "locked": not node.get("downloadUrl"),
+            "module": None, "topic": None, "examKey": None,
+            "duration": node.get("duration"),
+            "kind": "live",
+            "liveId": node.get("liveId"),  # 解密 key 接口要求的 Liveid 头来源
+            "liveTab": tab,
+            "year": y, "month": m,
+            "startTime": node.get("startTime"),
+        })
+        return
+    for key in ("subOutlines", "outlines"):
+        if node.get(key):
+            _walk_live(node[key], product_id, out, tab, y, m)
 
 
 def get_product_videos(session, product_id):
@@ -1783,10 +1823,9 @@ def get_product_videos(session, product_id):
     pkgs = tab.get("videoPackages") or []
     for pkg in pkgs:
         _walk_outline(pkg.get("outlines"), pkg.get("videoPackageId"), product_id, out)
-    # 直播回放：cardPackageId 复用主视频包（最佳猜测）
-    live_pkg = pkgs[0].get("videoPackageId") if pkgs else None
+    # 直播回放：结构与点播不同，单独走 _walk_live（项自带 cardPackageId/liveId）。
     for live in (d.get("servicePackage") or {}).get("videoLiveTab") or []:
-        _walk_outline(live.get("outlines"), live_pkg, product_id, out)
+        _walk_live(live.get("outlines"), product_id, out, tab=live.get("title"))
     return out
 
 
@@ -1841,6 +1880,11 @@ def play_headers(session, video, m3u8_url):
     h["Cardpackageid"] = str(video["cardPackageId"])
     h["Cardpackagecontentid"] = str(video["contentId"])
     h["Productid"] = str(video["productId"])
+    # 直播回放：解密 key 接口(live.ydshengxue.com)校验课次↔url，必须带 Liveid 才返回真 AES key。
+    if video.get("liveId"):
+        h["Liveid"] = str(video["liveId"])
+    else:
+        h.pop("Liveid", None)  # 点播不要让上一个会话的 Liveid 残留
     return h
 
 
