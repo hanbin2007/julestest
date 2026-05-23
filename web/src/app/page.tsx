@@ -2,7 +2,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import * as React from "react";
 import dynamic from "next/dynamic";
-import { Box, Drawer, Typography } from "@mui/material";
+import { Alert, Box, Button, Drawer, Typography } from "@mui/material";
 import { ThemeProvider } from "@mui/material/styles";
 import PlayCircleOutlineRoundedIcon from "@mui/icons-material/PlayCircleOutlineRounded";
 import AppTopBar from "@/components/common/AppTopBar";
@@ -18,7 +18,7 @@ import { useToast } from "@/components/common/Toast";
 import { useCourses, useCourseVideos } from "@/hooks/data";
 import { useThumbPoll } from "@/hooks/useThumbPoll";
 import { useHotkeys } from "@/hooks/useHotkeys";
-import { play, pickM3u8, postProgress, addNote as apiAddNote, patchSettings } from "@/lib/api";
+import { play, pickM3u8, postProgress, addNote as apiAddNote, patchSettings, refreshCatalog } from "@/lib/api";
 import { themeForSeed, hashSeed } from "@/lib/color";
 import { useProgressMap, useLast } from "@/hooks/persist";
 import type { Course, Video, VideoRow } from "@/types/api";
@@ -35,7 +35,8 @@ interface Sel {
 
 export default function PlayerView() {
   const toast = useToast();
-  const { courses, isLoading } = useCourses();
+  const { courses, isLoading, error: coursesError } = useCourses();
+  const [refreshing, setRefreshing] = React.useState(false);
   const progressMap = useProgressMap();
   const last = useLast();
   const [sel, setSel] = React.useState<Sel | null>(null);
@@ -189,6 +190,34 @@ export default function PlayerView() {
   return (
     <Box sx={{ display: "flex", flexDirection: "column", height: "100dvh" }}>
       <AppTopBar onMenu={() => setDrawer(true)} onCommand={() => setCmdOpen(true)} />
+      {coursesError && !courses.length && !isLoading && (
+        <Alert
+          severity="warning"
+          sx={{ borderRadius: 0 }}
+          action={
+            <Button
+              color="inherit"
+              size="small"
+              disabled={refreshing}
+              onClick={async () => {
+                setRefreshing(true);
+                try {
+                  await refreshCatalog();
+                  window.location.reload();
+                } catch {
+                  toast("刷新失败，请检查 req.txt 与网关", { severity: "error" });
+                } finally {
+                  setRefreshing(false);
+                }
+              }}
+            >
+              {refreshing ? "刷新中…" : "刷新目录"}
+            </Button>
+          }
+        >
+          目录加载失败 —— req.txt 会话可能已过期。重新抓一条请求覆盖 req.txt 后点「刷新目录」。
+        </Alert>
+      )}
       <Box sx={{ display: "flex", flex: 1, minHeight: 0 }}>
         <Box
           sx={{

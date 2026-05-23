@@ -1,6 +1,6 @@
 "use client";
 import useSWR from "swr";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { getCourses, getCourseVideos, getStatus } from "@/lib/api";
 import { pickLow } from "@/lib/media";
 import type { Course, StatusResponse, VideoRow } from "@/types/api";
@@ -20,18 +20,19 @@ export function useCourseVideos(productId: number | null) {
   return { videos: data?.videos ?? [], error: error as Error | undefined, isLoading };
 }
 
-/** 顺序加载所有课程的视频，拍平成单集行（设置页/命令面板）。 */
+/** 顺序加载所有课程的视频，拍平成单集行（设置页/命令面板）。StrictMode 安全。 */
 export function useAllCourseVideos(courses: Course[]) {
   const [rows, setRows] = useState<VideoRow[]>([]);
   const [loaded, setLoaded] = useState(0);
-  const started = useRef(false);
   useEffect(() => {
-    if (!courses.length || started.current) return;
-    started.current = true;
+    if (!courses.length) return;
     let cancelled = false;
+    setRows([]);
+    setLoaded(0);
     (async () => {
       const acc: VideoRow[] = [];
       for (const c of courses) {
+        if (cancelled) return; // 卸载/重挂前先退出，避免对未挂载组件 setState
         try {
           const { videos } = await getCourseVideos(c.id);
           videos

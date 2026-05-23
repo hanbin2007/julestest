@@ -22,6 +22,10 @@ import type {
 
 export const getCourses = () => fetcher<{ courses: Course[] }>("/api/courses");
 
+// 主动刷新目录（会话过期后重抓 req.txt 再点刷新）
+export const refreshCatalog = () =>
+  postJson<{ ok: boolean; courses: number }>("/api/courses/refresh", {});
+
 export const getCourseVideos = (productId: number) =>
   fetcher<{ videos: Video[] }>(`/api/course?productId=${productId}`);
 
