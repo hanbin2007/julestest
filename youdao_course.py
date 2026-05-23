@@ -33,24 +33,19 @@ youdao_course.py
 """
 
 import argparse
-import atexit
 import concurrent.futures
-import hashlib
 import json
 import os
 import queue
 import re
-import shutil
 import signal
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from ydcore.cache import DiskLRU as _DiskLRU, SEG_CACHE_BYTES
@@ -61,16 +56,14 @@ from ydcore.hls import (
     looks_like_m3u8 as _looks_like_m3u8,
     parse_segments,
 )
-from ydcore.httpio import forward_headers, upstream_fetch, parse_request
+from ydcore.httpio import parse_request
 from ydcore.util import which as _which
-
-
-# 三档流量优先级：0=LIVE(观看) > 1=AUTO(自动缓存) > 2=MANUAL(手动缓存)。
-# 每档“活跃”后再静默这么久，挡住更低档抢这台机器有限的下行带宽。
-#   LIVE 1.5：观看分片成簇到达，静默稍长，簇间不让后台插进来。
-#   AUTO 0.5：预缓存循环很紧，段间空隙极小；>0 才能保证“当前这集自动补完前手动不抢”。
-#   MANUAL 0：其下无更低档，无需 grace。
-PRI_GRACE = {0: 1.5, 1: 0.5, 2: 0.0}
+from ydcore.priority import PriorityGate
+from ydcore.appconfig import load_config, save_config, resolve_cache_dir
+from ydcore.youdao_api import (
+    list_products, get_product_videos, get_product_watch_state,
+    resolve_m3u8, play_headers, find_video,
+)
 
 
 APP_HTML = r"""<!doctype html>
@@ -786,76 +779,6 @@ THUMB_COLS = 10
 # 缩略图持久化目录（生成后不删，跨会话复用）
 THUMB_DIR = os.path.join(os.path.expanduser("~"), ".youdao_course", "thumbs")
 THUMB_WORKERS = 3
-# 分片缓存持久化目录：固定位置 + index.json，重启不清缓存。
-CACHE_DIR = os.path.join(os.path.expanduser("~"), ".youdao_course", "cache")
-# 应用配置（缓存目录等可持久化设置）。刻意放在缓存目录之外：换盘/缓存目录整体丢失时
-# 配置仍在，才能据此分辨“目录被删”（报错）还是“首次启用”（创建）。
-CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".youdao_course", "config.json")
-
-
-def load_config():
-    """读应用配置；任何损坏都退化为空 dict，绝不让坏配置拖垮网关。"""
-    try:
-        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-            d = json.load(f)
-        return d if isinstance(d, dict) else {}
-    except Exception:  # noqa: BLE001
-        return {}
-
-
-def save_config(cfg):
-    """原子写配置（tmp + rename），避免半截 JSON。成功返回 True。"""
-    try:
-        os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
-        tmp = CONFIG_PATH + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(cfg, f, ensure_ascii=False)
-        os.replace(tmp, CONFIG_PATH)
-        return True
-    except OSError:
-        return False
-
-
-def resolve_cache_dir(cli_dir):
-    """决定本次使用的缓存目录，并处理“首次创建 / 丢失报错”。
-    优先级：CLI 显式 --cache-dir > config.json > 默认。CLI 为一次性覆盖，不写回 config。
-    判定依据：config.json 是否已记录该目录。
-      · 已记录却不存在 → 视为被删 / 外置盘未挂：报错，绝不静默重建。
-      · 未记录且不存在 → 首次启用：创建并（非 CLI 时）记录。
-    返回 (cache_dir, ok)；ok=False 时缓存停用，但网关照常起，以便网页报错与改设置。
-    """
-    cfg = load_config()
-    if cli_dir is not None:
-        cache_dir = os.path.abspath(os.path.expanduser(cli_dir))
-        persist_choice = False     # CLI 覆盖：一次性，不改 config
-    else:
-        cache_dir = os.path.abspath(os.path.expanduser(cfg.get("cacheDir") or CACHE_DIR))
-        persist_choice = True
-    recorded = cfg.get("cacheDir")
-    known = bool(recorded) and os.path.abspath(os.path.expanduser(recorded)) == cache_dir
-
-    if os.path.isdir(cache_dir):
-        if persist_choice and not known:
-            cfg["cacheDir"] = cache_dir
-            save_config(cfg)
-        return cache_dir, True
-    if known:
-        # 记录过却消失了：外置盘没挂 / 被删。报错，绝不在别处悄悄重建空缓存。
-        sys.stderr.write(
-            "⚠ 缓存目录丢失：%s\n"
-            "  不会自动重建（可能是外置盘未挂载）。请在网页「设置」中修正，"
-            "或恢复该目录后重启网关。\n" % cache_dir)
-        return cache_dir, False
-    # 首次启用：创建并记录
-    try:
-        os.makedirs(cache_dir, exist_ok=True)
-        if persist_choice:
-            cfg["cacheDir"] = cache_dir
-            save_config(cfg)
-        return cache_dir, True
-    except OSError as e:
-        sys.stderr.write("⚠ 无法创建缓存目录 %s：%s\n" % (cache_dir, e))
-        return cache_dir, False
 
 
 def make_handler(base_headers, default_url="", session=None, auto=None,
@@ -867,33 +790,10 @@ def make_handler(base_headers, default_url="", session=None, auto=None,
     vh_lock = threading.Lock()
     seg_cache = _DiskLRU(cache_bytes, cache_dir)
 
-    # 三档优先级闸门：0=LIVE(观看) > 1=AUTO(自动缓存) > 2=MANUAL(手动缓存)。
-    # 某档回源前先 pri_acquire(档)：只等更高档活跃或在 grace，自己永不被同/低档挡。
-    # 这样观看永远抢先，自动缓存其次，手动缓存只在更高档空闲时才用带宽。
-    net_cond = threading.Condition()
-    _pri_n = {0: 0, 1: 0, 2: 0}        # 各档在途回源数
-    _pri_until = {0: 0.0, 1: 0.0, 2: 0.0}  # 各档活跃后的 grace 截止时刻
-
-    def pri_acquire(t):
-        with net_cond:
-            # wait 与自增同一临界区：避免 wait 后、自增前被更高档插队（TOCTOU）。
-            while any(_pri_n[h] > 0 or time.time() < _pri_until[h] for h in range(t)):
-                net_cond.wait(0.2)     # grace 靠时钟到期，必须超时轮询
-            _pri_n[t] += 1
-
-    def pri_release(t):
-        with net_cond:
-            _pri_n[t] -= 1
-            _pri_until[t] = time.time() + PRI_GRACE[t]
-            net_cond.notify_all()
-
-    def pri_fetch(t, hdrs, url, range_header=None):
-        """按优先级档位回源；try/finally 保证档计数永不泄漏。"""
-        pri_acquire(t)
-        try:
-            return upstream_fetch(hdrs, url, range_header)
-        finally:
-            pri_release(t)
+    # 三档优先级闸门：0=LIVE(观看) > 1=AUTO(自动缓存) > 2=MANUAL(手动缓存)。见 ydcore.priority。
+    _gate = PriorityGate()
+    _pri_n = _gate.n            # /api/status 暴露各档在途数（与闸门同一 dict 引用）
+    pri_fetch = _gate.fetch
 
     # 缩略图雪碧图：服务端用 ffmpeg 生成（复用已缓存分片），供 Artplayer 拖动预览。
     # 持久化到 ~/.youdao_course/thumbs，生成后不删，跨会话复用。
@@ -1628,241 +1528,6 @@ def start_proxy(headers, port, default_url="", session=None, auto=None,
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     return server
-
-
-# ---------------------------------------------------------------------------
-# 课程 / 视频枚举（只要会话 Cookie 就能列出全部课程和视频，不用一个个抓）
-# ---------------------------------------------------------------------------
-API_PRODUCTS = "https://ai.ydshengxue.com/ai-product/api/app/v2/products/after-sale"
-API_PRODUCT_DETAIL = "https://ai.ydshengxue.com/ai-product/api/app/v3/products/after-sale/%s"
-API_VIDEO_OUTLINE = ("https://ai.ydshengxue.com/ai-product/api/app/v1/products/"
-                     "videos/%s/outline?cardPackageId=%s&cardPackageContentId=%s&productId=%s")
-
-# 调 ydshengxue API 时只需要这几个头；其余按 App 习惯补默认值
-_API_HEADER_KEYS = {"cookie", "imei", "keyfrom", "user-agent"}
-
-
-def api_headers(session):
-    out = {}
-    for k, v in session.items():
-        if k.lower() in _API_HEADER_KEYS:
-            out[k] = v
-    out.setdefault("User-Agent", "YoudaoCourse/iPhone")
-    out.setdefault("Keyfrom", "aicard.1.4.9.ios")
-    out["Accept"] = "application/json"
-    out["Accept-Encoding"] = "identity"
-    return out
-
-
-def api_get_json(session, url, retries=3):
-    last = None
-    for attempt in range(retries):
-        try:
-            req = urllib.request.Request(url, headers=api_headers(session))
-            with urllib.request.urlopen(req, timeout=30) as r:
-                return json.loads(r.read().decode("utf-8"))
-        except Exception as e:  # noqa: BLE001  (上游偶发抖动，退避重试)
-            last = e
-            time.sleep(0.6 * (attempt + 1))
-    raise last
-
-
-def list_products(session):
-    """返回已购课程列表：[{id, name, ...}]。"""
-    d = api_get_json(session, API_PRODUCTS)
-    return (d.get("data") or {}).get("allProductList") or []
-
-
-def _walk_outline(node, pkg_id, product_id, out):
-    """递归 outline 树，收集所有视频节点。"""
-    if isinstance(node, list):
-        for it in node:
-            _walk_outline(it, pkg_id, product_id, out)
-        return
-    if not isinstance(node, dict):
-        return
-    for v in node.get("videos") or []:
-        out.append({
-            "videoId": v.get("videoId"),
-            "contentId": v.get("id"),
-            "cardPackageId": v.get("cardPackageId") or pkg_id,
-            "productId": v.get("productId") or product_id,
-            "title": v.get("title"),
-            "downloadUrl": v.get("downloadUrl"),
-            "clarity": v.get("clarityInfoList") or [],
-            "locked": not v.get("downloadUrl"),
-            "module": (v.get("moduleInfo") or {}).get("title"),
-            "topic": (v.get("topicInfo") or {}).get("title"),
-            "examKey": (v.get("examKeyInfo") or {}).get("title"),
-            "duration": v.get("duration"),
-            "kind": "vod",
-        })
-    for key in ("subOutlines", "outlines"):
-        if node.get(key):
-            _walk_outline(node[key], pkg_id, product_id, out)
-
-
-def _walk_live(node, product_id, out, tab=None, year=None, month=None):
-    """递归直播回放 outline 树。与点播不同：直播项直接挂在 subOutlines 上（不在 videos 键下），
-    自带 cardPackageId/liveId、无清晰度档（只有单条 downloadUrl），按 年/月 分组。"""
-    if isinstance(node, list):
-        for it in node:
-            _walk_live(it, product_id, out, tab, year, month)
-        return
-    if not isinstance(node, dict):
-        return
-    y = node.get("year", year)
-    m = node.get("month", month)
-    # 直播项：自身带 videoId + downloadUrl/liveId（不再有子 outline）
-    if node.get("videoId") and (node.get("downloadUrl") or node.get("liveId")):
-        out.append({
-            "videoId": node.get("videoId"),
-            "contentId": node.get("id"),
-            "cardPackageId": node.get("cardPackageId"),
-            "productId": product_id,
-            "title": node.get("title"),
-            "downloadUrl": node.get("downloadUrl"),
-            "clarity": [],  # 直播回放无清晰度档
-            "locked": not node.get("downloadUrl"),
-            "module": None, "topic": None, "examKey": None,
-            "duration": node.get("duration"),
-            "kind": "live",
-            "liveId": node.get("liveId"),  # 解密 key 接口要求的 Liveid 头来源
-            "liveTab": tab,
-            "year": y, "month": m,
-            "startTime": node.get("startTime"),
-        })
-        return
-    for key in ("subOutlines", "outlines"):
-        if node.get(key):
-            _walk_live(node[key], product_id, out, tab, y, m)
-
-
-def get_product_videos(session, product_id):
-    """返回某课程下所有视频（含 videoId / contentId / cardPackageId / productId / m3u8）。"""
-    d = (api_get_json(session, API_PRODUCT_DETAIL % product_id).get("data") or {})
-    out = []
-    tab = d.get("videoPackageTab") or {}
-    pkgs = tab.get("videoPackages") or []
-    for pkg in pkgs:
-        _walk_outline(pkg.get("outlines"), pkg.get("videoPackageId"), product_id, out)
-    # 直播回放：结构与点播不同，单独走 _walk_live（项自带 cardPackageId/liveId）。
-    for live in (d.get("servicePackage") or {}).get("videoLiveTab") or []:
-        _walk_live(live.get("outlines"), product_id, out, tab=live.get("title"))
-    return out
-
-
-def _num(x):
-    return x if isinstance(x, (int, float)) else 0
-
-
-def _collect_watch_state(node, out):
-    """递归整条 product detail，把任何带 videoId 的节点的观看字段收集出来。
-    点播项挂在 videos[]、直播项挂在 subOutlines；二者都会被这棵遍历覆盖。
-    有道的观看字段（每讲，无时间戳）：
-      playDuration         上次播放到的位置（秒）≈ 本地 t，用于续看；是「最后位置」非「看过的最远处」
-      accumulativeDuration 累计观看秒数（含重看，噪声大，仅作统计）
-      videoStudyTag.study  是否已学完（完成标记，合并时以此为准）
-      duration             时长（秒）
-    """
-    if isinstance(node, list):
-        for it in node:
-            _collect_watch_state(it, out)
-        return
-    if not isinstance(node, dict):
-        return
-    vid = node.get("videoId")
-    if vid is not None:
-        tag = node.get("videoStudyTag")
-        study = bool(tag.get("study")) if isinstance(tag, dict) else False
-        cur = out.get(vid)
-        ws = {
-            "videoId": vid,
-            "playDuration": node.get("playDuration"),
-            "accumulativeDuration": node.get("accumulativeDuration"),
-            "duration": node.get("duration"),
-            "study": study,
-            "title": node.get("title"),
-        }
-        # 同一 videoId 偶有多处出现：合并取「更靠前/已学完」，避免空节点覆盖有值节点。
-        if cur:
-            ws["playDuration"] = max(_num(cur.get("playDuration")), _num(ws.get("playDuration"))) or None
-            ws["accumulativeDuration"] = max(_num(cur.get("accumulativeDuration")), _num(ws.get("accumulativeDuration"))) or None
-            ws["duration"] = max(_num(cur.get("duration")), _num(ws.get("duration"))) or None
-            ws["study"] = bool(cur.get("study")) or study
-            ws["title"] = ws["title"] or cur.get("title")
-        out[vid] = ws
-    for v in node.values():
-        if isinstance(v, (dict, list)):
-            _collect_watch_state(v, out)
-
-
-def get_product_watch_state(session, product_id):
-    """返回某课程下每讲的有道观看状态：{videoId: {playDuration, accumulativeDuration, duration, study, title}}。
-    与目录(get_product_videos)分开：目录极少变、可长缓存；观看状态每次同步都要新鲜地拉。"""
-    d = (api_get_json(session, API_PRODUCT_DETAIL % product_id).get("data") or {})
-    out = {}
-    _collect_watch_state(d, out)
-    return list(out.values())
-
-
-def find_video(session, video_id):
-    """在所有课程里找到指定 videoId 的视频条目。"""
-    video_id = int(video_id)
-    for prod in list_products(session):
-        for v in get_product_videos(session, prod["id"]):
-            if v.get("videoId") == video_id:
-                v["productName"] = prod.get("name")
-                return v
-    return None
-
-
-def _pick_clarity(clist, quality="highest"):
-    clist = [c for c in (clist or []) if c.get("url")]
-    if not clist:
-        return None
-    clist = sorted(clist, key=lambda c: c.get("type", 0),
-                   reverse=(quality == "highest"))
-    return clist[0]["url"]
-
-
-def resolve_m3u8(session, video, quality="highest"):
-    """拿到视频的 m3u8 地址；优先用树里自带的 clarityInfoList，再回退 downloadUrl / outline 接口。"""
-    url = _pick_clarity(video.get("clarity"), quality)
-    if url:
-        return url
-    if video.get("downloadUrl"):
-        return video["downloadUrl"]
-    try:
-        api = API_VIDEO_OUTLINE % (video["videoId"], video["cardPackageId"],
-                                   video["contentId"], video["productId"])
-        infos = (api_get_json(session, api).get("data") or {}).get("videoInfos") or []
-        for vi in infos:
-            url = _pick_clarity(vi.get("clarityInfoList"), quality)
-            if url:
-                return url
-    except Exception:  # noqa: BLE001
-        pass
-    return None
-
-
-def play_headers(session, video, m3u8_url):
-    """构造播放该视频所需的全套头（会话头 + 该视频的 Url/Videoid/Cardpackageid...）。"""
-    h = dict(session)
-    h.setdefault("User-Agent", "YoudaoCourse/iPhone")
-    h.setdefault("Referer", "http://live.youdao.com")
-    h.setdefault("Keyfrom", "aicard.1.4.9.ios")
-    h["Url"] = m3u8_url
-    h["Videoid"] = str(video["videoId"])
-    h["Cardpackageid"] = str(video["cardPackageId"])
-    h["Cardpackagecontentid"] = str(video["contentId"])
-    h["Productid"] = str(video["productId"])
-    # 直播回放：解密 key 接口(live.ydshengxue.com)校验课次↔url，必须带 Liveid 才返回真 AES key。
-    if video.get("liveId"):
-        h["Liveid"] = str(video["liveId"])
-    else:
-        h.pop("Liveid", None)  # 点播不要让上一个会话的 Liveid 残留
-    return h
 
 
 def load_session(args):
