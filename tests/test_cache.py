@@ -1,12 +1,5 @@
-"""磁盘 LRU 缓存的行为锁定测试（命中 / 字节淘汰 / 保护集 / 统计 / 持久化重载）。
-
-重构(#1)会把 _DiskLRU 搬到 ydcore.cache.DiskLRU；这里通过 _CLS 间接引用，
-搬动那一步只需改 _CLS 的来源。
-"""
-import importlib
-
-yc = importlib.import_module("youdao_course")
-_CLS = getattr(yc, "_DiskLRU")
+"""磁盘 LRU 缓存的行为锁定测试（命中 / 字节淘汰 / 保护集 / 统计 / 持久化重载）。"""
+from ydcore.cache import DiskLRU as _CLS
 
 
 def _blob(n, ctype="video/mp2t"):

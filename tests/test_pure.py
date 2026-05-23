@@ -1,22 +1,10 @@
-"""纯逻辑函数的行为锁定测试（Range 解析 / m3u8 改写 / 头转发 / 请求解析）。
-
-这些函数在重构(#1)中会从 youdao_course 搬到 ydcore.hls / ydcore.httpio。
-为减少搬动时的改动，这里集中从 _funcs 取符号；搬动那一步会更新 _funcs 的来源。
-"""
-import importlib
-
+"""纯逻辑函数的行为锁定测试（Range 解析 / m3u8 改写 / 头转发 / 请求解析）。"""
 import pytest
 
-yc = importlib.import_module("youdao_course")
-
-# 重构后这些会指向 ydcore.hls / ydcore.httpio；先绑到当前位置。
-parse_range = getattr(yc, "_parse_range", None)
-proxify = getattr(yc, "_proxify", None)
-looks_like_m3u8 = getattr(yc, "_looks_like_m3u8", None)
-parse_segments = yc.parse_segments
-rewrite_m3u8 = yc.rewrite_m3u8
-forward_headers = yc.forward_headers
-parse_request = yc.parse_request
+from ydcore.hls import (
+    parse_range, proxify, looks_like_m3u8, parse_segments, rewrite_m3u8,
+)
+from ydcore.httpio import forward_headers, parse_request
 
 
 # ---- Range 解析 ----------------------------------------------------------
