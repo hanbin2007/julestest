@@ -5,6 +5,8 @@ import {
   Button,
   Checkbox,
   Drawer,
+  Fab,
+  Fade,
   IconButton,
   ListItemText,
   Menu,
@@ -24,6 +26,7 @@ import PsychologyRoundedIcon from "@mui/icons-material/PsychologyRounded";
 import CheckRoundedIcon from "@mui/icons-material/CheckRounded";
 import FullscreenRoundedIcon from "@mui/icons-material/FullscreenRounded";
 import BookmarkAddRoundedIcon from "@mui/icons-material/BookmarkAddRounded";
+import KeyboardArrowDownRoundedIcon from "@mui/icons-material/KeyboardArrowDownRounded";
 
 export const CHAT_WIDTH = 420;
 import dynamic from "next/dynamic";
@@ -182,6 +185,21 @@ export default function ChatPanel({
   const scrollRef = React.useRef<HTMLDivElement>(null);
   const effortLabel = EFFORT_LEVELS.find((l) => l.value === effort)?.label ?? "深入";
 
+  // 「回到底部」：跟踪是否贴着底部（atBottomRef 给 effect 同步读，state 驱动按钮显隐）
+  const [atBottom, setAtBottom] = React.useState(true);
+  const atBottomRef = React.useRef(true);
+  const scrollToBottom = React.useCallback((behavior: ScrollBehavior = "smooth") => {
+    const el = scrollRef.current;
+    if (el) el.scrollTo({ top: el.scrollHeight, behavior });
+  }, []);
+  const onScroll = React.useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const near = el.scrollHeight - el.scrollTop - el.clientHeight < 80; // 距底 < 80px 视为在底部
+    atBottomRef.current = near;
+    setAtBottom((p) => (p === near ? p : near));
+  }, []);
+
   // 全屏阅读器
   const [reader, setReader] = React.useState<{ open: boolean; content: string; title: string; videoT?: number }>({
     open: false,
@@ -262,10 +280,19 @@ export default function ChatPanel({
     onConsumePrefill?.();
   }, [prefill, onConsumePrefill]);
 
-  // 新内容自动滚到底
+  // 新内容/流式输出自动滚到底 —— 仅当用户本来就贴着底部时才跟随；
+  // 往上翻看历史时不再被每个 token 拽回去（配合右下角「回到底部」按钮）。
   React.useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
-  }, [history.length, draftReply, pendingUser, open]);
+    if (atBottomRef.current) scrollToBottom("smooth");
+  }, [history.length, draftReply, pendingUser, scrollToBottom]);
+  // 打开面板时直接贴到底
+  React.useEffect(() => {
+    if (open) {
+      atBottomRef.current = true;
+      setAtBottom(true);
+      scrollToBottom("auto");
+    }
+  }, [open, scrollToBottom]);
 
   const doSend = () => {
     const text = input.trim();
@@ -274,6 +301,8 @@ export default function ChatPanel({
     void send(text, attached ?? undefined, effort, videoT);
     setInput("");
     setAttached(null);
+    atBottomRef.current = true; // 发送后总是跟到最新（即使此前滚上去了）
+    setAtBottom(true);
   };
 
   const empty = history.length === 0 && !pendingUser && !streaming;
@@ -371,8 +400,13 @@ export default function ChatPanel({
           )}
         </Stack>
 
-        {/* 消息区 */}
-        <Box ref={scrollRef} sx={{ flex: 1, overflowY: "auto", p: 2, display: "flex", flexDirection: "column", gap: 1.5 }}>
+        {/* 消息区（外层 relative 容器承载浮动「回到底部」按钮） */}
+        <Box sx={{ position: "relative", flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+          <Box
+            ref={scrollRef}
+            onScroll={onScroll}
+            sx={{ flex: 1, overflowY: "auto", p: 2, display: "flex", flexDirection: "column", gap: 1.5 }}
+          >
           {empty && (
             <Typography variant="body2" color="text.secondary">
               用 Claude（opus 4.7）讲题。可以直接提问，或在看课时按 <b>a</b> 批注后点「问 Claude」连画面一起发。
@@ -398,6 +432,26 @@ export default function ChatPanel({
               出错了：{error}
             </Typography>
           )}
+          </Box>
+          {/* 浮动「回到底部」：仅在离开底部时淡入 */}
+          <Fade in={!atBottom} unmountOnExit>
+            <Fab
+              size="small"
+              onClick={() => scrollToBottom("smooth")}
+              aria-label="回到底部"
+              sx={{
+                position: "absolute",
+                right: 16,
+                bottom: 16,
+                bgcolor: "md3.surfaceContainerHigh",
+                color: "text.secondary",
+                boxShadow: 6,
+                "&:hover": { bgcolor: "md3.surfaceContainerHighest" },
+              }}
+            >
+              <KeyboardArrowDownRoundedIcon />
+            </Fab>
+          </Fade>
         </Box>
 
         {/* 底部：多选模式 = 存笔记动作条；否则 = 输入区 */}
