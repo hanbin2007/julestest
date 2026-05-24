@@ -110,10 +110,6 @@ export default function ArtPlayer({ src, thumbnails, startTime, onEnded, onTime,
         pip: true,
         miniProgressBar: true,
         fastForward: true,
-        // 关闭「滑动视频画面改进度」手势：它和长按快进共用 $video 触摸事件，长按时手指稍有横移
-        // 就会被当成拖动进度（误跳进度条）。关掉后长按快进期间不再误拖；进度仍可在进度条上拖动
-        // （ArtPlayer 的 $progress 手势在该开关之外，且自定义 useLiveScrub 也不受影响）。
-        gesture: false,
         autoOrientation: true,
         playsInline: true,
         hotkey: false,
