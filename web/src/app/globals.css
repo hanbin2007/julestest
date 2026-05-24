@@ -33,18 +33,25 @@ a {
 
 /* 播放器整体禁止文本选中 + 原生长按浮层：
    - iPad Safari 点/长按视频（不可选）会选中最近的可选祖先（.art-host / 包裹盒），
-     整个播放器被刷成一大块蓝色选区；故对整棵 .art-host 子树关闭选中。
+     整个播放器被刷成一大块蓝色选区；故对整棵播放器子树关闭选中。
    - 同时关闭 -webkit-touch-callout，避免长按弹出“拷贝/实况文本(OCR)”、抢占长按快进。
+   - 也直接匹配 .art-video-player：网页全屏(FULLSCREEN_WEB_IN_BODY=true)会把它移到
+     <body> 下、脱离 .art-host，仍需保持不可选 / 无 callout。
    批注便签的输入框除外（下方重新开启），保证可正常编辑。 */
 .art-host,
-.art-host * {
+.art-host *,
+.art-video-player,
+.art-video-player * {
   -webkit-touch-callout: none;
   -webkit-user-select: none;
   user-select: none;
 }
 .art-host input,
 .art-host textarea,
-.art-host [contenteditable="true"] {
+.art-host [contenteditable="true"],
+.art-video-player input,
+.art-video-player textarea,
+.art-video-player [contenteditable="true"] {
   -webkit-user-select: text;
   user-select: text;
 }
