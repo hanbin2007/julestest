@@ -42,11 +42,13 @@ export async function syncYoudaoProgress(
   const { byVid } = await getCatalogRollup();
   const nameById = new Map(all.map((c) => [c.id, c.name]));
 
-  // 现有进度一次性读出，避免逐讲查库。
+  // 现有进度一次性读出，避免逐讲查库。Progress 主键为 (productId,videoId)，
+  // videoId 跨课不唯一，故 localBy 也按 `${productId}:${videoId}` 索引，否则两门课共享同一
+  // videoId 时 Map 会互相覆盖，合并判定 changed 就会拿错课的本地进度比较（漏写/空写）。
   const rows = await prisma.progress.findMany({
-    select: { videoId: true, t: true, d: true },
+    select: { productId: true, videoId: true, t: true, d: true },
   });
-  const localBy = new Map(rows.map((r) => [r.videoId, { t: r.t, d: r.d }]));
+  const localBy = new Map(rows.map((r) => [`${r.productId}:${r.videoId}`, { t: r.t, d: r.d }]));
 
   const res: YoudaoSyncResult = {
     courses: { total: targets.length, ok: 0, failed: 0 },
@@ -86,7 +88,9 @@ export async function syncYoudaoProgress(
           res.videos.skipped++;
           continue;
         }
-        const local = localBy.get(w.videoId);
+        // 这一讲的 productId 即当前遍历的课 c.id（watch_state 就是按 c.id 拉的）。
+        const key = `${c.id}:${w.videoId}`;
+        const local = localBy.get(key);
         const localT = num(local?.t);
         const localD = num(local?.d);
         const newD = Math.max(localD, ydDur);
@@ -122,8 +126,8 @@ export async function syncYoudaoProgress(
         });
         if (local) res.videos.updated++;
         else res.videos.created++;
-        // 本轮内若同一讲再次出现，按已合并值参与后续比较。
-        localBy.set(w.videoId, { t: newT, d: newD });
+        // 本轮内若同一讲再次出现，按已合并值参与后续比较（同 (productId,videoId) 键）。
+        localBy.set(key, { t: newT, d: newD });
       }
     }
   };
@@ -134,7 +138,7 @@ export async function syncYoudaoProgress(
     await prisma.$transaction(
       writes.map((w) =>
         prisma.progress.upsert({
-          where: { videoId: w.videoId },
+          where: { productId_videoId: { productId: w.data.productId, videoId: w.videoId } },
           create: { videoId: w.videoId, ...w.data },
           update: w.data,
         }),

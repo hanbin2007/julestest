@@ -17,6 +17,7 @@ export const noteAddSchema = z.object({
 
 export const noteUpdateSchema = z.object({
   videoId: z.coerce.number().int().positive(),
+  productId: z.coerce.number().int().nullish(), // 课程身份;用于回包列表按 (videoId,productId) 收窄,旧客户端可省
   id: z.string().min(1),
   text: z.string().trim().min(1),
   strokes: strokesField,
@@ -34,6 +35,7 @@ export const chatSchema = z.object({
 
 export const noteDeleteSchema = z.object({
   videoId: z.coerce.number().int().positive(),
+  productId: z.coerce.number().int().nullish(), // 课程身份;用于回包列表按 (videoId,productId) 收窄,旧客户端可省
   id: z.string().min(1),
 });
 
@@ -41,7 +43,7 @@ export const progressSchema = z.object({
   videoId: z.coerce.number().int().positive(),
   t: z.coerce.number().min(0).catch(0),
   d: z.coerce.number().min(0).catch(0),
-  productId: z.coerce.number().int().nullish().catch(null),
+  productId: z.coerce.number().int(), // 必填:Progress 主键为 (productId,videoId);前端始终上报真实 productId
   title: z.string().nullish(),
   courseName: z.string().nullish(),
 });
