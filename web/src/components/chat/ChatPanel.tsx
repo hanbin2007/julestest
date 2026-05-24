@@ -183,6 +183,7 @@ export default function ChatPanel({
   const [attached, setAttached] = React.useState<string | null>(null); // dataURL
   const [effortAnchor, setEffortAnchor] = React.useState<null | HTMLElement>(null);
   const scrollRef = React.useRef<HTMLDivElement>(null);
+  const contentRef = React.useRef<HTMLDivElement>(null); // 消息内容包裹层：高度变化(含异步 Markdown)时据此贴底
   const effortLabel = EFFORT_LEVELS.find((l) => l.value === effort)?.label ?? "深入";
 
   // 「回到底部」：跟踪是否贴着底部（atBottomRef 给 effect 同步读，state 驱动按钮显隐）
@@ -280,11 +281,19 @@ export default function ChatPanel({
     onConsumePrefill?.();
   }, [prefill, onConsumePrefill]);
 
-  // 新内容/流式输出自动滚到底 —— 仅当用户本来就贴着底部时才跟随；
+  // 新内容/流式输出/异步 Markdown 渲染使内容变高时自动贴底 —— 仅当用户本来就贴着底部时才跟随；
   // 往上翻看历史时不再被每个 token 拽回去（配合右下角「回到底部」按钮）。
+  // 用 ResizeObserver 盯「内容高度」而非 React 状态：懒加载的 Markdown 撑高发生在 state 更新之后，
+  // 只在状态变化时滚一次会停在半路（开面板看历史时尤其明显）。
   React.useEffect(() => {
-    if (atBottomRef.current) scrollToBottom("smooth");
-  }, [history.length, draftReply, pendingUser, scrollToBottom]);
+    const content = contentRef.current;
+    if (!content) return;
+    const ro = new ResizeObserver(() => {
+      if (atBottomRef.current) scrollToBottom("auto");
+    });
+    ro.observe(content);
+    return () => ro.disconnect();
+  }, [scrollToBottom]);
   // 打开面板时直接贴到底
   React.useEffect(() => {
     if (open) {
@@ -405,8 +414,9 @@ export default function ChatPanel({
           <Box
             ref={scrollRef}
             onScroll={onScroll}
-            sx={{ flex: 1, overflowY: "auto", p: 2, display: "flex", flexDirection: "column", gap: 1.5 }}
+            sx={{ flex: 1, overflowY: "auto", p: 2 }}
           >
+            <Box ref={contentRef} sx={{ display: "flex", flexDirection: "column", gap: 1.5 }}>
           {empty && (
             <Typography variant="body2" color="text.secondary">
               用 Claude（opus 4.7）讲题。可以直接提问，或在看课时按 <b>a</b> 批注后点「问 Claude」连画面一起发。
@@ -432,6 +442,7 @@ export default function ChatPanel({
               出错了：{error}
             </Typography>
           )}
+            </Box>
           </Box>
           {/* 浮动「回到底部」：仅在离开底部时淡入 */}
           <Fade in={!atBottom} unmountOnExit>
