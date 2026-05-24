@@ -183,7 +183,7 @@ export default function ChatPanel({
   const [attached, setAttached] = React.useState<string | null>(null); // dataURL
   const [effortAnchor, setEffortAnchor] = React.useState<null | HTMLElement>(null);
   const scrollRef = React.useRef<HTMLDivElement>(null);
-  const contentRef = React.useRef<HTMLDivElement>(null); // 消息内容包裹层：高度变化(含异步 Markdown)时据此贴底
+  const roRef = React.useRef<ResizeObserver | null>(null); // 贴底用：观察消息内容高度变化
   const effortLabel = EFFORT_LEVELS.find((l) => l.value === effort)?.label ?? "深入";
 
   // 「回到底部」：跟踪是否贴着底部（atBottomRef 给 effect 同步读，state 驱动按钮显隐）
@@ -200,6 +200,24 @@ export default function ChatPanel({
     atBottomRef.current = near;
     setAtBottom((p) => (p === near ? p : near));
   }, []);
+  // 内容高度变化（异步 Markdown 撑高 / 流式增长 / 图片加载）时，若用户在底部则贴底。
+  // 用 callback ref 而非 effect：面板在抽屉里、开合会卸载/重挂内容节点，callback ref 能在重挂那刻
+  // 立即把 ResizeObserver 挂上；普通 effect（依赖固定）只在组件首挂时跑，那时抽屉还没渲染内容 → 永远漏挂。
+  const setContentEl = React.useCallback(
+    (node: HTMLDivElement | null) => {
+      roRef.current?.disconnect();
+      if (!node) {
+        roRef.current = null;
+        return;
+      }
+      const ro = new ResizeObserver(() => {
+        if (atBottomRef.current) scrollToBottom("auto");
+      });
+      ro.observe(node);
+      roRef.current = ro;
+    },
+    [scrollToBottom],
+  );
 
   // 全屏阅读器
   const [reader, setReader] = React.useState<{ open: boolean; content: string; title: string; videoT?: number }>({
@@ -281,20 +299,8 @@ export default function ChatPanel({
     onConsumePrefill?.();
   }, [prefill, onConsumePrefill]);
 
-  // 新内容/流式输出/异步 Markdown 渲染使内容变高时自动贴底 —— 仅当用户本来就贴着底部时才跟随；
-  // 往上翻看历史时不再被每个 token 拽回去（配合右下角「回到底部」按钮）。
-  // 用 ResizeObserver 盯「内容高度」而非 React 状态：懒加载的 Markdown 撑高发生在 state 更新之后，
-  // 只在状态变化时滚一次会停在半路（开面板看历史时尤其明显）。
-  React.useEffect(() => {
-    const content = contentRef.current;
-    if (!content) return;
-    const ro = new ResizeObserver(() => {
-      if (atBottomRef.current) scrollToBottom("auto");
-    });
-    ro.observe(content);
-    return () => ro.disconnect();
-  }, [scrollToBottom]);
-  // 打开面板时直接贴到底
+  // 打开面板时贴底（置贴底态后，上面的 ResizeObserver 会随异步内容撑高持续贴底）；
+  // 往上翻看历史时（atBottomRef=false）不动，保持「不硬拽」。
   React.useEffect(() => {
     if (open) {
       atBottomRef.current = true;
@@ -416,7 +422,7 @@ export default function ChatPanel({
             onScroll={onScroll}
             sx={{ flex: 1, overflowY: "auto", p: 2 }}
           >
-            <Box ref={contentRef} sx={{ display: "flex", flexDirection: "column", gap: 1.5 }}>
+            <Box ref={setContentEl} sx={{ display: "flex", flexDirection: "column", gap: 1.5 }}>
           {empty && (
             <Typography variant="body2" color="text.secondary">
               用 Claude（opus 4.7）讲题。可以直接提问，或在看课时按 <b>a</b> 批注后点「问 Claude」连画面一起发。
