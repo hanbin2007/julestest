@@ -10,8 +10,9 @@ export async function GET(req: NextRequest) {
   const searchParams = new URL(req.url).searchParams;
   const videoId = Number(searchParams.get("videoId") ?? "");
   if (!videoId) return Response.json({ error: "missing videoId" }, { status: 400 });
-  const pid = Number(searchParams.get("productId"));
-  const productId = Number.isInteger(pid) ? pid : null;
+  const pidRaw = searchParams.get("productId");
+  const pidNum = pidRaw == null ? NaN : Number(pidRaw);
+  const productId = Number.isInteger(pidNum) ? pidNum : null;
   const where =
     productId == null
       ? { videoId }
