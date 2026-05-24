@@ -12,7 +12,7 @@ import {
   type RectPx,
 } from "./selection";
 import { extractSamples, isDrawingPointer, type RawSample } from "./inputPipeline";
-import { StrokeFilter } from "./oneEuro";
+import { StrokeSmoother } from "./oneEuro";
 import { tuning } from "./inkTuning";
 import type { AnnotationApi } from "./useAnnotation";
 
@@ -49,7 +49,7 @@ export default function AnnotationLayer({ api }: { api: AnnotationApi }) {
   const eraserCursorRef = React.useRef<{ x: number; y: number; r: number } | null>(null); // px
   const pendingRef = React.useRef<InkSample[]>([]);
   const lastSampleRef = React.useRef<Pt | null>(null); // 抽稀用：上一个被接受的采样
-  const filterRef = React.useRef(new StrokeFilter()); // One Euro 去抖（位置/压感），每笔重置
+  const smootherRef = React.useRef(new StrokeSmoother()); // One Euro 去抖 + 保角，每笔重置
   const rafRef = React.useRef<number | null>(null);
   const apiRef = React.useRef(api);
   apiRef.current = api;
@@ -59,15 +59,16 @@ export default function AnnotationLayer({ api }: { api: AnnotationApi }) {
   // 滤波对【每个】原始样本都跑（维持滤波器状态连续），抽稀只决定输出哪些。
   const acceptSamples = (raw: RawSample[]): InkSample[] => {
     const { w, h } = sizeRef.current;
-    const f = filterRef.current;
+    const sm = smootherRef.current;
     const out: InkSample[] = [];
     let last = lastSampleRef.current;
     for (const s of raw) {
-      // 位置在【像素空间】滤波——One Euro 的 minCutoff(Hz)/beta(对 px/s) 才有物理意义；
+      // 在【像素空间】去抖+保角——One Euro 的 minCutoff(Hz)/beta(对 px/s) 才有物理意义；
       // 若在归一化 0–1 上滤，速度数值被画布尺寸缩小上千倍 → 误判为「慢」→ 过度平滑、笔迹严重滞后。
-      const fx = f.x.filter(s.x * w, s.t) / w;
-      const fy = f.y.filter(s.y * h, s.t) / h;
-      const fp = s.p === undefined ? undefined : f.p.filter(s.p, s.t);
+      const pt = sm.point(s.x * w, s.y * h, s.t);
+      const fx = pt.x / w;
+      const fy = pt.y / h;
+      const fp = s.p === undefined ? undefined : sm.pressure(s.p, s.t);
       if (!last || Math.hypot((fx - last.x) * w, (fy - last.y) * h) >= tuning.minSampleDist) {
         const samp: InkSample = fp === undefined ? { x: fx, y: fy } : { x: fx, y: fy, p: fp };
         out.push(samp);
@@ -346,10 +347,11 @@ export default function AnnotationLayer({ api }: { api: AnnotationApi }) {
     }
     if (tool === "pen" || tool === "marker") {
       lastSampleRef.current = null; // 新一笔，重置抽稀基准（首点必被接受）
-      filterRef.current.configure(
-        tuning.posMinCutoff, tuning.posBeta, tuning.dCutoff, tuning.pressMinCutoff, tuning.pressBeta
+      smootherRef.current.configure(
+        tuning.posMinCutoff, tuning.posBeta, tuning.dCutoff,
+        tuning.pressMinCutoff, tuning.pressBeta, tuning.cornerStrength
       );
-      filterRef.current.reset();
+      smootherRef.current.reset();
       const samples = acceptSamples(extractSamples(e.nativeEvent, rectOf()));
       drawingRef.current = { kind: "ink", id: newId(), tool, color, width, samples, transform: identity() };
     } else if (tool === "line" || tool === "rect" || tool === "ellipse" || tool === "arrow") {

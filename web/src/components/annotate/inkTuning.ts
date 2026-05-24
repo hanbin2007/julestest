@@ -18,6 +18,7 @@ export interface InkTuning {
   // One Euro 压感平滑
   pressMinCutoff: number;
   pressBeta: number;
+  cornerStrength: number; // 大拐角防出轨：0=纯滤波(会抹圆拐角)，1=拐角处完全跟原始点(最尖)
   pen: PenTuning;
   marker: PenTuning;
   minSampleDist: number; // 抽稀最小间距(px)
@@ -29,14 +30,15 @@ export const tuning: InkTuning = {
   dCutoff: 1.0,
   pressMinCutoff: 2.0,
   pressBeta: 0.3,
-  pen: { thinning: 0.6, smoothing: 0.5, streamline: 0.2, taperStart: 0, taperEnd: 2 },
-  marker: { thinning: 0, smoothing: 0.5, streamline: 0.3, taperStart: 0, taperEnd: 0 },
+  cornerStrength: 0.7,
+  pen: { thinning: 0.6, smoothing: 0.5, streamline: 0.15, taperStart: 0, taperEnd: 2 },
+  marker: { thinning: 0, smoothing: 0.5, streamline: 0.25, taperStart: 0, taperEnd: 0 },
   minSampleDist: 1.2,
 };
 
 // 调优页用的预设（名字 → 覆盖值）。生产不引用。
 export const PRESETS: Record<string, Partial<InkTuning>> = {
-  跟手优先: { posMinCutoff: 1.8, posBeta: 0.8, pen: { ...tuning.pen, streamline: 0.15, taperEnd: 2 } },
-  平滑优先: { posMinCutoff: 0.6, posBeta: 0.3, pen: { ...tuning.pen, streamline: 0.35, taperEnd: 2.5 } },
-  "Goodnotes-ish": { posMinCutoff: 1.0, posBeta: 0.5, pen: { ...tuning.pen, streamline: 0.25, taperStart: 0, taperEnd: 2.2 } },
+  跟手优先: { posMinCutoff: 1.8, posBeta: 0.8, cornerStrength: 0.85, pen: { ...tuning.pen, streamline: 0.1, taperEnd: 2 } },
+  平滑优先: { posMinCutoff: 0.6, posBeta: 0.3, cornerStrength: 0.6, pen: { ...tuning.pen, streamline: 0.3, taperEnd: 2.5 } },
+  "Goodnotes-ish": { posMinCutoff: 1.0, posBeta: 0.5, cornerStrength: 0.8, pen: { ...tuning.pen, streamline: 0.15, taperStart: 0, taperEnd: 2.2 } },
 };

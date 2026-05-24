@@ -21,6 +21,7 @@ const set = (p: Path, v: number) => {
 const SLIDERS: { p: Path; label: string; min: number; max: number; step: number; hint: string }[] = [
   { p: "posMinCutoff", label: "防抖强度", min: 0.2, max: 4, step: 0.1, hint: "越小越平滑(慢速去抖狠)" },
   { p: "posBeta", label: "跟手度", min: 0, max: 1.5, step: 0.05, hint: "越大快速越跟手(降延迟)" },
+  { p: "cornerStrength", label: "大拐角防出轨", min: 0, max: 1, step: 0.05, hint: "越大拐角越尖(不抹圆/不出轨)" },
   { p: "pen.streamline", label: "流线化", min: 0, max: 0.6, step: 0.02, hint: "额外平滑(会加一点延迟)" },
   { p: "pen.smoothing", label: "轮廓柔化", min: 0, max: 1, step: 0.05, hint: "边缘柔和度" },
   { p: "pen.thinning", label: "压感粗细差", min: 0, max: 0.9, step: 0.05, hint: "越大轻重笔差越明显" },

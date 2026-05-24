@@ -59,21 +59,81 @@ export class OneEuro {
   }
 }
 
-// 一笔用的滤波组：位置 x/y 共享参数，压感单独一组。每笔开始 reset()。
-export class StrokeFilter {
-  readonly x = new OneEuro();
-  readonly y = new OneEuro();
-  readonly p = new OneEuro();
+const smoothstep = (lo: number, hi: number, x: number) => {
+  const t = Math.max(0, Math.min(1, (x - lo) / (hi - lo)));
+  return t * t * (3 - 2 * t);
+};
 
-  configure(posMinCutoff: number, posBeta: number, dCutoff: number, pressMinCutoff: number, pressBeta: number) {
-    this.x.setParams(posMinCutoff, posBeta, dCutoff);
-    this.y.setParams(posMinCutoff, posBeta, dCutoff);
-    this.p.setParams(pressMinCutoff, pressBeta, dCutoff);
+// 一笔的平滑器：位置 x/y + 压感各一个 One Euro，外加「保角」——
+// 在【真实大拐角】处把输出拉回原始点，避免低通滞后把拐角抹圆/出轨；直线与抖动处仍用滤波值。
+// 「真实拐角」判定 = 转角够大(loRad→hiRad) 且 该步位移够长(>minLen，排除小抖动误判为拐角)。
+export class StrokeSmoother {
+  private fx = new OneEuro();
+  private fy = new OneEuro();
+  private fp = new OneEuro();
+  private prevX: number | null = null; // 上一原始点(px)
+  private prevY: number | null = null;
+  private dirX = 0;
+  private dirY = 0;
+  private hasDir = false;
+  private cornerStrength = 0.7; // 0=纯滤波(会抹圆拐角)，1=拐角处完全用原始点(最尖)
+  private minLen = 4; // px：位移小于此视为抖动、不当拐角
+  private loRad = (35 * Math.PI) / 180;
+  private hiRad = (100 * Math.PI) / 180;
+
+  configure(
+    posMinCutoff: number,
+    posBeta: number,
+    dCutoff: number,
+    pressMinCutoff: number,
+    pressBeta: number,
+    cornerStrength: number
+  ) {
+    this.fx.setParams(posMinCutoff, posBeta, dCutoff);
+    this.fy.setParams(posMinCutoff, posBeta, dCutoff);
+    this.fp.setParams(pressMinCutoff, pressBeta, dCutoff);
+    this.cornerStrength = cornerStrength;
   }
 
   reset() {
-    this.x.reset();
-    this.y.reset();
-    this.p.reset();
+    this.fx.reset();
+    this.fy.reset();
+    this.fp.reset();
+    this.prevX = null;
+    this.prevY = null;
+    this.hasDir = false;
+    this.dirX = 0;
+    this.dirY = 0;
+  }
+
+  // 输入原始像素坐标 + 时间戳(ms) → 去抖且保角后的像素坐标。
+  point(rx: number, ry: number, t: number): { x: number; y: number } {
+    const fx = this.fx.filter(rx, t);
+    const fy = this.fy.filter(ry, t);
+    let cw = 0;
+    if (this.prevX !== null && this.prevY !== null) {
+      const sx = rx - this.prevX;
+      const sy = ry - this.prevY;
+      const len = Math.hypot(sx, sy);
+      if (len > this.minLen) {
+        const dx = sx / len;
+        const dy = sy / len;
+        if (this.hasDir) {
+          const dot = Math.max(-1, Math.min(1, dx * this.dirX + dy * this.dirY));
+          const turn = Math.acos(dot); // 与上一段方向的夹角
+          cw = smoothstep(this.loRad, this.hiRad, turn) * this.cornerStrength;
+        }
+        this.dirX = dx;
+        this.dirY = dy;
+        this.hasDir = true;
+      }
+    }
+    this.prevX = rx;
+    this.prevY = ry;
+    return { x: fx * (1 - cw) + rx * cw, y: fy * (1 - cw) + ry * cw };
+  }
+
+  pressure(p: number, t: number): number {
+    return this.fp.filter(p, t);
   }
 }
