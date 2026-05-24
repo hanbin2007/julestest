@@ -26,7 +26,7 @@ import { useCourses, useCourseVideos } from "@/hooks/data";
 import { useThumbPoll } from "@/hooks/useThumbPoll";
 import { useSegmentMaps } from "@/hooks/useSegmentMaps";
 import { useHotkeys } from "@/hooks/useHotkeys";
-import { play, pickM3u8, postProgress, addNote as apiAddNote, saveNoteSnapshot as apiSaveNoteSnapshot, patchSettings, refreshCatalog } from "@/lib/api";
+import { play, pickM3u8, postProgress, flushProgress, addNote as apiAddNote, saveNoteSnapshot as apiSaveNoteSnapshot, patchSettings, refreshCatalog } from "@/lib/api";
 import { themeForSeed, hashSeed } from "@/lib/color";
 import { useProgressMap, useLast, useNotes, usePrefs } from "@/hooks/persist";
 import type { Course, Video, VideoRow } from "@/types/api";
@@ -179,6 +179,19 @@ export default function PlayerView() {
     (t: number, d: number) => {
       if (!video || !course) return;
       void postProgress(video.videoId, t, d, {
+        productId: course.id,
+        title: video.title ?? `视频 ${video.videoId}`,
+        courseName: course.name,
+      });
+    },
+    [video, course]
+  );
+
+  // 关闭页 / 切后台 / 切讲时的最后位置上报（sendBeacon/keepalive，卸载也能送达）。
+  const onFlush = React.useCallback(
+    (t: number, d: number) => {
+      if (!video || !course) return;
+      flushProgress(video.videoId, t, d, {
         productId: course.id,
         title: video.title ?? `视频 ${video.videoId}`,
         courseName: course.name,
@@ -491,6 +504,7 @@ export default function PlayerView() {
                       thumbnails={thumbnails}
                       startTime={startTime}
                       onTime={onTime}
+                      onFlush={onFlush}
                       onEnded={() => setUpNext(next)}
                       onInstance={(inst) => {
                         artRef.current = inst;

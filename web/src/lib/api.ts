@@ -89,6 +89,35 @@ export const postProgress = (
   meta?: ProgressMeta,
 ) => postJson<{ ok: boolean }>("/api/progress", { videoId, t, d, ...meta });
 
+// 关闭页 / 切后台 / 切讲时的「最后一次」进度上报：普通 fetch 会随页面卸载被中断，
+// 这里用 sendBeacon（卸载后仍能送达），失败再退回 keepalive fetch。确保最后位置不丢。
+export function flushProgress(
+  videoId: number,
+  t: number,
+  d: number,
+  meta?: ProgressMeta,
+): void {
+  const body = JSON.stringify({ videoId, t, d, ...meta });
+  try {
+    if (typeof navigator !== "undefined" && typeof navigator.sendBeacon === "function") {
+      const blob = new Blob([body], { type: "application/json" });
+      if (navigator.sendBeacon("/api/progress", blob)) return;
+    }
+  } catch {
+    /* 退回 fetch */
+  }
+  try {
+    void fetch("/api/progress", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body,
+      keepalive: true,
+    });
+  } catch {
+    /* ignore */
+  }
+}
+
 export interface YoudaoSyncResult {
   ok: boolean;
   courses: { total: number; ok: number; failed: number };
