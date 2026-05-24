@@ -22,6 +22,7 @@ import HealthBar from "./HealthBar";
 import StorageStrip from "./StorageStrip";
 import TaskQueuePanel from "./TaskQueuePanel";
 import CacheDirCard from "./CacheDirCard";
+import AssistantCard from "./AssistantCard";
 import CourseStatusGrid, { type CourseSort } from "./CourseStatusGrid";
 import CourseDetailDrawer from "./CourseDetailDrawer";
 import { batchThumbs, batchBuffer, getCourseVideos, syncYoudaoProgress } from "@/lib/api";
@@ -234,6 +235,9 @@ export default function SettingsView() {
         cacheDirOk={data?.health.cacheDirOk ?? true}
         onSaved={refresh}
       />
+
+      {/* AI 助教：系统提示词 + 默认思考等级 */}
+      <AssistantCard />
 
       {/* 工具栏 */}
       <Card sx={{ p: 2, mb: 2 }}>

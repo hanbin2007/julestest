@@ -26,6 +26,7 @@ export const chatSchema = z.object({
   videoId: z.coerce.number().int().positive(),
   text: z.string().trim().min(1),
   image: z.string().startsWith("data:image/").max(6_000_000).optional(),
+  effort: z.enum(["low", "medium", "high", "xhigh"]).optional(), // 思考等级
 });
 
 export const noteDeleteSchema = z.object({
