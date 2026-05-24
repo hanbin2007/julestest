@@ -9,8 +9,13 @@ _RANGE_RE = re.compile(r"bytes=(\d*)-(\d*)")
 _URI_ATTR_RE = re.compile(r'URI="([^"]+)"')
 
 
+class UnsatisfiableRange(ValueError):
+    """Range 头语法正确但超出实体范围（RFC 7233 §4.4），应响应 416。"""
+
+
 def parse_range(range_header, total):
-    """解析单段 Range；返回 (start, end) 闭区间，或 None 表示整段。"""
+    """解析单段 Range；返回 (start, end) 闭区间，或 None 表示无 Range 头（整段 200）。
+    若 Range 语法合法但不可满足（start >= total 或 suffix-length=0），抛 UnsatisfiableRange。"""
     if not range_header:
         return None
     m = _RANGE_RE.search(range_header)
@@ -20,13 +25,17 @@ def parse_range(range_header, total):
     if s == "":
         if e == "":
             return None
-        length = min(int(e), total)
+        length = int(e)
+        if length <= 0:
+            # bytes=-0 ：suffix-length=0 不可满足
+            raise UnsatisfiableRange("suffix-length=0")
+        length = min(length, total)
         return (total - length, total - 1)
     start = int(s)
     end = int(e) if e else total - 1
     end = min(end, total - 1)
     if start > end or start >= total:
-        return None
+        raise UnsatisfiableRange("start=%d >= total=%d" % (start, total))
     return (start, end)
 
 

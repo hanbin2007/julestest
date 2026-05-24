@@ -2,7 +2,7 @@
 import pytest
 
 from ydcore.hls import (
-    parse_range, proxify, looks_like_m3u8, parse_segments, rewrite_m3u8,
+    UnsatisfiableRange, parse_range, proxify, looks_like_m3u8, parse_segments, rewrite_m3u8,
 )
 from ydcore.httpio import forward_headers, parse_request
 
@@ -15,11 +15,20 @@ from ydcore.httpio import forward_headers, parse_request
     ("bytes=10-", 100, (10, 99)),
     ("bytes=-10", 100, (90, 99)),       # 末尾 N 字节
     ("bytes=50-1000", 100, (50, 99)),   # 越界 end 收敛到 total-1
-    ("bytes=200-300", 100, None),       # start 超出总长 -> 整段(None)
-    ("nonsense", 100, None),
+    ("nonsense", 100, None),            # 无法识别的 Range 头 -> 整段(None)
 ])
 def test_parse_range(hdr, total, expected):
     assert parse_range(hdr, total) == expected
+
+
+@pytest.mark.parametrize("hdr,total", [
+    ("bytes=200-300", 100),   # start 超出总长 -> 416
+    ("bytes=100-", 100),      # start == total -> 416
+    ("bytes=-0", 100),        # suffix-length=0 -> 416
+])
+def test_parse_range_unsatisfiable(hdr, total):
+    with pytest.raises(UnsatisfiableRange):
+        parse_range(hdr, total)
 
 
 # ---- 代理地址改写 --------------------------------------------------------
