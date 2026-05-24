@@ -16,10 +16,10 @@ import DeleteSweepRoundedIcon from "@mui/icons-material/DeleteSweepRounded";
 import CloseRoundedIcon from "@mui/icons-material/CloseRounded";
 import NoteAddRoundedIcon from "@mui/icons-material/NoteAddRounded";
 import AutoAwesomeRoundedIcon from "@mui/icons-material/AutoAwesomeRounded";
-import { WIDTHS, type Tool } from "./strokes";
+import { WIDTHS, type ActiveTool } from "./model";
 import type { AnnotationApi } from "./useAnnotation";
 
-const TOOLS: { tool: Tool; label: string; Icon: React.ElementType }[] = [
+const TOOLS: { tool: ActiveTool; label: string; Icon: React.ElementType }[] = [
   { tool: "pen", label: "画笔", Icon: EditRoundedIcon },
   { tool: "marker", label: "荧光笔", Icon: BorderColorRoundedIcon },
   { tool: "line", label: "直线", Icon: HorizontalRuleRoundedIcon },
@@ -49,7 +49,7 @@ export default function AnnotationToolbar({
   busy?: boolean;
 }) {
   const dragControls = useDragControls();
-  const hasInk = api.strokes.length > 0;
+  const hasInk = api.objects.length > 0;
 
   return (
     <motion.div

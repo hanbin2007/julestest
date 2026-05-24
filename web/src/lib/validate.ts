@@ -4,8 +4,8 @@ import { z } from "zod";
 // 这里收敛为 zod schema，解析失败统一返回 400 + 可读的字段错误。
 // 数值用 z.coerce 保留原先 Number() 的宽松（前端偶尔传字符串数字也能过）。
 
-// 矢量批注 JSON 文本（Stroke[] 序列化），上限 256KB。
-const strokesField = z.string().max(262144).optional();
+// 矢量批注 JSON 文本（v2 {v:2,objects[]} 序列化）。压感样本点更密，上限 256KB→1MB。
+const strokesField = z.string().max(1_048_576).optional();
 
 export const noteAddSchema = z.object({
   videoId: z.coerce.number().int().positive(),

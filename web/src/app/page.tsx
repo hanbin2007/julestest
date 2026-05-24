@@ -14,7 +14,7 @@ import UpNextCountdown from "@/components/player/UpNextCountdown";
 import AnnotationOverlay from "@/components/annotate/AnnotationOverlay";
 import FloatingTools from "@/components/annotate/FloatingTools";
 import { useAnnotation, bakeAnnotation, bakeWithServerFrame } from "@/components/annotate/useAnnotation";
-import { serializeStrokes, parseStrokes } from "@/components/annotate/strokes";
+import { serializeDoc, parseDoc } from "@/components/annotate/model";
 import ChatPanel, { type ChatPrefill, CHAT_WIDTH } from "@/components/chat/ChatPanel";
 import ContinueWatchingRail from "@/components/home/ContinueWatchingRail";
 import CommandPalette from "@/components/common/CommandPalette";
@@ -246,19 +246,19 @@ export default function PlayerView() {
   // 合成图：优先服务端取帧（ffmpeg，解决浏览器 HLS drawImage 黑帧）；失败再退回客户端抓帧。
   const composeImage = React.useCallback(async (): Promise<string | null> => {
     const t = Math.floor(artRef.current?.video?.currentTime ?? 0);
-    const server = await bakeWithServerFrame(src, t, annotation.strokes);
+    const server = await bakeWithServerFrame(src, t, annotation.objects);
     if (server) return server;
-    return bakeAnnotation(artRef.current?.video, annotation.strokes).image;
+    return bakeAnnotation(artRef.current?.video, annotation.objects).image;
   }, [src, annotation]);
 
   const saveAnnotation = React.useCallback(async () => {
     if (!video) return;
-    if (annotation.strokes.length === 0 && !annotationText.trim()) return;
+    if (annotation.objects.length === 0 && !annotationText.trim()) return;
     const text = annotationText.trim() || "批注";
     setSavingAnno(true);
     try {
       const image = await composeImage();
-      const strokesJson = serializeStrokes(annotation.strokes);
+      const strokesJson = serializeDoc(annotation.objects);
       if (editingNoteId) {
         await notesApi.update(editingNoteId, text, strokesJson, image);
         toast("批注已更新");
@@ -295,7 +295,7 @@ export default function PlayerView() {
     if (!pendingEditId || !art || !video) return;
     const note = notesList.find((n) => n.id === pendingEditId);
     if (!note) return; // 笔记尚未加载，等下一轮
-    annoLoad(parseStrokes(note.strokes));
+    annoLoad(parseDoc(note.strokes));
     setAnnotationText(note.text === "批注" ? "" : note.text);
     setEditingNoteId(note.id);
     setAnnotateOpen(true);
