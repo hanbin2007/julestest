@@ -25,7 +25,7 @@ export default function CourseDetailDrawer({
 }) {
   const open = !!course;
   const { videos, isLoading } = useCourseVideos(open ? course!.productId : null);
-  const [selected, setSelected] = React.useState<Set<number>>(new Set());
+  const [selected, setSelected] = React.useState<Set<string>>(new Set());
   React.useEffect(() => setSelected(new Set()), [course?.productId]);
 
   // 只为打开的这门课拉逐片 bitmap（有界），平铺视图不拉 → 缓存条按比例填充兜底。
@@ -36,7 +36,7 @@ export default function CourseDetailDrawer({
     return videos.map((v) => {
       const b = perVid[String(v.videoId)];
       return {
-        id: v.videoId,
+        id: `${course.productId}:${v.videoId}`,
         courseName: course.name,
         title: v.title ?? `视频 ${v.videoId}`,
         duration: v.duration,
@@ -52,7 +52,7 @@ export default function CourseDetailDrawer({
     });
   }, [course, videos, perVid, segMaps]);
 
-  const toggle = (id: number, on: boolean) =>
+  const toggle = (id: string, on: boolean) =>
     setSelected((s) => {
       const n = new Set(s);
       on ? n.add(id) : n.delete(id);

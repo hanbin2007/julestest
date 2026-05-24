@@ -20,7 +20,18 @@ export function useChat(videoId: number | null, productId: number | null = null)
   const [error, setError] = React.useState<string | null>(null);
   const abortRef = React.useRef<AbortController | null>(null);
 
-  React.useEffect(() => () => abortRef.current?.abort(), []);
+  // videoId 切换时（切换讲次）中止进行中的流并清空瞬态，让新讲从干净状态开始。
+  // 卸载时同理（空 deps 已无需，videoId 变化覆盖了卸载场景）。
+  React.useEffect(() => {
+    return () => {
+      abortRef.current?.abort();
+      abortRef.current = null;
+      setStreaming(false);
+      setPendingUser(null);
+      setDraftReply("");
+      setError(null);
+    };
+  }, [videoId]);
 
   const send = React.useCallback(
     async (text: string, image?: string, effort?: ChatEffort, videoT?: number) => {

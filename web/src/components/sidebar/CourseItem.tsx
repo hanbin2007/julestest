@@ -105,7 +105,7 @@ export default function CourseItem({
 
   const playable = videos.filter((v) => !v.locked);
   const watched = playable.filter((v) => {
-    const e = progress[String(v.videoId)];
+    const e = progress[`${course.id}:${v.videoId}`];
     return e && e.d && e.t / e.d >= 0.9;
   }).length;
 
@@ -125,7 +125,7 @@ export default function CourseItem({
   const liveGroups = buildLiveGroups(liveVideos);
   const hasLive = liveVideos.length > 0;
   const ratioOf = (v: Video) => {
-    const e = progress[String(v.videoId)];
+    const e = progress[`${course.id}:${v.videoId}`];
     return e && e.d ? Math.min(1, e.t / e.d) : 0;
   };
   const renderRow = (v: Video) => (

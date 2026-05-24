@@ -37,7 +37,7 @@ type VidAgg = { cached: number; total: number | null; state: VidStatusDetail["st
 // countTasks 仅在线时统计 buffering/queued（DB 回退里无任务态，恒 0）。同时填充 perVid。
 function buildCourseStatus(
   courses: RollupCourses,
-  watched: Set<number>,
+  watched: Set<string>,
   perVid: Record<string, VidStatusDetail>,
   getVid: (videoId: number) => VidAgg | null,
   getThumb: (videoId: number) => VidStatusDetail["thumb"],
@@ -83,7 +83,7 @@ function buildCourseStatus(
       if (th === "ready") thumbsReady++;
       else if (th === "gen") thumbsGen++;
       else if (th === "error") thumbsError++;
-      if (watched.has(v.videoId)) watchedN++;
+      if (watched.has(`${c.productId}:${v.videoId}`)) watchedN++;
     }
     const lectures = c.vids.length;
     return {
@@ -116,22 +116,28 @@ let pending: Promise<CoursesStatus> | null = null;
 export async function GET() {
   const now = Date.now();
   if (last && now - last.at < 200) return Response.json(last.data);
-  if (pending) return Response.json(await pending);
-  pending = build()
-    .then((data) => {
-      last = { at: Date.now(), data };
-      return data;
-    })
-    .finally(() => {
-      pending = null;
-    });
-  return Response.json(await pending);
+  if (!pending) {
+    pending = build()
+      .then((data) => {
+        last = { at: Date.now(), data };
+        return data;
+      })
+      .finally(() => {
+        pending = null;
+      });
+  }
+  // build 失败时所有并发等待者优雅降级，不缓存失败结果，下次请求可重试。
+  try {
+    return Response.json(await pending);
+  } catch {
+    return Response.json({ error: "状态获取失败" }, { status: 503 });
+  }
 }
 
 async function build(): Promise<CoursesStatus> {
   const { courses, byVid } = await getCatalogRollup();
-  const progress = await prisma.progress.findMany({ select: { videoId: true, t: true, d: true } });
-  const watched = new Set(progress.filter((p) => p.d > 0 && p.t / p.d >= 0.9).map((p) => p.videoId));
+  const progress = await prisma.progress.findMany({ select: { productId: true, videoId: true, t: true, d: true } });
+  const watched = new Set(progress.filter((p) => p.d > 0 && p.t / p.d >= 0.9).map((p) => `${p.productId}:${p.videoId}`));
 
   let gw: GwStatus | null = null;
   let thumbBytes = 0;
@@ -289,7 +295,7 @@ async function mirror(gw: GwStatus) {
 async function fallback(
   courses: Awaited<ReturnType<typeof getCatalogRollup>>["courses"],
   byVid: Map<number, VidMeta>,
-  watched: Set<number>,
+  watched: Set<string>,
 ): Promise<CoursesStatus> {
   const [cs, ts] = await Promise.all([prisma.cacheStatus.findMany(), prisma.thumbStatus.findMany()]);
   const cacheBy = new Map(cs.map((r) => [r.videoId, r]));

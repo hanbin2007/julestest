@@ -38,7 +38,8 @@ export default function NoteCard({
   const [editing, setEditing] = React.useState(false);
   const [reader, setReader] = React.useState(false);
   const [draft, setDraft] = React.useState(note.text);
-  const dirty = !!draft.trim() && draft.trim() !== note.text;
+  // 两侧都 trim 后比较，避免存储内容有首尾空白时误判为「有改动」
+  const dirty = !!draft.trim() && draft.trim() !== note.text.trim();
 
   const startEdit = () => {
     setDraft(note.text);
@@ -47,7 +48,7 @@ export default function NoteCard({
   const cancel = () => setEditing(false);
   const save = () => {
     const next = draft.trim();
-    if (!next || next === note.text) return setEditing(false);
+    if (!next || next === note.text.trim()) return setEditing(false);
     onUpdate(note.videoId, note.id, next);
     setEditing(false);
   };

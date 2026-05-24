@@ -117,7 +117,7 @@ export default function PlayerView() {
   // 深链跳转(/?…&t=)指定的起播位置：优先于续看进度，被播放器消费一次后清空。
   const [seekOverride, setSeekOverride] = React.useState<number | undefined>(undefined);
   const startTime = React.useMemo(
-    () => seekOverride ?? (sel ? progressMap[String(sel.videoId)]?.t : undefined),
+    () => seekOverride ?? (sel ? progressMap[`${sel.courseId}:${sel.videoId}`]?.t : undefined),
     [seekOverride, sel, progressMap]
   );
   const accentTheme = React.useMemo(
@@ -168,8 +168,9 @@ export default function PlayerView() {
     return () => {
       cancelled = true;
     };
+    // videoId 跨产品可复用：加 productId 维度，切到同 videoId 的另一产品时重新取流。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [video?.videoId]);
+  }, [video?.videoId, video?.productId]);
 
   const selectVideo = React.useCallback((v: Video, c: Course) => {
     setSeekOverride(undefined);

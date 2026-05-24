@@ -13,7 +13,7 @@ export interface ProgressEntry {
 }
 export type ProgressMap = Record<string, ProgressEntry>;
 export interface ProgressMeta {
-  productId?: number;
+  productId: number; // 服务端现按 ${productId}:${videoId} 复合键存储，必填
   title?: string;
   courseName?: string;
 }

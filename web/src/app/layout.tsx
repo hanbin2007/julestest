@@ -14,6 +14,9 @@ export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
   themeColor: "#0e1116",
+  // iOS：软键盘弹出时缩小布局视口（而非平移可视视口），
+  // 避免聚焦批注输入框时整页被「顶上去」像在滚动。
+  interactiveWidget: "resizes-content",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

@@ -32,7 +32,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from ydcore.appconfig import load_config, save_config
 from ydcore.cache import DiskLRU, SEG_CACHE_BYTES
-from ydcore.hls import looks_like_m3u8, parse_range, parse_segments, proxify, rewrite_m3u8
+from ydcore.hls import UnsatisfiableRange, looks_like_m3u8, parse_range, parse_segments, proxify, rewrite_m3u8
 from ydcore.priority import PriorityGate
 from ydcore.util import which
 from ydcore.youdao_api import (
@@ -62,7 +62,8 @@ _ASSET_CACHE = {}
 
 
 def asset_bytes(name):
-    """本地代理自带前端依赖（hls.js / artplayer.js），首次从 CDN 取一次并缓存。"""
+    """本地代理自带前端依赖（hls.js / artplayer.js），首次从 CDN 取一次并缓存。
+    失败时不缓存空值，留给下次调用重试（避免启动时网络抖动永久 brick 播放器）。"""
     if name not in _ASSET_CACHE:
         try:
             req = urllib.request.Request(_ASSET_CDN[name],
@@ -70,8 +71,8 @@ def asset_bytes(name):
             with urllib.request.urlopen(req, timeout=30) as r:
                 _ASSET_CACHE[name] = r.read()
         except Exception:  # noqa: BLE001
-            _log.warning("前端依赖拉取失败（将返回空）：%s", name, exc_info=True)
-            _ASSET_CACHE[name] = b""
+            _log.warning("前端依赖拉取失败（下次请求会重试）：%s", name, exc_info=True)
+            return b""  # 本次失败返回空，但不入缓存，下次仍可重试
     return _ASSET_CACHE[name]
 
 
@@ -201,7 +202,9 @@ class Gateway:
                     for ln in text.splitlines() if ln.strip() and not ln.startswith("#")]
             for ln in text.splitlines():
                 if ln.startswith("#EXT-X-KEY") and 'URI="' in ln:
-                    urls.insert(0, urllib.parse.urljoin(m3u8, re.search(r'URI="([^"]+)"', ln).group(1)))
+                    _km = re.search(r'URI="([^"]+)"', ln)
+                    if _km:
+                        urls.insert(0, urllib.parse.urljoin(m3u8, _km.group(1)))
 
             def _grab(u):
                 if self.seg_cache.has((u, tvid)):
@@ -286,7 +289,9 @@ class Gateway:
         urls = list(segs)
         for ln in text.splitlines():
             if ln.startswith("#EXT-X-KEY") and 'URI="' in ln:
-                urls.insert(0, urllib.parse.urljoin(m3u8, re.search(r'URI="([^"]+)"', ln).group(1)))
+                _km = re.search(r'URI="([^"]+)"', ln)
+                if _km:
+                    urls.insert(0, urllib.parse.urljoin(m3u8, _km.group(1)))
 
         # 逐片顺序下载（并发本就收紧到 1：手动缓存最低优先，抢占时在途下载越少观看越稳）。
         # 每片前复查 buf_state：被暂停/取消则即时收手并返回该终态——已下分片留在缓存里，
@@ -421,7 +426,10 @@ class Gateway:
         # 先把密钥缓存好
         for line in text.splitlines():
             if line.startswith("#EXT-X-KEY") and 'URI="' in line:
-                kabs = urllib.parse.urljoin(m3u8, re.search(r'URI="([^"]+)"', line).group(1))
+                _km = re.search(r'URI="([^"]+)"', line)
+                if not _km:
+                    continue
+                kabs = urllib.parse.urljoin(m3u8, _km.group(1))
                 if not self.seg_cache.has((kabs, vid)):
                     try:
                         kd, kc, _ = self.pri_fetch(1, hdrs, kabs)
@@ -478,9 +486,11 @@ class Gateway:
                 if ovid != vid:
                     ev.set()  # 暂停其它正在下的
             cur = self.pf_threads.get(vid)
-            if cur and cur[0].is_alive():
+            # 仅当线程存活且 stop-Event 未被 set 时才视为"活跃 worker"；
+            # stop-Event 已 set 说明线程正在退出（如 A→B→A 快切），需重建。
+            if cur and cur[0].is_alive() and not cur[1].is_set():
                 return
-            ev = threading.Event()
+            ev = threading.Event()  # 新的未 set Event，不能复用旧的
             t = threading.Thread(target=self._prefetch_worker, args=(vid, m3u8, ev), daemon=True)
             self.pf_threads[vid] = (t, ev)
             t.start()
@@ -966,7 +976,15 @@ def make_handler(gateway):
 
         def _serve_blob(self, data, ctype, range_header):
             total = len(data)
-            rng = parse_range(range_header, total)
+            try:
+                rng = parse_range(range_header, total)
+            except UnsatisfiableRange:
+                # RFC 7233 §4.4：Range 不可满足，返回 416 + Content-Range: bytes */total
+                self._send_bytes(416, b"", ctype, {
+                    "Accept-Ranges": "bytes",
+                    "Content-Range": "bytes */%d" % total,
+                })
+                return
             if rng is None:
                 self._send_bytes(200, data, ctype, {"Accept-Ranges": "bytes"})
                 return

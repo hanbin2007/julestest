@@ -138,8 +138,12 @@ export const syncYoudaoProgress = (productId?: number) =>
     productId ? { productId } : {},
   );
 
-export const getNotes = (videoId: number) =>
-  fetcher<{ notes: Note[] }>(`/api/notes?videoId=${videoId}`);
+// productId 缺省(null)时不带该参数：服务端按 videoId 返回全部同讲笔记（向后兼容）。
+// 注意：不要传空串 &productId=（服务端会解析成 0 而过滤失效）——为 null 时整个省略。
+export const getNotes = (videoId: number, productId: number | null = null) =>
+  fetcher<{ notes: Note[] }>(
+    `/api/notes?videoId=${videoId}` + (productId != null ? `&productId=${productId}` : ""),
+  );
 export const addNote = (
   videoId: number,
   productId: number | null, // 创建时绑课;服务端据此派生 courseName/lessonTitle 快照
@@ -148,10 +152,16 @@ export const addNote = (
   strokes?: string,
 ) =>
   postJson<{ note: Note; notes: Note[] }>("/api/notes/add", { videoId, productId, t, text, strokes });
-export const updateNote = (videoId: number, id: string, text: string, strokes?: string) =>
-  postJson<{ ok: boolean; notes: Note[] }>("/api/notes/update", { videoId, id, text, strokes });
-export const deleteNote = (videoId: number, id: string) =>
-  postJson<{ ok: boolean; notes: Note[] }>("/api/notes/delete", { videoId, id });
+export const updateNote = (
+  videoId: number,
+  id: string,
+  text: string,
+  strokes?: string,
+  productId?: number | null, // 可选：让服务端按产品作用域返回笔记列表
+) =>
+  postJson<{ ok: boolean; notes: Note[] }>("/api/notes/update", { videoId, id, text, strokes, productId });
+export const deleteNote = (videoId: number, id: string, productId?: number | null) =>
+  postJson<{ ok: boolean; notes: Note[] }>("/api/notes/delete", { videoId, id, productId });
 
 // 统一管理：全量富化笔记 + 统计；批量删除（按全局唯一 id）。
 export const getAllNotes = () =>

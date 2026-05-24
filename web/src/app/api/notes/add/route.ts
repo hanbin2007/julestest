@@ -32,7 +32,12 @@ export async function POST(req: NextRequest) {
   await prisma.note.create({
     data: { id, videoId, productId: productId ?? null, courseName, lessonTitle, t, text, strokes: strokes ?? null },
   });
-  const rows = await prisma.note.findMany({ where: { videoId }, orderBy: { t: "asc" } });
+  // 回包列表按 (videoId,productId) 收窄,避免把别课同 videoId 的笔记带回来;无 productId 时退化按 videoId。
+  const where =
+    productId == null
+      ? { videoId }
+      : { videoId, OR: [{ productId }, { productId: null }] };
+  const rows = await prisma.note.findMany({ where, orderBy: { t: "asc" } });
   const notes = rows.map((r) => ({ id: r.id, t: r.t, text: r.text, strokes: r.strokes, at: r.at.getTime() }));
   return Response.json({ note: notes.find((n) => n.id === id), notes });
 }

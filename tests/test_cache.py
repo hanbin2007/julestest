@@ -94,3 +94,76 @@ def test_missing_index_is_silent(tmp_path, caplog):
     with caplog.at_level(logging.WARNING):
         _CLS(1024, persist_dir=str(tmp_path))
     assert not any("缓存索引损坏" in r.message for r in caplog.records)
+
+
+# ---- Bug 1: put() 原子性 ----
+
+def test_put_no_tmp_leftover(tmp_path):
+    """put() 成功后不应有 .tmp 文件残留，且可正常 round-trip。"""
+    c = _CLS(1024, persist_dir=str(tmp_path))
+    key = ("https://a/seg0.ts", "v1")
+    c.put(key, _blob(8))
+    ctype, data = c.get(key)
+    assert data == b"x" * 8
+    leftover = [f for f in (tmp_path).iterdir() if f.suffix == ".tmp"]
+    assert leftover == [], f"意外的 .tmp 文件残留: {leftover}"
+
+
+def test_put_failed_write_does_not_update_meta(tmp_path, monkeypatch):
+    """os.replace 抛异常时，meta 不应更新（key 不进缓存，无 .tmp 残留）。"""
+    import os as _os
+    real_replace = _os.replace
+
+    def _fail_replace(src, dst):
+        # 只在写段文件时失败（非 index.json），模拟磁盘满
+        if dst.endswith(".tmp") or "index" in dst:
+            return real_replace(src, dst)
+        raise OSError("磁盘满（模拟）")
+
+    c = _CLS(1024, persist_dir=str(tmp_path))
+    key = ("https://a/seg_fail.ts", "v1")
+    monkeypatch.setattr(_os, "replace", _fail_replace)
+    c.put(key, _blob(16))
+    monkeypatch.undo()
+    assert key not in c.meta, "写失败时 meta 不应记录该 key"
+    leftover = list((tmp_path).glob("*.tmp"))
+    assert leftover == [], f"写失败后有 .tmp 残留: {leftover}"
+
+
+# ---- Bug 2: dirty 标志在 IO 失败时恢复 ----
+
+def test_dirty_restored_on_flush_failure(tmp_path, monkeypatch):
+    """index 落盘失败时，_dirty 应保持/恢复为 True，下次 flush 能重试。"""
+    import os as _os
+    real_replace = _os.replace
+
+    c = _CLS(1024, persist_dir=str(tmp_path))
+    key = ("https://a/seg0.ts", "v1")
+    c.put(key, _blob(4))
+    assert c._dirty is True
+
+    # 让 index.json 落盘的 os.replace 失败
+    def _fail_index_replace(src, dst):
+        if "index" in dst:
+            raise OSError("磁盘满（模拟）")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(_os, "replace", _fail_index_replace)
+    c._save_index()   # 同步调用，IO 失败
+    monkeypatch.undo()
+    assert c._dirty is True, "_dirty 在 IO 失败后应恢复为 True"
+
+
+# ---- Bug 3: 索引损坏时不删合法文件 ----
+
+def test_corrupt_index_preserves_existing_segment_files(tmp_path):
+    """index.json 损坏时，已存在的段文件不应被当作孤儿删除。"""
+    import hashlib
+    # 写一个假的段文件（文件名任意，不需要是真实 sha1）
+    seg_file = tmp_path / "deadbeef1234567890abcdef1234567890abcdef"
+    seg_file.write_bytes(b"valid segment data")
+    # 写损坏的 index.json
+    (tmp_path / "index.json").write_text("{invalid json", encoding="utf-8")
+    # 构造缓存实例（会触发 _load_index）
+    c = _CLS(1024, persist_dir=str(tmp_path))
+    assert seg_file.exists(), "索引损坏时不应删除已存在的段文件"

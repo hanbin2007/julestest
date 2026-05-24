@@ -12,15 +12,20 @@ export function useProgressMap(): ProgressMap {
   return data?.progress ?? {};
 }
 
-// productId:建笔记时绑课用（来自当前 sel.courseId）。读单讲列表不需要它，仅创建时透传。
+// productId:笔记按产品作用域读 + 建笔记时绑课用（来自当前 sel.courseId）。
+// SWR key 与 getNotes 的 URL 必须一致：productId 为 null 时整个省略该参数（不可传空串）。
 export function useNotes(videoId: number | null, productId: number | null = null) {
-  const key = videoId == null ? null : `/api/notes?videoId=${videoId}`;
+  const key =
+    videoId == null
+      ? null
+      : `/api/notes?videoId=${videoId}` + (productId != null ? `&productId=${productId}` : "");
   const { data, mutate } = useSWR(
     key,
-    () => api.getNotes(videoId as number),
+    () => api.getNotes(videoId as number, productId),
     { revalidateOnFocus: true },
   );
   const notes: Note[] = data?.notes ?? [];
+  type NotesData = { notes: Note[] };
 
   const add = async (t: number, text: string, snap?: string | null, strokes?: string) => {
     if (videoId == null || !text.trim()) return;
@@ -39,7 +44,10 @@ export function useNotes(videoId: number | null, productId: number | null = null
         return { notes: r.notes };
       },
       {
-        optimisticData: { notes: [...notes, optimistic].sort((a, b) => a.t - b.t) },
+        // 函数式：基于当前缓存而非闭包快照，避免连续快速操作互相覆盖（闪烁）
+        optimisticData: (cur) => ({
+          notes: [...((cur as NotesData | undefined)?.notes ?? []), optimistic].sort((a, b) => a.t - b.t),
+        }),
         rollbackOnError: true,
         revalidate: false,
       },
@@ -52,7 +60,7 @@ export function useNotes(videoId: number | null, productId: number | null = null
     const next = text.trim();
     await mutate(
       async () => {
-        const r = await api.updateNote(videoId, id, next, strokes);
+        const r = await api.updateNote(videoId, id, next, strokes, productId);
         // 再编辑批注：覆盖该笔记的合成图（snapshot 通道按 id 覆盖、已去 immutable 缓存）
         if (snap) {
           try {
@@ -64,9 +72,11 @@ export function useNotes(videoId: number | null, productId: number | null = null
         return { notes: r.notes };
       },
       {
-        optimisticData: {
-          notes: notes.map((n) => (n.id === id ? { ...n, text: next, ...(strokes !== undefined && { strokes }) } : n)),
-        },
+        optimisticData: (cur) => ({
+          notes: ((cur as NotesData | undefined)?.notes ?? []).map((n) =>
+            n.id === id ? { ...n, text: next, ...(strokes !== undefined && { strokes }) } : n,
+          ),
+        }),
         rollbackOnError: true,
         revalidate: false,
       },
@@ -77,9 +87,11 @@ export function useNotes(videoId: number | null, productId: number | null = null
   const remove = async (id: string) => {
     if (videoId == null) return;
     await mutate(
-      async () => ({ notes: (await api.deleteNote(videoId, id)).notes }),
+      async () => ({ notes: (await api.deleteNote(videoId, id, productId)).notes }),
       {
-        optimisticData: { notes: notes.filter((n) => n.id !== id) },
+        optimisticData: (cur) => ({
+          notes: ((cur as NotesData | undefined)?.notes ?? []).filter((n) => n.id !== id),
+        }),
         rollbackOnError: true,
         revalidate: false,
       },
@@ -99,7 +111,12 @@ export function useAllNotes() {
   const notes: EnrichedNote[] = data?.notes ?? [];
   const stats: NotesStats = data?.stats ?? { total: 0, videos: 0, courses: 0 };
 
-  const revalidateVideo = (videoId: number) => globalMutate(`/api/notes?videoId=${videoId}`);
+  // 单讲 key 现已带 &productId 变体，按前缀匹配重验该 videoId 的所有变体。
+  // 锚定边界（精确等于或后跟 &），避免 videoId=10 误匹配 100/101 等。
+  const revalidateVideo = (videoId: number) => {
+    const base = `/api/notes?videoId=${videoId}`;
+    return globalMutate((k) => typeof k === "string" && (k === base || k.startsWith(base + "&")));
+  };
 
   const update = async (videoId: number, id: string, text: string) => {
     const next = text.trim();

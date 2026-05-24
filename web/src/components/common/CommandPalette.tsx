@@ -93,7 +93,7 @@ export default function CommandPalette({
           )}
           {results.map((r, i) => (
             <ListItemButton
-              key={r.v.videoId}
+              key={`${r.courseId}:${r.v.videoId}`}
               selected={i === idx}
               onMouseEnter={() => setIdx(i)}
               onClick={() => pick(r)}

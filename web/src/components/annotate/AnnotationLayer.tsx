@@ -517,6 +517,44 @@ export default function AnnotationLayer({ api, video }: { api: AnnotationApi; vi
     apiRef.current.push(d);
   };
 
+  // pointercancel：系统手势（下拉通知、浏览器滚动接管等）取消指针时放弃进行中的操作，不提交。
+  // 各分支只丢弃中间态，不写入 undo 历史，画布还原到操作前状态。
+  const onCancel = () => {
+    // 区域橡皮：丢弃工作副本，还原到操作前的对象列表（不提交任何擦除）
+    if (workRef.current) {
+      workRef.current = null;
+      lastEraseRef.current = null;
+      eraseChangedRef.current = false;
+      eraserCursorRef.current = null;
+      redrawCommitted(); // 读原始 apiRef.current.objects
+      drawLive();
+      return;
+    }
+    // 选区变换（移动/旋转/缩放）：丢弃预览，不调 commitDrag()，对象保持原始 transform
+    if (dragRef.current) {
+      dragRef.current = null;
+      previewRef.current = null;
+      excludeRef.current = null;
+      redrawCommitted(); // 排除列表已清，原始对象重新出现在 committed 层
+      drawLive();        // 清掉选区框预览
+      return;
+    }
+    // 套索轨迹：丢弃轨迹，不调 finishLasso()，不改变选区
+    if (lassoRef.current) {
+      lassoRef.current = null;
+      drawLive();
+      return;
+    }
+    // 画笔/形状笔画：丢弃未提交的笔画，不调 apiRef.current.push()
+    drawingRef.current = null;
+    if (rafRef.current != null) {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+    }
+    pendingRef.current.length = 0;
+    drawLive();
+  };
+
   const cursor =
     api.tool === "eraser-area"
       ? "none" // 画自定义圆形光标
@@ -534,7 +572,7 @@ export default function AnnotationLayer({ api, video }: { api: AnnotationApi; vi
         onPointerDown={onDown}
         onPointerMove={onMove}
         onPointerUp={onUp}
-        onPointerCancel={onUp}
+        onPointerCancel={onCancel}
         style={{ position: "absolute", inset: 0, touchAction: "none", cursor }}
       />
     </div>
