@@ -46,9 +46,27 @@ export default function AnnotationLayer({ api }: { api: AnnotationApi }) {
   const lastEraseRef = React.useRef<Pt | null>(null);
   const eraserCursorRef = React.useRef<{ x: number; y: number; r: number } | null>(null); // px
   const pendingRef = React.useRef<InkSample[]>([]);
+  const lastSampleRef = React.useRef<Pt | null>(null); // 抽稀用：上一个被接受的采样
   const rafRef = React.useRef<number | null>(null);
   const apiRef = React.useRef(api);
   apiRef.current = api;
+
+  // 抽稀相邻采样：丢掉与上一个接受点距离 < MIN_SAMPLE_DIST(px) 的采样。120Hz + 240Hz Pencil
+  // 聚合会塞进大量近重合点，让每帧 getStroke 越画越慢；抽稀后笔形不变（perfect-freehand 仍平滑）。
+  const MIN_SAMPLE_DIST = 1.2;
+  const acceptSamples = (raw: InkSample[]): InkSample[] => {
+    const { w, h } = sizeRef.current;
+    const out: InkSample[] = [];
+    let last = lastSampleRef.current;
+    for (const s of raw) {
+      if (!last || Math.hypot((s.x - last.x) * w, (s.y - last.y) * h) >= MIN_SAMPLE_DIST) {
+        out.push(s);
+        last = s;
+      }
+    }
+    lastSampleRef.current = last;
+    return out;
+  };
 
   const redrawCommitted = React.useCallback(() => {
     const ctx = committedRef.current?.getContext("2d");
@@ -222,7 +240,8 @@ export default function AnnotationLayer({ api }: { api: AnnotationApi }) {
         pendingRef.current.length = 0;
       }
       drawLive();
-      // 不自循环：onMove 每个事件都会再 schedule。
+      // 落笔期间持续按显示刷新率重画（ProMotion 120Hz），抬笔(drawingRef=null)即停，不空转。
+      if (drawingRef.current) scheduleRaf();
     });
   }, [drawLive]);
 
@@ -316,7 +335,8 @@ export default function AnnotationLayer({ api }: { api: AnnotationApi }) {
       return;
     }
     if (tool === "pen" || tool === "marker") {
-      const samples = extractSamples(e.nativeEvent, rectOf());
+      lastSampleRef.current = null; // 新一笔，重置抽稀基准（首点必被接受）
+      const samples = acceptSamples(extractSamples(e.nativeEvent, rectOf()));
       drawingRef.current = { kind: "ink", id: newId(), tool, color, width, samples, transform: identity() };
     } else if (tool === "line" || tool === "rect" || tool === "ellipse" || tool === "arrow") {
       const p = ptFrom(e);
@@ -387,7 +407,7 @@ export default function AnnotationLayer({ api }: { api: AnnotationApi }) {
     const d = drawingRef.current;
     if (!d) return;
     if (!isDrawingPointer(e.pointerType)) return;
-    if (d.kind === "ink") pendingRef.current.push(...extractSamples(e.nativeEvent, rectOf()));
+    if (d.kind === "ink") pendingRef.current.push(...acceptSamples(extractSamples(e.nativeEvent, rectOf())));
     else d.b = ptFrom(e);
     scheduleRaf();
   };

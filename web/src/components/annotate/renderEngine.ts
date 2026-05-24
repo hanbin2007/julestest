@@ -57,8 +57,10 @@ export function forwardTransformPt(local: Pt, t: Transform, w: number, h: number
 
 // ---- 手写墨迹（perfect-freehand）----
 
-const PEN = { thinning: 0.55, smoothing: 0.5, streamline: 0.45 };
-const MARKER = { thinning: 0, smoothing: 0.5, streamline: 0.45 }; // marker 等宽
+// streamline 越高，笔尖越「追不上笔」（橡皮筋感）。压低让跟手更紧、更顺滑；
+// 输入已按最小间距抽稀（见 AnnotationLayer），平滑主要交给 smoothing。
+const PEN = { thinning: 0.6, smoothing: 0.42, streamline: 0.22 };
+const MARKER = { thinning: 0, smoothing: 0.45, streamline: 0.28 }; // marker 等宽
 
 function inkOutlinePath(o: InkObject, w: number, h: number, last: boolean): Path2D | null {
   if (o.samples.length === 0) return null;
