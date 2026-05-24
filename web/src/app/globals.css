@@ -55,6 +55,15 @@ a {
   -webkit-user-select: text;
   user-select: text;
 }
+/* 网页全屏(art-fullscreen-web)时 artplayer 把播放器移到 <body> 直下，
+   此时播放器的可选祖先变成 <body>（默认 user-select:auto）——iPad 点/长按播放器
+   会改选中 <body>，原「整页大蓝块」bug 复发。全屏期间关掉 <body> 选中即可堵住。
+   （只在全屏期生效，不影响平时笔记/对话的文字选择；批注输入框上面已单独放开。） */
+body:has(.art-fullscreen-web) {
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
 
 /* 长按快进提示：artplayer 长按时只切换 .art-fast-forward 类、无任何视觉反馈，
    这里补一个顶部居中的胶囊提示（倍速恒为 FAST_FORWARD_VALUE=3）。
