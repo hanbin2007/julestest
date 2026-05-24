@@ -23,16 +23,22 @@ a {
   height: 100%;
 }
 
-/* iPad Safari：长按视频会触发系统“拷贝/实况文本(OCR)”浮层，
-   抢占触摸事件、打断 artplayer 的长按快进手势。
-   关闭原生长按浮层与文字选择即可让长按快进正常工作。
-   仅作用于播放器内部，不影响笔记/字幕等可选区域。 */
-.art-host .art-video-player,
-.art-host video,
-.art-host .art-poster {
+/* 播放器整体禁止文本选中 + 原生长按浮层：
+   - iPad Safari 点/长按视频（不可选）会选中最近的可选祖先（.art-host / 包裹盒），
+     整个播放器被刷成一大块蓝色选区；故对整棵 .art-host 子树关闭选中。
+   - 同时关闭 -webkit-touch-callout，避免长按弹出“拷贝/实况文本(OCR)”、抢占长按快进。
+   批注便签的输入框除外（下方重新开启），保证可正常编辑。 */
+.art-host,
+.art-host * {
   -webkit-touch-callout: none;
   -webkit-user-select: none;
   user-select: none;
+}
+.art-host input,
+.art-host textarea,
+.art-host [contenteditable="true"] {
+  -webkit-user-select: text;
+  user-select: text;
 }
 
 /* 长按快进提示：artplayer 长按时只切换 .art-fast-forward 类、无任何视觉反馈，

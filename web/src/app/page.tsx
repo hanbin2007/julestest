@@ -458,7 +458,8 @@ export default function PlayerView() {
           <ThemeProvider theme={accentTheme}>
             <Box sx={{ p: { xs: 1.5, md: 3 }, display: "flex", flexDirection: "column", alignItems: "center" }}>
               <ContinueWatchingRail onResume={resume} />
-              <Box sx={{ width: "100%", maxWidth: 1100 }}>
+              {/* 播放器+缓存条整体不可选中：iOS Safari 点/长按播放器会选中包裹盒成大蓝块 */}
+              <Box sx={{ width: "100%", maxWidth: 1100, userSelect: "none", WebkitUserSelect: "none" }}>
                 <Box
                   sx={{
                     position: "relative",
