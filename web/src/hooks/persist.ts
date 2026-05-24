@@ -12,7 +12,8 @@ export function useProgressMap(): ProgressMap {
   return data?.progress ?? {};
 }
 
-export function useNotes(videoId: number | null) {
+// productId:建笔记时绑课用（来自当前 sel.courseId）。读单讲列表不需要它，仅创建时透传。
+export function useNotes(videoId: number | null, productId: number | null = null) {
   const key = videoId == null ? null : `/api/notes?videoId=${videoId}`;
   const { data, mutate } = useSWR(
     key,
@@ -26,7 +27,7 @@ export function useNotes(videoId: number | null) {
     const optimistic: Note = { id: `tmp-${Date.now()}`, t, text: text.trim(), strokes: strokes ?? null, at: Date.now() };
     await mutate(
       async () => {
-        const r = await api.addNote(videoId, t, text.trim(), strokes);
+        const r = await api.addNote(videoId, productId, t, text.trim(), strokes);
         // 拿到服务端分配的 id 后，把记笔记那一刻抓的画面存为该笔记的截图
         if (snap && r.note) {
           try {

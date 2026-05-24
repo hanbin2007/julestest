@@ -8,7 +8,8 @@ import type { ChatEffort } from "@/lib/chatPrefs";
 // 按讲对话：SWR 拉历史 + 流式发送（读 SSE）。流式中把「待发用户消息 + 进行中的助手回复」
 // 叠加在历史之上展示；done 后 revalidate，让服务端落库的消息接管。
 
-export function useChat(videoId: number | null) {
+// productId:对话的课程归属标记（来自 sel.courseId），写库时记录;不参与 SWR key / resume。
+export function useChat(videoId: number | null, productId: number | null = null) {
   const key = videoId == null ? null : `/api/chat?videoId=${videoId}`;
   const { data, mutate } = useSWR(key, () => api.getChat(videoId as number), { revalidateOnFocus: false });
   const history: ChatMessage[] = data?.messages ?? [];
@@ -35,7 +36,7 @@ export function useChat(videoId: number | null) {
         const res = await fetch("/api/chat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ videoId: vid, text: text.trim(), image, effort }),
+          body: JSON.stringify({ videoId: vid, productId, text: text.trim(), image, effort }),
           signal: ctrl.signal,
         });
         if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
@@ -79,7 +80,7 @@ export function useChat(videoId: number | null) {
         await mutate(); // 拉回服务端落库的用户+助手消息
       }
     },
-    [videoId, streaming, mutate]
+    [videoId, productId, streaming, mutate]
   );
 
   const clear = React.useCallback(async () => {

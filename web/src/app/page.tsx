@@ -90,8 +90,8 @@ export default function PlayerView() {
   const idx = curList.findIndex((v) => v.videoId === sel?.videoId);
   const prev = idx > 0 ? curList[idx - 1] : null;
   const next = idx >= 0 && idx < curList.length - 1 ? curList[idx + 1] : null;
-  // 批注存/改笔记复用 useNotes（与笔记抽屉同一 SWR key，自动同步）
-  const notesApi = useNotes(video?.videoId ?? null);
+  // 批注存/改笔记复用 useNotes（与笔记抽屉同一 SWR key，自动同步）；productId 用于建笔记时绑课
+  const notesApi = useNotes(video?.videoId ?? null, sel?.courseId ?? null);
   // 悬浮工具开关（缺省视为开），持久化到偏好
   const { prefs, setPrefs } = usePrefs();
   const floatTools = prefs.floatTools !== false;
@@ -380,7 +380,7 @@ export default function PlayerView() {
       const v = a()?.video;
       if (v && video) {
         const snap = captureSnapshot();
-        void apiAddNote(video.videoId, Math.floor(v.currentTime), "书签").then((r) => {
+        void apiAddNote(video.videoId, sel?.courseId ?? null, Math.floor(v.currentTime), "书签").then((r) => {
           if (snap && r.note) void apiSaveNoteSnapshot(r.note.id, snap);
         });
         toast("已记书签");
@@ -562,6 +562,7 @@ export default function PlayerView() {
         open={notesOpen}
         onClose={() => setNotesOpen(false)}
         videoId={video?.videoId ?? null}
+        productId={sel?.courseId ?? null}
         getCurrentTime={() => artRef.current?.video?.currentTime ?? 0}
         getSnapshot={captureSnapshot}
         onSeek={(t) => {
@@ -592,6 +593,7 @@ export default function PlayerView() {
         open={chatOpen}
         onClose={closeChat}
         videoId={video?.videoId ?? null}
+        productId={sel?.courseId ?? null}
         prefill={chatPrefill}
         onConsumePrefill={() => setChatPrefill(null)}
         split={splitView}
