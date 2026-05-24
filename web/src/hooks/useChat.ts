@@ -3,6 +3,7 @@ import * as React from "react";
 import useSWR from "swr";
 import * as api from "@/lib/api";
 import type { ChatMessage } from "@/lib/store";
+import type { ChatEffort } from "@/lib/chatPrefs";
 
 // 按讲对话：SWR 拉历史 + 流式发送（读 SSE）。流式中把「待发用户消息 + 进行中的助手回复」
 // 叠加在历史之上展示；done 后 revalidate，让服务端落库的消息接管。
@@ -21,7 +22,7 @@ export function useChat(videoId: number | null) {
   React.useEffect(() => () => abortRef.current?.abort(), []);
 
   const send = React.useCallback(
-    async (text: string, image?: string) => {
+    async (text: string, image?: string, effort?: ChatEffort) => {
       const vid = videoId;
       if (vid == null || !text.trim() || streaming) return;
       setError(null);
@@ -34,7 +35,7 @@ export function useChat(videoId: number | null) {
         const res = await fetch("/api/chat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ videoId: vid, text: text.trim(), image }),
+          body: JSON.stringify({ videoId: vid, text: text.trim(), image, effort }),
           signal: ctrl.signal,
         });
         if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);

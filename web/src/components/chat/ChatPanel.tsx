@@ -2,8 +2,12 @@
 import * as React from "react";
 import {
   Box,
+  Button,
   Drawer,
   IconButton,
+  ListItemText,
+  Menu,
+  MenuItem,
   Stack,
   TextField,
   Tooltip,
@@ -15,10 +19,22 @@ import DeleteSweepRoundedIcon from "@mui/icons-material/DeleteSweepRounded";
 import AutoAwesomeRoundedIcon from "@mui/icons-material/AutoAwesomeRounded";
 import SplitscreenRoundedIcon from "@mui/icons-material/SplitscreenRounded";
 import CloseFullscreenRoundedIcon from "@mui/icons-material/CloseFullscreenRounded";
+import PsychologyRoundedIcon from "@mui/icons-material/PsychologyRounded";
+import CheckRoundedIcon from "@mui/icons-material/CheckRounded";
 
 export const CHAT_WIDTH = 420;
+import dynamic from "next/dynamic";
 import { useChat } from "@/hooks/useChat";
+import { usePrefs } from "@/hooks/persist";
 import { chatImageUrl } from "@/lib/api";
+import { EFFORT_LEVELS, DEFAULT_EFFORT, type ChatEffort } from "@/lib/chatPrefs";
+
+// 懒加载 Markdown + KaTeX：仅在真正渲染助教回复时才拉这份较大的 chunk/CSS，
+// 不拖累播放器页首屏。
+const Markdown = dynamic(() => import("./Markdown").then((m) => m.Markdown), {
+  ssr: false,
+  loading: () => null,
+});
 
 export interface ChatPrefill {
   text?: string;
@@ -56,11 +72,22 @@ function Bubble({
             sx={{ display: "block", maxWidth: "100%", borderRadius: (t) => t.radius.sm, mb: text ? 1 : 0 }}
           />
         )}
-        {text && (
-          <Typography variant="body2" sx={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
-            {text}
-            {pending && <Box component="span" sx={{ opacity: 0.5 }}> ▍</Box>}
-          </Typography>
+        {/* 用户消息保留原样纯文本；助教回复渲染 Markdown + LaTeX */}
+        {isUser ? (
+          text && (
+            <Typography variant="body2" sx={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+              {text}
+            </Typography>
+          )
+        ) : (
+          <>
+            {text && <Markdown>{text}</Markdown>}
+            {pending && (
+              <Box component="span" sx={{ opacity: 0.5 }}>
+                {text ? " ▍" : "思考中… ▍"}
+              </Box>
+            )}
+          </>
         )}
       </Box>
     </Box>
@@ -85,9 +112,13 @@ export default function ChatPanel({
   onToggleSplit?: () => void;
 }) {
   const { history, send, clear, streaming, draftReply, pendingUser, error } = useChat(videoId);
+  const { prefs, setPrefs } = usePrefs();
+  const effort: ChatEffort = prefs.chatEffort ?? DEFAULT_EFFORT;
   const [input, setInput] = React.useState("");
   const [attached, setAttached] = React.useState<string | null>(null); // dataURL
+  const [effortAnchor, setEffortAnchor] = React.useState<null | HTMLElement>(null);
   const scrollRef = React.useRef<HTMLDivElement>(null);
+  const effortLabel = EFFORT_LEVELS.find((l) => l.value === effort)?.label ?? "深入";
 
   // 来自批注「问 Claude」的预填：填入输入框 + 挂上画面截图
   React.useEffect(() => {
@@ -105,7 +136,7 @@ export default function ChatPanel({
   const doSend = () => {
     const text = input.trim();
     if (!text || streaming || videoId == null) return;
-    void send(text, attached ?? undefined);
+    void send(text, attached ?? undefined, effort);
     setInput("");
     setAttached(null);
   };
@@ -123,6 +154,34 @@ export default function ChatPanel({
           <Typography variant="h6" sx={{ flex: 1 }}>
             AI 助教
           </Typography>
+          {/* 思考等级：越高越深入也越慢 */}
+          <Tooltip title={`思考等级：${effortLabel}`}>
+            <Button
+              size="small"
+              color="inherit"
+              startIcon={<PsychologyRoundedIcon fontSize="small" />}
+              onClick={(e) => setEffortAnchor(e.currentTarget)}
+              sx={{ minWidth: 0, px: 1, color: "text.secondary", textTransform: "none" }}
+            >
+              {effortLabel}
+            </Button>
+          </Tooltip>
+          <Menu anchorEl={effortAnchor} open={!!effortAnchor} onClose={() => setEffortAnchor(null)}>
+            {EFFORT_LEVELS.map((l) => (
+              <MenuItem
+                key={l.value}
+                selected={l.value === effort}
+                onClick={() => {
+                  void setPrefs({ chatEffort: l.value });
+                  setEffortAnchor(null);
+                }}
+                sx={{ gap: 1 }}
+              >
+                <ListItemText primary={l.label} secondary={l.hint} />
+                {l.value === effort && <CheckRoundedIcon fontSize="small" color="primary" />}
+              </MenuItem>
+            ))}
+          </Menu>
           {onToggleSplit && (
             <Tooltip title={split ? "退出分屏" : "分屏（边看边聊）"}>
               <IconButton size="small" onClick={onToggleSplit} aria-label="toggle split">

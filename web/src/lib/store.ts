@@ -1,5 +1,6 @@
 // 状态类型定义。实际持久化已迁到服务端（Python 网关 + Next/SQLite），
 // 见 src/lib/api.ts(读写) 与 src/hooks/persist.ts(SWR hooks)。不再用 localStorage。
+import type { ChatEffort } from "./chatPrefs";
 
 export interface ProgressEntry {
   t: number; // 最近播放位置（秒）
@@ -71,6 +72,8 @@ export interface Prefs {
   rate: number;
   density: "comfortable" | "compact";
   floatTools?: boolean; // 播放器上常驻「批注/问AI」悬浮按钮（缺省视为开）
+  systemPrompt?: string; // AI 助教自定义系统提示词（空/缺省用内置默认）
+  chatEffort?: ChatEffort; // AI 助教思考等级（缺省 high）
 }
 
 export interface LastWatched {

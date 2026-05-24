@@ -24,7 +24,7 @@ const rid = () => `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 export async function POST(req: NextRequest) {
   const { data, error } = await parseBody(req, chatSchema);
   if (error) return error;
-  const { videoId, text, image } = data;
+  const { videoId, text, image, effort } = data;
 
   // 落用户消息（附图存盘）
   const userId = rid();
@@ -58,6 +58,15 @@ export async function POST(req: NextRequest) {
 
   const thread = await prisma.chatThread.findUnique({ where: { videoId } });
 
+  // 用户自定义系统提示词（存在 Setting('prefs').systemPrompt；空则用内置默认）
+  let systemPrompt: string | undefined;
+  try {
+    const row = await prisma.setting.findUnique({ where: { key: "prefs" } });
+    if (row) systemPrompt = (JSON.parse(row.value) as { systemPrompt?: string }).systemPrompt;
+  } catch {
+    /* ignore，退化为默认人格 */
+  }
+
   const enc = new TextEncoder();
   const send = (ctrl: ReadableStreamDefaultController, obj: unknown) =>
     ctrl.enqueue(enc.encode(`data: ${JSON.stringify(obj)}\n\n`));
@@ -67,7 +76,7 @@ export async function POST(req: NextRequest) {
       let finalText = "";
       let sessionId: string | null = null;
       try {
-        for await (const ev of askStream({ text, imageBase64, imageMediaType, sessionId: thread?.sessionId ?? undefined, context })) {
+        for await (const ev of askStream({ text, imageBase64, imageMediaType, sessionId: thread?.sessionId ?? undefined, context, systemPrompt, effort })) {
           if (req.signal.aborted) break;
           if (ev.type === "session") {
             sessionId = ev.sessionId;
