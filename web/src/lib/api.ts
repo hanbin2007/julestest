@@ -104,8 +104,14 @@ export const syncYoudaoProgress = (productId?: number) =>
 
 export const getNotes = (videoId: number) =>
   fetcher<{ notes: Note[] }>(`/api/notes?videoId=${videoId}`);
-export const addNote = (videoId: number, t: number, text: string, strokes?: string) =>
-  postJson<{ note: Note; notes: Note[] }>("/api/notes/add", { videoId, t, text, strokes });
+export const addNote = (
+  videoId: number,
+  productId: number | null, // 创建时绑课;服务端据此派生 courseName/lessonTitle 快照
+  t: number,
+  text: string,
+  strokes?: string,
+) =>
+  postJson<{ note: Note; notes: Note[] }>("/api/notes/add", { videoId, productId, t, text, strokes });
 export const updateNote = (videoId: number, id: string, text: string, strokes?: string) =>
   postJson<{ ok: boolean; notes: Note[] }>("/api/notes/update", { videoId, id, text, strokes });
 export const deleteNote = (videoId: number, id: string) =>

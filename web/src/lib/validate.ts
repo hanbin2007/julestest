@@ -9,6 +9,7 @@ const strokesField = z.string().max(1_048_576).optional();
 
 export const noteAddSchema = z.object({
   videoId: z.coerce.number().int().positive(),
+  productId: z.coerce.number().int().nullish().catch(null), // 课程身份(创建时绑课);缺失→读路径兜底
   text: z.string().trim().min(1),
   t: z.coerce.number().int().min(0).catch(0), // 时间戳秒，非法→0（同原 Math.floor(Number||0)）
   strokes: strokesField,
@@ -24,6 +25,7 @@ export const noteUpdateSchema = z.object({
 // 内置 Claude 助教：发消息入参。image 为可选的 dataURL（批注画面截图）。
 export const chatSchema = z.object({
   videoId: z.coerce.number().int().positive(),
+  productId: z.coerce.number().int().nullish().catch(null), // 课程归属标记;不改对话/键逻辑
   text: z.string().trim().min(1),
   image: z.string().startsWith("data:image/").max(6_000_000).optional(),
   effort: z.enum(["low", "medium", "high", "xhigh"]).optional(), // 思考等级

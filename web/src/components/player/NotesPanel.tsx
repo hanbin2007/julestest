@@ -25,6 +25,7 @@ export default function NotesPanel({
   open,
   onClose,
   videoId,
+  productId,
   getCurrentTime,
   getSnapshot,
   onSeek,
@@ -32,11 +33,12 @@ export default function NotesPanel({
   open: boolean;
   onClose: () => void;
   videoId: number | null;
+  productId: number | null; // 建笔记时绑课
   getCurrentTime: () => number;
   getSnapshot?: () => string | null;
   onSeek: (t: number) => void;
 }) {
-  const { notes, add: addNote, update: updateNote, remove: removeNote } = useNotes(videoId);
+  const { notes, add: addNote, update: updateNote, remove: removeNote } = useNotes(videoId, productId);
   const [text, setText] = React.useState("");
   const [editId, setEditId] = React.useState<string | null>(null);
   const [draft, setDraft] = React.useState("");

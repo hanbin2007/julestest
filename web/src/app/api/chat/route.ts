@@ -24,7 +24,7 @@ const rid = () => `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 export async function POST(req: NextRequest) {
   const { data, error } = await parseBody(req, chatSchema);
   if (error) return error;
-  const { videoId, text, image, effort } = data;
+  const { videoId, productId, text, image, effort } = data;
 
   // 落用户消息（附图存盘）
   const userId = rid();
@@ -44,13 +44,16 @@ export async function POST(req: NextRequest) {
       }
     }
   }
-  await prisma.chatMessage.create({ data: { id: userId, videoId, role: "user", text, image: imageRef } });
+  await prisma.chatMessage.create({
+    data: { id: userId, videoId, productId: productId ?? null, role: "user", text, image: imageRef },
+  });
 
-  // 上下文：课程/讲标题（best-effort）
+  // 上下文：课程/讲标题（best-effort）。有 productId 则精确取课，否则回退 byVid。
   let context: { courseName?: string; lessonTitle?: string } | undefined;
   try {
     const rollup = await getCatalogRollup();
-    const meta = rollup.byVid.get(videoId);
+    const meta =
+      productId != null ? rollup.byCourseVid.get(`${productId}:${videoId}`) : rollup.byVid.get(videoId);
     if (meta) context = { courseName: meta.courseName, lessonTitle: meta.title ?? undefined };
   } catch {
     /* ignore */
@@ -92,14 +95,14 @@ export async function POST(req: NextRequest) {
         // 落助手消息 + 会话 id（用于下次 resume）
         if (finalText.trim()) {
           await prisma.chatMessage.create({
-            data: { id: `${rid()}-a`, videoId, role: "assistant", text: finalText },
+            data: { id: `${rid()}-a`, videoId, productId: productId ?? null, role: "assistant", text: finalText },
           });
         }
         if (sessionId) {
           await prisma.chatThread.upsert({
             where: { videoId },
-            create: { videoId, sessionId },
-            update: { sessionId },
+            create: { videoId, productId: productId ?? null, sessionId },
+            update: { sessionId, productId: productId ?? null },
           });
         }
         send(controller, { done: true });
