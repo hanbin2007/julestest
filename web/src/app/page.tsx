@@ -358,23 +358,42 @@ export default function PlayerView() {
       /* ignore */
     }
   };
-  // 打开对话/笔记面板：两者互斥（开一个关另一个）。网页全屏里 → 进分屏（退出 ArtPlayer 网页全屏，
-  // 否则面板被播放器 z-index:9999 盖住）；否则普通态走 Drawer（顺带退掉另一个面板可能残留的分屏）。
+  // 进分屏时若是从「网页全屏」退出来的，记一笔；关闭分屏时据此把网页全屏还原回去
+  // （否则用户从全屏开面板、关掉后会被丢回普通窗口态——这正是要修的 bug）。
+  const restoreFsWebRef = React.useRef(false);
+  const restoreFsWebIfNeeded = React.useCallback(() => {
+    if (!restoreFsWebRef.current) return;
+    restoreFsWebRef.current = false;
+    try {
+      const p = artRef.current;
+      if (p && !p.fullscreenWeb) p.fullscreenWeb = true;
+    } catch {
+      /* ignore */
+    }
+  }, []);
+  // 打开对话/笔记面板：两者互斥（开一个关另一个）。已在分屏 → 直接切到另一面板（保持分屏+还原标记）；
+  // 网页全屏里 → 进分屏（退出 ArtPlayer 网页全屏，否则被 z-index:9999 盖住，并记下要还原）；
+  // 否则普通态走 Drawer。
   const openPanel = React.useCallback(
     (kind: "chat" | "notes") => {
       setChatOpen(kind === "chat");
       setNotesOpen(kind === "notes");
-      if (fsWeb) {
+      if (activeSidePanel) {
+        setActiveSidePanel(kind); // 分屏内换面板，保留 restoreFsWebRef
+      } else if (fsWeb) {
+        restoreFsWebRef.current = true;
         exitWebFs();
         setActiveSidePanel(kind);
       } else {
-        setActiveSidePanel((cur) => (cur && cur !== kind ? null : cur));
+        restoreFsWebRef.current = false;
+        setActiveSidePanel(null); // 抽屉
       }
     },
-    [fsWeb]
+    [fsWeb, activeSidePanel]
   );
-  // 显式进分屏（面板头部「分屏」按钮）：无论是否网页全屏都切成并排窗格。
+  // 显式进分屏（面板头部「分屏」按钮）：记下当前是否网页全屏（抽屉态一般为否），再切成并排窗格。
   const enterSplit = React.useCallback((kind: "chat" | "notes") => {
+    restoreFsWebRef.current = !!artRef.current?.fullscreenWeb;
     setChatOpen(kind === "chat");
     setNotesOpen(kind === "notes");
     exitWebFs();
@@ -383,6 +402,7 @@ export default function PlayerView() {
   // 网页全屏里打开对话 → 自动切到分屏（覆盖「先开对话抽屉再进网页全屏」的边角）。
   React.useEffect(() => {
     if (chatOpen && fsWeb && activeSidePanel !== "chat") {
+      restoreFsWebRef.current = true;
       setNotesOpen(false);
       exitWebFs();
       setActiveSidePanel("chat");
@@ -391,22 +411,34 @@ export default function PlayerView() {
 
   const openChat = React.useCallback(() => openPanel("chat"), [openPanel]);
   const openNotes = React.useCallback(() => openPanel("notes"), [openPanel]);
-  const toggleSplit = React.useCallback(
-    () => (activeSidePanel === "chat" ? setActiveSidePanel(null) : enterSplit("chat")),
-    [activeSidePanel, enterSplit]
-  );
-  const toggleNotesSplit = React.useCallback(
-    () => (activeSidePanel === "notes" ? setActiveSidePanel(null) : enterSplit("notes")),
-    [activeSidePanel, enterSplit]
-  );
+  // 分屏头部「退出分屏」= 转抽屉态（窗口态）：用户主动选窗口，取消「还原全屏」的待办。
+  const toggleSplit = React.useCallback(() => {
+    if (activeSidePanel === "chat") {
+      restoreFsWebRef.current = false;
+      setActiveSidePanel(null);
+    } else enterSplit("chat");
+  }, [activeSidePanel, enterSplit]);
+  const toggleNotesSplit = React.useCallback(() => {
+    if (activeSidePanel === "notes") {
+      restoreFsWebRef.current = false;
+      setActiveSidePanel(null);
+    } else enterSplit("notes");
+  }, [activeSidePanel, enterSplit]);
+  // 关闭面板：若当前是分屏（而非抽屉），关闭后还原进分屏前的网页全屏。
   const closeChat = React.useCallback(() => {
     setChatOpen(false);
-    setActiveSidePanel((cur) => (cur === "chat" ? null : cur));
-  }, []);
+    if (activeSidePanel === "chat") {
+      setActiveSidePanel(null);
+      restoreFsWebIfNeeded();
+    }
+  }, [activeSidePanel, restoreFsWebIfNeeded]);
   const closeNotes = React.useCallback(() => {
     setNotesOpen(false);
-    setActiveSidePanel((cur) => (cur === "notes" ? null : cur));
-  }, []);
+    if (activeSidePanel === "notes") {
+      setActiveSidePanel(null);
+      restoreFsWebIfNeeded();
+    }
+  }, [activeSidePanel, restoreFsWebIfNeeded]);
 
   // 笔记跳转：同讲只 seek；跨讲原地切讲 + 定位（保持分屏布局，视频重新取流）。
   const jumpToNote = React.useCallback(
@@ -435,6 +467,7 @@ export default function PlayerView() {
       }
       setPendingEditId(id);
       setNotesOpen(false);
+      restoreFsWebRef.current = false; // 批注要整屏窗口态，不还原网页全屏
       setActiveSidePanel(null);
     },
     [sel]
