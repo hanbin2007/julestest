@@ -7,7 +7,9 @@ import GestureRoundedIcon from "@mui/icons-material/GestureRounded";
 import DeleteOutlineRoundedIcon from "@mui/icons-material/DeleteOutlineRounded";
 import CheckRoundedIcon from "@mui/icons-material/CheckRounded";
 import CloseRoundedIcon from "@mui/icons-material/CloseRounded";
+import FullscreenRoundedIcon from "@mui/icons-material/FullscreenRounded";
 import NotePreview from "./NotePreview";
+import MarkdownReader from "@/components/chat/MarkdownReader";
 import { fmtDur } from "@/lib/media";
 import type { EnrichedNote } from "@/lib/store";
 
@@ -34,8 +36,11 @@ export default function NoteCard({
 }) {
   const isAnnotation = !!note.strokes;
   const [editing, setEditing] = React.useState(false);
+  const [reader, setReader] = React.useState(false);
   const [draft, setDraft] = React.useState(note.text);
   const dirty = !!draft.trim() && draft.trim() !== note.text;
+  // 内容较长 / 含 Markdown·公式（如存进来的 AI 问答）才给「全屏阅读」，避免短笔记按钮过多
+  const richText = note.text.length > 80 || /\$|\n|^#|`/.test(note.text);
 
   const startEdit = () => {
     setDraft(note.text);
@@ -205,6 +210,13 @@ export default function NoteCard({
                 <PlayArrowRoundedIcon fontSize="small" />
               </IconButton>
             </Tooltip>
+            {richText && (
+              <Tooltip title="全屏阅读">
+                <IconButton size="small" onClick={stop(() => setReader(true))} aria-label="read note fullscreen">
+                  <FullscreenRoundedIcon fontSize="small" />
+                </IconButton>
+              </Tooltip>
+            )}
             <Tooltip title="编辑文字">
               <IconButton size="small" onClick={stop(startEdit)} aria-label="edit note">
                 <EditOutlinedIcon fontSize="small" />
@@ -229,6 +241,13 @@ export default function NoteCard({
           </>
         )}
       </Box>
+
+      <MarkdownReader
+        open={reader}
+        onClose={() => setReader(false)}
+        content={note.text}
+        title={`${note.lessonTitle} · ${fmtDur(note.t) || "0:00"}`}
+      />
     </Card>
   );
 }

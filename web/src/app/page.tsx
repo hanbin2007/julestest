@@ -595,6 +595,15 @@ export default function PlayerView() {
         onConsumePrefill={() => setChatPrefill(null)}
         split={splitView}
         onToggleSplit={toggleSplit}
+        onSaveNote={async (text) => {
+          const t = Math.floor(artRef.current?.video?.currentTime ?? 0);
+          try {
+            await notesApi.add(t, text);
+            toast("AI 问答已存入笔记");
+          } catch (e) {
+            toast("保存失败：" + (e as Error).message, { severity: "error" });
+          }
+        }}
       />
       <CommandPalette open={cmdOpen} onClose={() => setCmdOpen(false)} courses={courses} onPick={pickFromPalette} />
       <ShortcutsOverlay open={scOpen} onClose={() => setScOpen(false)} />
