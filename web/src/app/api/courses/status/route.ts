@@ -115,16 +115,22 @@ let pending: Promise<CoursesStatus> | null = null;
 export async function GET() {
   const now = Date.now();
   if (last && now - last.at < 200) return Response.json(last.data);
-  if (pending) return Response.json(await pending);
-  pending = build()
-    .then((data) => {
-      last = { at: Date.now(), data };
-      return data;
-    })
-    .finally(() => {
-      pending = null;
-    });
-  return Response.json(await pending);
+  if (!pending) {
+    pending = build()
+      .then((data) => {
+        last = { at: Date.now(), data };
+        return data;
+      })
+      .finally(() => {
+        pending = null;
+      });
+  }
+  // build 失败时所有并发等待者优雅降级，不缓存失败结果，下次请求可重试。
+  try {
+    return Response.json(await pending);
+  } catch {
+    return Response.json({ error: "状态获取失败" }, { status: 503 });
+  }
 }
 
 async function build(): Promise<CoursesStatus> {
