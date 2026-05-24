@@ -75,10 +75,17 @@ function inkOutlinePath(o: InkObject, w: number, h: number, last: boolean): Path
     simulatePressure: !hasRealPressure(o),
     last,
   });
-  if (outline.length < 2) return null;
+  const n = outline.length;
+  if (n < 2) return null;
+  // 用「过相邻轮廓点中点的二次曲线」连接（perfect-freehand 官方画法），而非直线段——
+  // 否则填充轮廓是多边形，曲线处看得见折面=锯齿。二次曲线在中点处相切→C1 连续→silhouette 平滑。
   const path = new Path2D();
   path.moveTo(outline[0][0], outline[0][1]);
-  for (let i = 1; i < outline.length; i++) path.lineTo(outline[i][0], outline[i][1]);
+  for (let i = 0; i < n; i++) {
+    const [x0, y0] = outline[i];
+    const [x1, y1] = outline[(i + 1) % n];
+    path.quadraticCurveTo(x0, y0, (x0 + x1) / 2, (y0 + y1) / 2);
+  }
   path.closePath();
   return path;
 }
