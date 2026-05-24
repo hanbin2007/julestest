@@ -25,6 +25,9 @@ export interface VidMeta {
 export interface CatalogRollup {
   courses: RollupCourse[];
   byVid: Map<number, VidMeta>;
+  // 精确按 (productId, videoId) 取课:videoId 跨课不唯一，byVid 会被后一门课覆盖，
+  // 故有 productId 的笔记/对话改走这个 key 才能绑对课。键为 `${productId}:${videoId}`。
+  byCourseVid: Map<string, VidMeta>;
 }
 
 let cache: CatalogRollup | null = null;
@@ -71,10 +74,14 @@ export async function getCatalogRollup(): Promise<CatalogRollup> {
   });
 
   const byVid = new Map<number, VidMeta>();
+  const byCourseVid = new Map<string, VidMeta>();
   for (const c of courses)
-    for (const v of c.vids)
-      byVid.set(v.videoId, { courseId: c.productId, courseName: c.name, title: v.title, kind: v.kind });
+    for (const v of c.vids) {
+      const meta: VidMeta = { courseId: c.productId, courseName: c.name, title: v.title, kind: v.kind };
+      byVid.set(v.videoId, meta);
+      byCourseVid.set(`${c.productId}:${v.videoId}`, meta);
+    }
 
-  cache = { courses, byVid };
+  cache = { courses, byVid, byCourseVid };
   return cache;
 }

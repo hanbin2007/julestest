@@ -1,8 +1,13 @@
 html,
 body {
   height: 100%;
+  height: 100dvh; /* 跟随动态视口（iOS 工具栏伸缩） */
   margin: 0;
   padding: 0;
+  /* 固定 app 外壳：文档自身不滚动，各页面用内部容器滚动，
+     避免 Safari 整个 shell 被拖动 / 橡皮筋回弹导致操作难受。 */
+  overflow: hidden;
+  overscroll-behavior: none;
 }
 * {
   box-sizing: border-box;
@@ -18,16 +23,30 @@ a {
   height: 100%;
 }
 
-/* iPad Safari：长按视频会触发系统“拷贝/实况文本(OCR)”浮层，
-   抢占触摸事件、打断 artplayer 的长按快进手势。
-   关闭原生长按浮层与文字选择即可让长按快进正常工作。
-   仅作用于播放器内部，不影响笔记/字幕等可选区域。 */
-.art-host .art-video-player,
-.art-host video,
-.art-host .art-poster {
+/* 视频按比例显示(letterbox)不拉伸：与批注画布锚定的「视频内容区矩形」(见 videoFit.ts)对齐，
+   否则非 16:9 视频的批注合成回原始帧会整体平移/缩放错位。iPad Safari 本就按比例 letterbox，
+   这里把桌面端也统一成 contain，使显示端与合成端几何一致。
+   (ArtPlayer 默认 .art-video 是 object-fit:fill —— 拉伸铺满，会破坏这个对齐。) */
+.art-host .art-video {
+  object-fit: contain;
+}
+
+/* 播放器整体禁止文本选中 + 原生长按浮层：
+   - iPad Safari 点/长按视频（不可选）会选中最近的可选祖先（.art-host / 包裹盒），
+     整个播放器被刷成一大块蓝色选区；故对整棵 .art-host 子树关闭选中。
+   - 同时关闭 -webkit-touch-callout，避免长按弹出“拷贝/实况文本(OCR)”、抢占长按快进。
+   批注便签的输入框除外（下方重新开启），保证可正常编辑。 */
+.art-host,
+.art-host * {
   -webkit-touch-callout: none;
   -webkit-user-select: none;
   user-select: none;
+}
+.art-host input,
+.art-host textarea,
+.art-host [contenteditable="true"] {
+  -webkit-user-select: text;
+  user-select: text;
 }
 
 /* 长按快进提示：artplayer 长按时只切换 .art-fast-forward 类、无任何视觉反馈，

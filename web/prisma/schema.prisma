@@ -46,31 +46,39 @@ model Progress {
 }
 
 model Note {
-  id      String   @id
-  videoId Int
-  t       Int      @default(0) // 时间戳（秒）
-  text    String
-  strokes String? // 矢量批注 JSON（归一化坐标的 Stroke[]）；普通文字笔记为 null
-  at      DateTime @default(now())
+  id          String   @id
+  videoId     Int
+  // 课程身份在创建时落库:videoId 跨课不唯一，靠 productId 绑对课;courseName/lessonTitle
+  // 是创建时的快照，目录被清/讲次下架时仍能显示与归类（读路径实时目录优先、它们兜底）。
+  productId   Int?
+  courseName  String?
+  lessonTitle String?
+  t           Int      @default(0) // 时间戳（秒）
+  text        String
+  strokes     String? // 矢量批注 JSON（归一化坐标的 Stroke[]）；普通文字笔记为 null
+  at          DateTime @default(now())
 
   @@index([videoId])
+  @@index([productId, videoId])
 }
 
 // ---- 内置 Claude 助教（按讲对话）----
 // ChatMessage 是 UI 渲染的真相源；模型上下文续接靠 ChatThread.sessionId（Agent SDK resume）。
 model ChatMessage {
-  id      String   @id
-  videoId Int
-  role    String // "user" | "assistant"
-  text    String
-  image   String? // 附图文件 id（用户消息可带批注画面，落盘在 chat-imgs/）
-  at      DateTime @default(now())
+  id        String   @id
+  videoId   Int
+  productId Int? // 课程归属标记（写入时记录）；不改 videoId 键与对话逻辑
+  role      String // "user" | "assistant"
+  text      String
+  image     String? // 附图文件 id（用户消息可带批注画面，落盘在 chat-imgs/）
+  at        DateTime @default(now())
 
   @@index([videoId])
 }
 
 model ChatThread {
   videoId   Int      @id
+  productId Int? // 课程归属标记（写入时记录）；键仍为 videoId，resume 逻辑不变
   sessionId String? // Claude Agent SDK 会话 id，用于多轮 resume
   updatedAt DateTime @updatedAt
 }

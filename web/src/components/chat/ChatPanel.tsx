@@ -153,6 +153,7 @@ export default function ChatPanel({
   open,
   onClose,
   videoId,
+  productId = null,
   prefill,
   onConsumePrefill,
   split = false,
@@ -162,13 +163,14 @@ export default function ChatPanel({
   open: boolean;
   onClose: () => void;
   videoId: number | null;
+  productId?: number | null; // 对话课程归属标记
   prefill?: ChatPrefill | null;
   onConsumePrefill?: () => void;
   split?: boolean;
   onToggleSplit?: () => void;
   onSaveNote?: (text: string) => void | Promise<void>; // 把一段问答存成当前讲的笔记
 }) {
-  const { history, send, clear, streaming, draftReply, pendingUser, error } = useChat(videoId);
+  const { history, send, clear, streaming, draftReply, pendingUser, error } = useChat(videoId, productId);
   const { prefs, setPrefs } = usePrefs();
   const effort: ChatEffort = prefs.chatEffort ?? DEFAULT_EFFORT;
   const [input, setInput] = React.useState("");

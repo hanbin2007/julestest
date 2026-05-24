@@ -45,7 +45,7 @@ export default function AnnotationOverlay({
   if (!host) return null;
   return createPortal(
     <>
-      <AnnotationLayer api={api} />
+      <AnnotationLayer api={api} video={art?.video as HTMLVideoElement | undefined} />
       <AnnotationToolbar
         api={api}
         bounds={host}
