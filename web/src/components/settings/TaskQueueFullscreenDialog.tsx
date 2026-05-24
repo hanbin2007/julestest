@@ -1,0 +1,62 @@
+"use client";
+import * as React from "react";
+import { AppBar, Box, Dialog, IconButton, Tab, Tabs, Toolbar, Typography } from "@mui/material";
+import CloseRoundedIcon from "@mui/icons-material/CloseRounded";
+import type { TaskItem, TaskVerb } from "@/types/api";
+import TaskRow, { TASK_TABS, taskKey } from "./TaskRow";
+
+// 全屏任务视图：面板每标签只显示前 20 条，这里展开同样的三标签但不截断，复用 TaskRow。
+export default function TaskQueueFullscreenDialog({
+  open,
+  onClose,
+  tasks,
+  completedTasks,
+  failedTasks,
+  busy,
+  onAction,
+}: {
+  open: boolean;
+  onClose: () => void;
+  tasks: TaskItem[];
+  completedTasks: TaskItem[];
+  failedTasks: TaskItem[];
+  busy: Set<string>;
+  onAction: (task: TaskItem, verb: TaskVerb) => void;
+}) {
+  const [tab, setTab] = React.useState(0);
+  const lists = [tasks, completedTasks, failedTasks];
+  const current = lists[tab] ?? [];
+
+  return (
+    <Dialog open={open} onClose={onClose} fullScreen>
+      <AppBar position="sticky" color="default" elevation={0} sx={{ borderBottom: (t) => `1px solid ${t.palette.divider}` }}>
+        <Toolbar sx={{ gap: 1 }}>
+          <Typography variant="h6" sx={{ flex: 1 }}>
+            任务队列
+          </Typography>
+          <IconButton onClick={onClose} edge="end" aria-label="关闭">
+            <CloseRoundedIcon />
+          </IconButton>
+        </Toolbar>
+        <Tabs value={tab} onChange={(_e, v) => setTab(v)} sx={{ px: { xs: 1.5, md: 3 } }}>
+          {TASK_TABS.map((t, i) => (
+            <Tab key={t.label} label={`${t.label} ${lists[i].length}`} />
+          ))}
+        </Tabs>
+      </AppBar>
+      <Box sx={{ maxWidth: 880, width: "100%", mx: "auto", p: { xs: 1.5, md: 3 } }}>
+        {current.length === 0 ? (
+          <Box sx={{ py: 8, textAlign: "center" }}>
+            <Typography variant="body2" color="text.disabled">
+              {TASK_TABS[tab].empty}
+            </Typography>
+          </Box>
+        ) : (
+          current.map((t) => (
+            <TaskRow key={taskKey(t)} task={t} busy={busy.has(taskKey(t))} onAction={(verb) => onAction(t, verb)} />
+          ))
+        )}
+      </Box>
+    </Dialog>
+  );
+}

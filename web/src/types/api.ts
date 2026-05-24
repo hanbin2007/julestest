@@ -116,7 +116,7 @@ export interface VidStatusDetail {
   cached: number; // 已缓存分片数（磁盘真相，含观看/预缓存/重启后残留）
   total: number | null; // 总分片数（已知时）
   bytes: number; // 该讲占用字节
-  state: "full" | "partial" | "cached" | "queued" | "working" | "done" | "error" | null;
+  state: "full" | "partial" | "cached" | "queued" | "working" | "paused" | "done" | "cancelled" | "error" | null;
   thumb: "ready" | "gen" | "error" | null;
 }
 export interface CourseStatus {
@@ -139,15 +139,29 @@ export interface CourseStatus {
   queued: number;
   watched: number; // t/d ≥ 0.9 的讲数
 }
+// 任务在面板里的呈现态：进行中(working/queued/paused) / 已完成(done/cancelled) / 失败(error)。
+export type TaskState = "working" | "queued" | "paused" | "done" | "cancelled" | "error";
+// 可对任务执行的操作（prefetch 只读、不接受任何操作）。
+export type TaskVerb = "pause" | "resume" | "cancel" | "retry";
+
 export interface TaskItem {
   vid: number;
   title: string;
   courseName: string;
   courseId: number;
   kind: "thumb" | "buffer" | "prefetch";
-  state: "working" | "queued";
+  state: TaskState;
   cached?: number;
   total?: number | null;
+}
+
+// 网关 /api/tasks/action 的返回：操作后即时复查到的最新状态（成功 ok=true）。
+export interface TaskActionResult {
+  ok: boolean;
+  vid: string;
+  kind: "buffer" | "thumb";
+  state: TaskState | null;
+  reason?: string | null;
 }
 // ---- 单讲逐片缓存 bitmap（/api/buffer/segments）：看课页 + 设置页缓存条 ----
 export interface SegmentMap {
@@ -179,7 +193,9 @@ export interface CoursesStatus {
     tier: "buffer" | "prefetch" | "thumb" | null;
     queue: { thumb: number; buffer: number };
   };
-  tasks: TaskItem[];
+  tasks: TaskItem[]; // 进行中：working / queued / paused
+  completedTasks: TaskItem[]; // 已完成：done / cancelled（仅本会话任务）
+  failedTasks: TaskItem[]; // 失败：error（可重试）
   health: {
     gatewayOnline: boolean;
     stale: boolean;

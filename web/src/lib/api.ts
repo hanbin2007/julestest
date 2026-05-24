@@ -9,6 +9,8 @@ import type {
   PlayResponse,
   SegmentsResponse,
   StatusResponse,
+  TaskActionResult,
+  TaskVerb,
   ThumbResponse,
   ThumbsStatus,
   Video,
@@ -75,6 +77,11 @@ export const batchThumbs = (videos: BatchThumbVideo[]) =>
   postJson<BatchResult>("/api/thumbs/batch", { videos });
 export const batchBuffer = (videos: BatchBufferVideo[]) =>
   postJson<BatchResult>("/api/buffer/batch", { videos });
+
+// 任务操作（暂停/继续/取消/重试）：转发网关 /api/tasks/action，返回操作后的最新状态。
+// 网关侧即时复查当前状态后再决策，幂等；非法转换返回 HTTP 409（postJson 会抛错）。
+export const taskAction = (kind: "buffer" | "thumb", vid: number, verb: TaskVerb) =>
+  postJson<TaskActionResult>("/api/tasks/action", { kind, vid, verb });
 
 export const proxiedPlayUrl = (url: string) => url; // /api/play 已返回 /p?... 同源路径
 export { pickM3u8 };

@@ -11,8 +11,9 @@ Gateway 持有一台网关实例的全部可变状态（原先散在 make_handle
                     内容（同清晰度），互相覆盖等价；读方只做存在性/长度判断。
   · seg_total[vid]  同上，写的是分片总数（同一值）。
   · pf_active["vid"]  仅在 pf_lock 内写；多处无锁读，读到旧值最多让 worker 多跑一轮即退出。
-有锁保护的状态：video_headers(vh_lock)、thumb_meta/thumb_active(thumb_lock)、
-buf_state(buf_lock)、pf_threads(pf_lock)、seg_cache(自带锁)。
+有锁保护的状态：video_headers(vh_lock)、
+thumb_meta/thumb_active/thumb_jobs/thumb_procs/thumb_session(thumb_lock)、
+buf_state/buf_jobs(buf_lock)、pf_threads(pf_lock)、seg_cache(自带锁)。
 """
 import concurrent.futures
 import json
@@ -105,8 +106,11 @@ class Gateway:
         self.thumb_dir = THUMB_DIR
         os.makedirs(self.thumb_dir, exist_ok=True)
         self.thumb_index_path = os.path.join(self.thumb_dir, "index.json")
-        self.thumb_meta = {}     # vid -> {"state": "gen"/"ready"/"error", ...}
+        self.thumb_meta = {}     # vid -> {"state": "gen"/"ready"/"error"/"cancelled", ...}
         self.thumb_active = set()  # 真正在 ffmpeg 生成中的 vid（区分"生成中"与"排队中"）
+        self.thumb_jobs = {}     # vid -> (video, m3u8, duration, tier)，供重试重新入队
+        self.thumb_procs = {}    # vid -> 运行中的 ffmpeg Popen，供取消时 terminate
+        self.thumb_session = set()  # 本会话真正排过队的缩略图 vid（区分"任务"与启动时预载的 ready）
         self.thumb_lock = threading.Lock()
         self.thumb_q = queue.Queue()
         self.have_ffmpeg = which("ffmpeg") is not None
@@ -123,7 +127,8 @@ class Gateway:
         # 整集缓冲（把整节课分片下到服务端磁盘缓存）：批量预缓冲 + 状态
         self.seg_total = {}      # vid -> 总分片数（已知时）
         self.seg_urls = {}       # vid -> 按播放顺序的分片绝对地址列表
-        self.buf_state = {}      # vid -> "queued"/"working"/"done"/"error"
+        self.buf_state = {}      # vid -> "queued"/"working"/"paused"/"done"/"error"/"cancelled"
+        self.buf_jobs = {}       # vid -> (video, m3u8)，供继续/重试重新入队
         self.buf_lock = threading.Lock()
         self.buf_q = queue.Queue()
 
@@ -156,16 +161,23 @@ class Gateway:
         while True:
             vid, m3u8, duration, tier = self.thumb_q.get()
             with self.thumb_lock:
+                # 出队复查：排队期间被取消的，直接跳过本次生成
+                if (self.thumb_meta.get(vid) or {}).get("state") == "cancelled":
+                    self.thumb_q.task_done()
+                    continue
                 self.thumb_active.add(vid)
             try:
                 self._gen_thumbs(vid, m3u8, duration, tier)
             except Exception as e:  # noqa: BLE001
                 _log.warning("缩略图生成失败 vid=%s", vid, exc_info=True)
                 with self.thumb_lock:
-                    self.thumb_meta[vid] = {"state": "error", "reason": str(e)}
+                    # 取消已是终态：别用 error 覆盖
+                    if (self.thumb_meta.get(vid) or {}).get("state") != "cancelled":
+                        self.thumb_meta[vid] = {"state": "error", "reason": str(e)}
             finally:
                 with self.thumb_lock:
                     self.thumb_active.discard(vid)
+                    self.thumb_procs.pop(vid, None)
                 self.thumb_q.task_done()
 
     def _gen_thumbs(self, vid, m3u8, duration, tier):
@@ -216,16 +228,28 @@ class Gateway:
                "-allowed_extensions", "ALL", "-extension_picky", "0",
                "-skip_frame", "nokey", "-i", proxied,
                "-an", "-vf", vf, "-frames:v", "1", "-q:v", "6", out, "-loglevel", "error"]
-        rc = subprocess.call(cmd)
-        if rc == 0 and os.path.exists(out):
-            with self.thumb_lock:
+        # 用 Popen 而非 call：保留进程句柄，取消任务时可 terminate 掉正在跑的 ffmpeg。
+        with self.thumb_lock:
+            proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
+            self.thumb_procs[vid] = proc
+        rc = proc.wait()
+        # 取消复查与终态落地必须在同一把锁内：否则二者之间有窗口，刚好取消进来会被 ready/error 覆盖。
+        # _save_thumb_index 自身要拿 thumb_lock（不可重入），故用 save_idx 标记、出锁后再存。
+        save_idx = False
+        with self.thumb_lock:
+            self.thumb_procs.pop(vid, None)
+            # 生成途中被取消（terminate）：保持 cancelled 终态，别落成 ready/error
+            if (self.thumb_meta.get(vid) or {}).get("state") == "cancelled":
+                return
+            if rc == 0 and os.path.exists(out):
                 self.thumb_meta[vid] = {"state": "ready", "url": "/thumbs/%s.jpg" % vid,
                                         "number": number, "column": THUMB_COLS,
                                         "width": THUMB_W, "height": THUMB_H}
-            self._save_thumb_index()
-        else:
-            with self.thumb_lock:
+                save_idx = True
+            else:
                 self.thumb_meta[vid] = {"state": "error", "reason": "ffmpeg rc=%d" % rc}
+        if save_idx:
+            self._save_thumb_index()
 
     def start_thumbs(self, video, m3u8, duration, tier=2):
         """video: {videoId,contentId,cardPackageId,productId}; m3u8: 低清地址。
@@ -238,6 +262,8 @@ class Gateway:
             if st and st["state"] in ("ready", "gen"):
                 return st
             self.thumb_meta[vid] = {"state": "gen"}
+            self.thumb_jobs[vid] = (video, m3u8, duration, tier)  # 供重试重新入队
+            self.thumb_session.add(vid)                            # 标记为本会话任务
         with self.vh_lock:
             self.video_headers["t_" + vid] = play_headers(self.session, video, m3u8)
         self.thumb_q.put((vid, m3u8, duration, tier))
@@ -262,42 +288,124 @@ class Gateway:
             if ln.startswith("#EXT-X-KEY") and 'URI="' in ln:
                 urls.insert(0, urllib.parse.urljoin(m3u8, re.search(r'URI="([^"]+)"', ln).group(1)))
 
-        def _grab(u):
+        # 逐片顺序下载（并发本就收紧到 1：手动缓存最低优先，抢占时在途下载越少观看越稳）。
+        # 每片前复查 buf_state：被暂停/取消则即时收手并返回该终态——已下分片留在缓存里，
+        # 继续时重新入队会被 seg_cache.has 跳过，等价于断点续传。
+        for u in urls:
+            with self.buf_lock:
+                st = self.buf_state.get(vid)
+            if st in ("paused", "cancelled"):
+                return st
             if self.seg_cache.has((u, vid)):
-                return
+                continue
             try:
                 d, c, _ = self.pri_fetch(2, th, u)
                 self.seg_cache.put((u, vid), (c or "video/mp2t", d))  # 每片下完即可被命中
             except Exception:  # noqa: BLE001
                 _log.debug("整集缓冲分片失败 vid=%s：%s", vid, u, exc_info=True)
-        # 并发收紧到 1：手动缓存最低优先，抢占时在途下载越少观看越稳。
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-            list(ex.map(_grab, urls))
+        return "done"
 
     def _buffer_worker(self):
         while True:
             video, m3u8 = self.buf_q.get()
             vid = str(video["videoId"])
             with self.buf_lock:
+                # 出队复查：排队期间被取消/继续顶替的旧条目直接丢弃（仅 queued 才真正开工）
+                if self.buf_state.get(vid) != "queued":
+                    self.buf_q.task_done()
+                    continue
                 self.buf_state[vid] = "working"
             try:
-                self._buffer_one(video, m3u8)
-                with self.buf_lock:
-                    self.buf_state[vid] = "done"
+                result = self._buffer_one(video, m3u8)  # "done"/"paused"/"cancelled"
             except Exception:  # noqa: BLE001
                 _log.warning("整集缓冲失败 vid=%s", vid, exc_info=True)
-                with self.buf_lock:
-                    self.buf_state[vid] = "error"
-            finally:
-                self.buf_q.task_done()
+                result = "error"
+            with self.buf_lock:
+                # 仅当仍是 working 才落地结果；执行途中被 action 改成 paused/cancelled 则遵从之。
+                # pop 也必须在该守卫内：否则"刚下完就被暂停"会误删重试上下文，导致继续无门。
+                if self.buf_state.get(vid) == "working":
+                    self.buf_state[vid] = result
+                    if result == "done":
+                        self.buf_jobs.pop(vid, None)  # 成功完成后释放重试上下文
+            self.buf_q.task_done()
 
     def start_buffer(self, video, m3u8):
         vid = str(video["videoId"])
         with self.buf_lock:
-            if self.buf_state.get(vid) in ("queued", "working"):
+            if self.buf_state.get(vid) in ("queued", "working", "paused"):
                 return
             self.buf_state[vid] = "queued"
+            self.buf_jobs[vid] = (video, m3u8)  # 供继续/重试重新入队
         self.buf_q.put((video, m3u8))
+
+    # ---- 任务操作（暂停/继续/取消/重试）------------------------------------
+    # 全部即时复查当前状态后再决策，幂等：非法转换返回 ok=False 而不抛错，便于前端
+    # 在 1s 轮询造成的状态漂移下安全重试。
+    def act_buffer(self, vid, verb):
+        """缓冲任务：pause/resume/cancel/retry。返回 {ok,vid,kind,state,reason?}。"""
+        vid = str(vid)
+        requeue = None
+        with self.buf_lock:
+            st = self.buf_state.get(vid)
+            job = self.buf_jobs.get(vid)
+            if verb == "pause":
+                ok = st == "working"
+                if ok:
+                    self.buf_state[vid] = "paused"  # 缓冲循环下一片处复查后收手
+            elif verb == "resume":
+                ok = st == "paused" and job is not None
+                if ok:
+                    self.buf_state[vid] = "queued"
+                    requeue = job
+            elif verb == "cancel":
+                ok = st in ("queued", "working", "paused")
+                if ok:
+                    self.buf_state[vid] = "cancelled"  # 排队中的靠出队复查丢弃；working 靠循环复查
+                    self.buf_jobs.pop(vid, None)
+            elif verb == "retry":
+                ok = st == "error" and job is not None
+                if ok:
+                    self.buf_state[vid] = "queued"
+                    requeue = job
+            else:
+                return {"ok": False, "vid": vid, "kind": "buffer", "state": st, "reason": "bad verb"}
+            new_state = self.buf_state.get(vid)
+        if requeue is not None:
+            self.buf_q.put(requeue)  # 队列自带锁，放在 buf_lock 外入队（与 start_buffer 一致）
+        reason = None if ok else "状态 %s 下不能执行 %s" % (st, verb)
+        return {"ok": ok, "vid": vid, "kind": "buffer", "state": new_state, "reason": reason}
+
+    def act_thumb(self, vid, verb):
+        """缩略图任务：cancel(=暂停)/retry。ffmpeg 是单次原子调用，无部分续传，故不支持 pause。"""
+        vid = str(vid)
+        proc_to_kill = None
+        requeue = None
+        with self.thumb_lock:
+            st = (self.thumb_meta.get(vid) or {}).get("state")
+            job = self.thumb_jobs.get(vid)
+            if verb == "cancel":
+                ok = st == "gen"  # gen 覆盖"排队中"与"正在 ffmpeg"
+                if ok:
+                    self.thumb_meta[vid] = {"state": "cancelled"}
+                    proc_to_kill = self.thumb_procs.get(vid)  # 正在跑则拿到句柄，下面 terminate
+            elif verb == "retry":
+                ok = st in ("error", "cancelled") and job is not None
+                if ok:
+                    self.thumb_meta[vid] = {"state": "gen"}
+                    requeue = job
+            else:
+                return {"ok": False, "vid": vid, "kind": "thumb", "state": st, "reason": "bad verb"}
+            new_state = (self.thumb_meta.get(vid) or {}).get("state")
+        if proc_to_kill is not None:
+            try:
+                proc_to_kill.terminate()
+            except Exception:  # noqa: BLE001
+                _log.debug("终止缩略图 ffmpeg 失败 vid=%s", vid, exc_info=True)
+        if requeue is not None:
+            _, m3u8, duration, tier = requeue
+            self.thumb_q.put((vid, m3u8, duration, tier))
+        reason = None if ok else "状态 %s 下不能执行 %s" % (st, verb)
+        return {"ok": ok, "vid": vid, "kind": "thumb", "state": new_state, "reason": reason}
 
     # ---- 自动预缓存 ------------------------------------------------------
     def _prefetch_worker(self, vid, m3u8, stop):
@@ -445,6 +553,8 @@ def make_handler(gateway):
                 self._api_thumbs_batch()
             elif parsed.path == "/api/buffer/batch":
                 self._api_buffer_batch()
+            elif parsed.path == "/api/tasks/action":
+                self._api_tasks_action()
             elif parsed.path == "/api/cache-dir":
                 self._api_set_cache_dir()
             else:
@@ -483,6 +593,33 @@ def make_handler(gateway):
                 self.gw.start_buffer(*bv)
                 queued += 1
             self._send_json({"queued": queued, "skipped": skipped})
+
+        def _api_tasks_action(self):
+            """任务操作统一入口：{verb, kind, vid}。verb∈pause/resume/cancel/retry。
+            网关侧即时复查当前状态再决策；返回操作后的最新状态（成功 200，非法转换 409）。
+            prefetch（正在看那讲的自动预缓存）由播放驱动、切走自停，故只读、不接受操作。"""
+            try:
+                payload = self._read_json()
+            except Exception as e:  # noqa: BLE001
+                self._send_json({"error": str(e)}, 400)
+                return
+            verb = payload.get("verb")
+            kind = payload.get("kind")
+            vid = str(payload.get("vid") or "")
+            if not vid or verb not in ("pause", "resume", "cancel", "retry"):
+                self._send_json({"error": "bad params"}, 400)
+                return
+            if kind == "buffer":
+                res = self.gw.act_buffer(vid, verb)
+            elif kind == "thumb":
+                if verb in ("pause", "resume"):
+                    self._send_json({"error": "缩略图不支持暂停/继续"}, 400)
+                    return
+                res = self.gw.act_thumb(vid, verb)
+            else:
+                self._send_json({"error": "该任务不可操作"}, 400)
+                return
+            self._send_json(res, 200 if res.get("ok") else 409)
 
         def _api_buffer_segments(self, qs):
             """逐片缓存 bitmap（"已缓存的地方"）。可传多个 vid；用 buckets 把分片压成
@@ -559,15 +696,18 @@ def make_handler(gateway):
             with gw.thumb_lock:
                 tstates = {k: v.get("state") for k, v in gw.thumb_meta.items()}
                 tactive = set(gw.thumb_active)
+                tsession = sorted(gw.thumb_session)  # 本会话排过队的缩略图任务
+            with gw.buf_lock:
+                bstates = dict(gw.buf_state)  # 一次持锁快照，避免并发遍历崩溃 + 供任务标签全量态
             stats = gw.seg_cache.vid_stats()  # 一次遍历拿到磁盘真相
             real, thumbb = stats["real"], stats["thumb"]
             vids = qs.get("videoId") or []  # 可选：只查这些 vid 的缓冲明细
             # 关键：枚举范围 = 磁盘已缓存 ∪ 本会话已知总数 ∪ 缓冲状态。覆盖"任何来源的缓存"。
             target = ([str(v) for v in vids] if vids
-                      else list(set(list(real.keys()) + list(gw.seg_total.keys()) + list(gw.buf_state.keys()))))
+                      else list(set(list(real.keys()) + list(gw.seg_total.keys()) + list(bstates.keys()))))
 
             def _state(vid, cached, total):
-                s = gw.buf_state.get(vid)
+                s = bstates.get(vid)
                 if s:
                     return s
                 if cached <= 0:
@@ -595,11 +735,13 @@ def make_handler(gateway):
                 "thumb": {"states": tstates, "ready": tready, "generating": tgen,
                           "working": sorted(tactive),
                           "queued_vids": [k for k in tgen if k not in tactive],
-                          "queued": gw.thumb_q.qsize(), "errors": terr},
+                          "queued": gw.thumb_q.qsize(), "errors": terr,
+                          "session": tsession},
                 "buffer": {"perVid": buffer, "bytes": gw.seg_cache.size, "limit": gw.seg_cache.max,
                            "queued": gw.buf_q.qsize(),
-                           "working": [k for k, s in gw.buf_state.items() if s == "working"],
-                           "queued_vids": [k for k, s in gw.buf_state.items() if s == "queued"]},
+                           "working": [k for k, s in bstates.items() if s == "working"],
+                           "queued_vids": [k for k, s in bstates.items() if s == "queued"],
+                           "states": bstates},
                 "live": {"active": gw.pf_active["vid"],
                          "playhead": ({gw.pf_active["vid"]: gw.playhead.get(gw.pf_active["vid"])}
                                       if gw.pf_active["vid"] else {}),

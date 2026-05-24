@@ -25,9 +25,9 @@ import CacheDirCard from "./CacheDirCard";
 import AssistantCard from "./AssistantCard";
 import CourseStatusGrid, { type CourseSort } from "./CourseStatusGrid";
 import CourseDetailDrawer from "./CourseDetailDrawer";
-import { batchThumbs, batchBuffer, getCourseVideos, syncYoudaoProgress } from "@/lib/api";
+import { batchThumbs, batchBuffer, getCourseVideos, syncYoudaoProgress, taskAction } from "@/lib/api";
 import { pickLow, pickM3u8 } from "@/lib/media";
-import type { CourseStatus, Video, VideoRow } from "@/types/api";
+import type { CourseStatus, TaskItem, TaskVerb, Video, VideoRow } from "@/types/api";
 
 const MK_THUMB = (v: Video) => ({
   videoId: v.videoId, contentId: v.contentId, cardPackageId: v.cardPackageId,
@@ -120,6 +120,20 @@ export default function SettingsView() {
       refresh();
     } catch (e) {
       toast("提交失败：" + (e as Error).message, { severity: "error" });
+    }
+  };
+
+  // 任务操作（暂停/继续/取消/重试）。prefetch 只读不会触发。无论成败都立即刷新一次，
+  // 让面板即时反映网关复查后的真实状态（轮询有 ~1s 延迟，操作后不等它）。
+  const handleTaskAction = async (task: TaskItem, verb: TaskVerb) => {
+    if (task.kind === "prefetch") return;
+    try {
+      await taskAction(task.kind, task.vid, verb);
+    } catch {
+      // 409=任务状态已变化（即时核查否决），刷新即可看到真实态，不弹错；其余网络错误同样靠刷新兜底。
+      toast("操作未生效，任务状态可能已变化", { severity: "info" });
+    } finally {
+      refresh();
     }
   };
 
@@ -221,9 +235,12 @@ export default function SettingsView() {
           <Box sx={{ flex: 1.3, minWidth: 240 }}>
             <TaskQueuePanel
               tasks={data?.tasks ?? []}
+              completedTasks={data?.completedTasks ?? []}
+              failedTasks={data?.failedTasks ?? []}
               bps={bps.bps}
               series={bps.series}
               queue={data?.activity.queue ?? { thumb: 0, buffer: 0 }}
+              onAction={handleTaskAction}
             />
           </Box>
         </Stack>

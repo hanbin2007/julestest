@@ -1,113 +1,101 @@
 "use client";
 import * as React from "react";
-import { Box, Chip, CircularProgress, LinearProgress, Tooltip, Typography } from "@mui/material";
+import { Box, Chip, IconButton, Tab, Tabs, Tooltip, Typography } from "@mui/material";
 import { SparkLineChart } from "@mui/x-charts/SparkLineChart";
-import DownloadRoundedIcon from "@mui/icons-material/DownloadRounded";
-import ImageRoundedIcon from "@mui/icons-material/ImageRounded";
-import BoltRoundedIcon from "@mui/icons-material/BoltRounded";
+import OpenInFullRoundedIcon from "@mui/icons-material/OpenInFullRounded";
 import { fmtBytes } from "@/lib/media";
-import type { TaskItem } from "@/types/api";
+import type { TaskItem, TaskVerb } from "@/types/api";
+import TaskRow, { TASK_TABS, taskKey } from "./TaskRow";
+import TaskQueueFullscreenDialog from "./TaskQueueFullscreenDialog";
 
-const KIND = {
-  buffer: { label: "缓冲", Icon: DownloadRoundedIcon, color: "primary" as const },
-  thumb: { label: "缩略图", Icon: ImageRoundedIcon, color: "secondary" as const },
-  prefetch: { label: "预缓存", Icon: BoltRoundedIcon, color: "info" as const },
-};
-
-function TaskRow({ task }: { task: TaskItem }) {
-  const k = KIND[task.kind];
-  const working = task.state === "working";
-  const pct = task.cached != null && task.total ? Math.min(100, (task.cached / task.total) * 100) : null;
-  return (
-    <Box sx={{ display: "flex", alignItems: "center", gap: 1, py: 0.5, px: 0.5 }}>
-      {/* State indicator: spinner for working, muted dot for queued */}
-      {working ? (
-        <CircularProgress size={14} thickness={6} />
-      ) : (
-        <Box sx={{ width: 14, display: "flex", justifyContent: "center", flexShrink: 0 }}>
-          <Box sx={{ width: 6, height: 6, borderRadius: "50%", bgcolor: "text.disabled" }} />
-        </Box>
-      )}
-      {/* Kind icon — consistent color per task type */}
-      <k.Icon sx={{ fontSize: 16, color: `${k.color}.main`, flexShrink: 0 }} />
-      {/* Title + course name + progress bar */}
-      <Box sx={{ minWidth: 0, flex: 1 }}>
-        <Typography variant="body2" noWrap title={task.title}>
-          {task.title}
-        </Typography>
-        <Typography variant="caption" color="text.secondary" noWrap title={task.courseName}>
-          {task.courseName}
-        </Typography>
-        {pct != null && (
-          <LinearProgress variant="determinate" value={pct} sx={{ mt: 0.5, height: 4, borderRadius: (t) => t.radius.full }} />
-        )}
-      </Box>
-      {/* Right column: status chip + segment count, right-aligned and vertically stacked */}
-      <Box sx={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 0.5, flexShrink: 0 }}>
-        <Chip
-          size="small"
-          variant="outlined"
-          color={working ? k.color : "default"}
-          label={working ? "进行中" : "排队"}
-          sx={{ height: 22, fontSize: 11 }}
-        />
-        {task.cached != null && (
-          <Typography variant="caption" color="text.secondary" sx={{ fontVariantNumeric: "tabular-nums" }}>
-            {task.cached}
-            {task.total ? `/${task.total}` : ""} 段
-          </Typography>
-        )}
-      </Box>
-    </Box>
-  );
-}
-const MemoRow = React.memo(TaskRow);
+const PANEL_CAP = 20; // 面板每标签只显示前 20 条，更多走「展开全屏」
 
 function TaskQueuePanel({
   tasks,
+  completedTasks,
+  failedTasks,
   bps,
   series,
   queue,
+  onAction,
 }: {
   tasks: TaskItem[];
+  completedTasks: TaskItem[];
+  failedTasks: TaskItem[];
   bps: number;
   series: number[];
   queue: { thumb: number; buffer: number };
+  onAction: (task: TaskItem, verb: TaskVerb) => Promise<void>;
 }) {
+  const [tab, setTab] = React.useState(0);
+  const [fsOpen, setFsOpen] = React.useState(false);
+  const [busy, setBusy] = React.useState<Set<string>>(new Set());
+
+  // 包一层管理 busy（动作在途禁用按钮，避免连点导致重复请求）。
+  const run = React.useCallback(
+    async (task: TaskItem, verb: TaskVerb) => {
+      const key = taskKey(task);
+      setBusy((s) => new Set(s).add(key));
+      try {
+        await onAction(task, verb);
+      } finally {
+        setBusy((s) => {
+          const n = new Set(s);
+          n.delete(key);
+          return n;
+        });
+      }
+    },
+    [onAction],
+  );
+
+  const lists = [tasks, completedTasks, failedTasks];
+  const current = lists[tab] ?? [];
+  const shown = current.slice(0, PANEL_CAP);
   const working = tasks.filter((t) => t.state === "working").length;
-  const total = tasks.length;
+
   return (
     <Box sx={{ display: "flex", flexDirection: "column", minHeight: 0, height: "100%" }}>
-      {/* Header: title + count chip + rate + sparkline.
-          flexWrap lets the right-side group wrap below the title on narrow widths
-          instead of squeezing or overflowing. */}
-      <Box
-        sx={{
-          display: "flex",
-          alignItems: "center",
-          flexWrap: "wrap",
-          gap: 1,
-          rowGap: 0.5,
-          mb: 1,
-        }}
-      >
+      {/* 头部：标题 + 计数 + 速率 + 折线 + 展开全屏。flexWrap 让右侧组窄屏时换行。 */}
+      <Box sx={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 1, rowGap: 0.5, mb: 0.5 }}>
         <Typography variant="subtitle2">任务队列</Typography>
-        <Chip size="small" label={`${working} 进行 · ${total} 总`} sx={{ height: 22, fontSize: 11 }} />
-        <Box sx={{ ml: "auto", display: "flex", alignItems: "center", gap: 1 }}>
+        <Chip size="small" label={`${working} 进行 · ${tasks.length} 总`} sx={{ height: 22, fontSize: 11 }} />
+        <Box sx={{ ml: "auto", display: "flex", alignItems: "center", gap: 0.5 }}>
           <Tooltip title="下载速率">
             <Typography variant="caption" color="text.secondary" sx={{ fontVariantNumeric: "tabular-nums" }}>
               {fmtBytes(bps)}/s
             </Typography>
           </Tooltip>
           {series.length > 1 && (
-            <Box sx={{ width: 84, height: 22 }} role="img" aria-label={`下载速率 ${fmtBytes(bps)} 每秒`}>
+            <Box sx={{ width: 72, height: 22 }} role="img" aria-label={`下载速率 ${fmtBytes(bps)} 每秒`}>
               <SparkLineChart data={series} height={22} showHighlight={false} area />
             </Box>
           )}
+          <Tooltip title="全屏查看全部任务">
+            <IconButton size="small" onClick={() => setFsOpen(true)} sx={{ p: 0.25 }} aria-label="展开全屏">
+              <OpenInFullRoundedIcon sx={{ fontSize: 16 }} />
+            </IconButton>
+          </Tooltip>
         </Box>
       </Box>
 
-      {/* Scrollable task list */}
+      {/* 标签：进行中 / 已完成 / 失败 */}
+      <Tabs
+        value={tab}
+        onChange={(_e, v) => setTab(v)}
+        variant="fullWidth"
+        sx={{
+          minHeight: 32,
+          mb: 0.5,
+          "& .MuiTab-root": { minHeight: 32, fontSize: 12, py: 0, textTransform: "none" },
+        }}
+      >
+        {TASK_TABS.map((t, i) => (
+          <Tab key={t.label} label={`${t.label} ${lists[i].length}`} />
+        ))}
+      </Tabs>
+
+      {/* 列表（可滚动） */}
       <Box
         sx={{
           flex: 1,
@@ -119,24 +107,25 @@ function TaskQueuePanel({
           px: 0.5,
         }}
       >
-        {total === 0 ? (
-          // Empty state: fill the container and center vertically so it
-          // looks intentional rather than a misaligned short label.
-          <Box
-            sx={{
-              height: "100%",
-              minHeight: 80,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-            }}
-          >
+        {current.length === 0 ? (
+          <Box sx={{ height: "100%", minHeight: 80, display: "flex", alignItems: "center", justifyContent: "center" }}>
             <Typography variant="caption" color="text.disabled">
-              暂无进行中的任务
+              {TASK_TABS[tab].empty}
             </Typography>
           </Box>
         ) : (
-          tasks.map((t) => <MemoRow key={`${t.kind}-${t.vid}`} task={t} />)
+          <>
+            {shown.map((t) => (
+              <TaskRow key={taskKey(t)} task={t} busy={busy.has(taskKey(t))} onAction={(verb) => run(t, verb)} />
+            ))}
+            {current.length > shown.length && (
+              <Box sx={{ py: 0.5, textAlign: "center" }}>
+                <Typography variant="caption" color="primary" sx={{ cursor: "pointer" }} onClick={() => setFsOpen(true)}>
+                  还有 {current.length - shown.length} 条，展开全屏查看全部
+                </Typography>
+              </Box>
+            )}
+          </>
         )}
       </Box>
 
@@ -145,6 +134,16 @@ function TaskQueuePanel({
           队列深度：缓冲 {queue.buffer} · 缩略图 {queue.thumb}
         </Typography>
       )}
+
+      <TaskQueueFullscreenDialog
+        open={fsOpen}
+        onClose={() => setFsOpen(false)}
+        tasks={tasks}
+        completedTasks={completedTasks}
+        failedTasks={failedTasks}
+        busy={busy}
+        onAction={run}
+      />
     </Box>
   );
 }

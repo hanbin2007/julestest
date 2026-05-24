@@ -8,7 +8,7 @@ export const dynamic = "force-dynamic";
 
 // 网关 /api/status 的(增强后)形状
 interface GwStatus {
-  thumb: { states: Record<string, string>; ready: number; generating: string[]; working: string[]; queued_vids: string[]; queued: number; errors: number };
+  thumb: { states: Record<string, string>; ready: number; generating: string[]; working: string[]; queued_vids: string[]; queued: number; errors: number; session?: string[] };
   buffer: {
     perVid: Record<string, { cached: number; total: number | null; state: string | null; bytes: number; thumbBytes: number }>;
     bytes: number;
@@ -16,6 +16,7 @@ interface GwStatus {
     queued: number;
     working: string[];
     queued_vids: string[];
+    states?: Record<string, string>;
   };
   live?: { active: string | null; playhead: Record<string, number | null>; inFlight: { live: number; auto: number; manual: number } };
   ffmpeg: boolean;
@@ -189,12 +190,41 @@ async function build(): Promise<CoursesStatus> {
   const bufQueued = gw.buffer.queued_vids ?? [];
   const thWorking = gw.thumb.working ?? [];
   const thQueued = gw.thumb.queued_vids ?? [];
+  const bufStates = gw.buffer.states ?? {};
+  const thStates = gw.thumb.states ?? {};
+  const thSession = new Set(gw.thumb.session ?? []);
+
+  // 进行中：缓冲 working/queued/paused + 预缓存(只读) + 缩略图 working/queued。
+  // working/queued/paused 三者天然互斥：网关在同一把 buf_lock 快照里同时算出 buffer.working
+  // 与 buffer.states，同一 vid 不会既在 working 列表又被 paused 扫描到，故无重复。
   const tasks: TaskItem[] = [];
   for (const v of bufWorking) tasks.push(mk(v, "buffer", "working"));
+  for (const [v, st] of Object.entries(bufStates)) {
+    if (st === "paused") tasks.push(mk(v, "buffer", "paused"));
+  }
   if (gw.live?.active) tasks.push(mk(gw.live.active, "prefetch", "working"));
   for (const v of thWorking) tasks.push(mk(v, "thumb", "working"));
   for (const v of bufQueued) tasks.push(mk(v, "buffer", "queued"));
   for (const v of thQueued) tasks.push(mk(v, "thumb", "queued"));
+
+  // 已完成 / 失败：最近优先、各类限额（dict 末尾=最新）。缩略图只取本会话任务，
+  // 排除网关启动时从索引预载的历史 ready（那些是"有缩略图"而非"本次任务"）。
+  const CAP = 100;
+  const recent = <T,>(a: T[]) => a.slice(-CAP).reverse();
+  const bufEntries = Object.entries(bufStates);
+  const thEntries = Object.entries(thStates).filter(([v]) => thSession.has(v));
+  const completedTasks: TaskItem[] = [
+    ...recent(bufEntries.filter(([, st]) => st === "done" || st === "cancelled")).map(([v, st]) =>
+      mk(v, "buffer", st as TaskItem["state"]),
+    ),
+    ...recent(thEntries.filter(([, st]) => st === "ready" || st === "cancelled")).map(([v, st]) =>
+      mk(v, "thumb", st === "ready" ? "done" : "cancelled"),
+    ),
+  ];
+  const failedTasks: TaskItem[] = [
+    ...recent(bufEntries.filter(([, st]) => st === "error")).map(([v]) => mk(v, "buffer", "error")),
+    ...recent(thEntries.filter(([, st]) => st === "error")).map(([v]) => mk(v, "thumb", "error")),
+  ];
 
   // 孤儿：磁盘有缓存但不在目录里（避免几 GB 静默消失）
   const orphans = Object.entries(perVidGw)
@@ -222,6 +252,8 @@ async function build(): Promise<CoursesStatus> {
       queue: { thumb: gw.thumb.queued ?? 0, buffer: gw.buffer.queued ?? 0 },
     },
     tasks,
+    completedTasks,
+    failedTasks,
     health: {
       gatewayOnline: true,
       stale: false,
@@ -292,6 +324,8 @@ async function fallback(
     },
     activity: { downloadingVid: null, title: null, tier: null, queue: { thumb: 0, buffer: 0 } },
     tasks: [],
+    completedTasks: [], // 网关离线时无任务运行态可查（DB 镜像只有缓存进度，不含任务历史）
+    failedTasks: [],
     // 网关离线时无法得知缓存目录状态：cacheDirOk 保持 true，避免与“网关离线”重复报警。
     health: {
       gatewayOnline: false,
