@@ -8,6 +8,7 @@ export interface RawSample {
   x: number; // 0–1
   y: number; // 0–1
   p?: number; // 压感 0–1（仅 pen）
+  t: number; // 时间戳 ms（event.timeStamp）——One Euro 滤波需要 dt
 }
 
 const clamp01 = (n: number) => (n < 0 ? 0 : n > 1 ? 1 : n);
@@ -21,6 +22,7 @@ export function extractSamples(e: PointerEvent, rect: DOMRect): RawSample[] {
     x: clamp01((ce.clientX - rect.left) / rect.width),
     y: clamp01((ce.clientY - rect.top) / rect.height),
     p: isPen && ce.pressure > 0 ? ce.pressure : undefined,
+    t: ce.timeStamp,
   }));
 }
 

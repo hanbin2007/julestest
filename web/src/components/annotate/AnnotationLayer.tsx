@@ -11,7 +11,9 @@ import {
   applyAreaEraser,
   type RectPx,
 } from "./selection";
-import { extractSamples, isDrawingPointer } from "./inputPipeline";
+import { extractSamples, isDrawingPointer, type RawSample } from "./inputPipeline";
+import { StrokeFilter } from "./oneEuro";
+import { tuning } from "./inkTuning";
 import type { AnnotationApi } from "./useAnnotation";
 
 // 覆盖在播放器画面上的批注画布。两层：
@@ -47,21 +49,29 @@ export default function AnnotationLayer({ api }: { api: AnnotationApi }) {
   const eraserCursorRef = React.useRef<{ x: number; y: number; r: number } | null>(null); // px
   const pendingRef = React.useRef<InkSample[]>([]);
   const lastSampleRef = React.useRef<Pt | null>(null); // 抽稀用：上一个被接受的采样
+  const filterRef = React.useRef(new StrokeFilter()); // One Euro 去抖（位置/压感），每笔重置
   const rafRef = React.useRef<number | null>(null);
   const apiRef = React.useRef(api);
   apiRef.current = api;
 
-  // 抽稀相邻采样：丢掉与上一个接受点距离 < MIN_SAMPLE_DIST(px) 的采样。120Hz + 240Hz Pencil
-  // 聚合会塞进大量近重合点，让每帧 getStroke 越画越慢；抽稀后笔形不变（perfect-freehand 仍平滑）。
-  const MIN_SAMPLE_DIST = 1.2;
-  const acceptSamples = (raw: InkSample[]): InkSample[] => {
+  // 处理一批原始采样：① 对每个样本跑 One Euro 去抖（位置 x/y + 压感）——抖动主要在这里消除；
+  // ② 再按最小间距抽稀（120Hz+240Hz 聚合会塞大量近重合点，抽稀后每帧 getStroke 成本与笔长解耦）。
+  // 滤波对【每个】原始样本都跑（维持滤波器状态连续），抽稀只决定输出哪些。
+  const acceptSamples = (raw: RawSample[]): InkSample[] => {
     const { w, h } = sizeRef.current;
+    const f = filterRef.current;
     const out: InkSample[] = [];
     let last = lastSampleRef.current;
     for (const s of raw) {
-      if (!last || Math.hypot((s.x - last.x) * w, (s.y - last.y) * h) >= MIN_SAMPLE_DIST) {
-        out.push(s);
-        last = s;
+      // 位置在【像素空间】滤波——One Euro 的 minCutoff(Hz)/beta(对 px/s) 才有物理意义；
+      // 若在归一化 0–1 上滤，速度数值被画布尺寸缩小上千倍 → 误判为「慢」→ 过度平滑、笔迹严重滞后。
+      const fx = f.x.filter(s.x * w, s.t) / w;
+      const fy = f.y.filter(s.y * h, s.t) / h;
+      const fp = s.p === undefined ? undefined : f.p.filter(s.p, s.t);
+      if (!last || Math.hypot((fx - last.x) * w, (fy - last.y) * h) >= tuning.minSampleDist) {
+        const samp: InkSample = fp === undefined ? { x: fx, y: fy } : { x: fx, y: fy, p: fp };
+        out.push(samp);
+        last = samp;
       }
     }
     lastSampleRef.current = last;
@@ -336,6 +346,10 @@ export default function AnnotationLayer({ api }: { api: AnnotationApi }) {
     }
     if (tool === "pen" || tool === "marker") {
       lastSampleRef.current = null; // 新一笔，重置抽稀基准（首点必被接受）
+      filterRef.current.configure(
+        tuning.posMinCutoff, tuning.posBeta, tuning.dCutoff, tuning.pressMinCutoff, tuning.pressBeta
+      );
+      filterRef.current.reset();
       const samples = acceptSamples(extractSamples(e.nativeEvent, rectOf()));
       drawingRef.current = { kind: "ink", id: newId(), tool, color, width, samples, transform: identity() };
     } else if (tool === "line" || tool === "rect" || tool === "ellipse" || tool === "arrow") {

@@ -3,6 +3,7 @@
 // 这样非方形画布上旋转也不会被拉斜。命中/套索/区域橡皮都先把点逆变换回对象本地坐标。
 
 import getStroke from "perfect-freehand";
+import { tuning } from "./inkTuning";
 import {
   type AnnObject,
   type InkObject,
@@ -57,22 +58,21 @@ export function forwardTransformPt(local: Pt, t: Transform, w: number, h: number
 
 // ---- 手写墨迹（perfect-freehand）----
 
-// streamline 越高，笔尖越「追不上笔」（橡皮筋感）。压低让跟手更紧、更顺滑；
-// 输入已按最小间距抽稀（见 AnnotationLayer），平滑主要交给 smoothing。
-const PEN = { thinning: 0.6, smoothing: 0.42, streamline: 0.22 };
-const MARKER = { thinning: 0, smoothing: 0.45, streamline: 0.28 }; // marker 等宽
-
+// 手感参数全部来自 inkTuning（可被 /ink-tune 调优页实时改）。streamline 越高笔尖越「追不上笔」，
+// 去抖主要交给输入端的 One Euro 滤波（见 AnnotationLayer）；taper 给起笔/收笔自然出锋。
 function inkOutlinePath(o: InkObject, w: number, h: number, last: boolean): Path2D | null {
   if (o.samples.length === 0) return null;
   const base = Math.max(2, o.width * h * (o.tool === "marker" ? 3 : 1));
   const input = o.samples.map((s) => [s.x * w, s.y * h, s.p ?? 0.5] as [number, number, number]);
-  const cfg = o.tool === "marker" ? MARKER : PEN;
+  const cfg = o.tool === "marker" ? tuning.marker : tuning.pen;
   const outline = getStroke(input, {
     size: base,
     thinning: cfg.thinning,
     smoothing: cfg.smoothing,
     streamline: cfg.streamline,
     simulatePressure: !hasRealPressure(o),
+    start: { taper: base * cfg.taperStart, cap: true }, // taper=0 → 圆头；>0 → 收尖
+    end: { taper: base * cfg.taperEnd, cap: true },
     last,
   });
   const n = outline.length;
