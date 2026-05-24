@@ -23,6 +23,14 @@ a {
   height: 100%;
 }
 
+/* 视频按比例显示(letterbox)不拉伸：与批注画布锚定的「视频内容区矩形」(见 videoFit.ts)对齐，
+   否则非 16:9 视频的批注合成回原始帧会整体平移/缩放错位。iPad Safari 本就按比例 letterbox，
+   这里把桌面端也统一成 contain，使显示端与合成端几何一致。
+   (ArtPlayer 默认 .art-video 是 object-fit:fill —— 拉伸铺满，会破坏这个对齐。) */
+.art-host .art-video {
+  object-fit: contain;
+}
+
 /* 播放器整体禁止文本选中 + 原生长按浮层：
    - iPad Safari 点/长按视频（不可选）会选中最近的可选祖先（.art-host / 包裹盒），
      整个播放器被刷成一大块蓝色选区；故对整棵 .art-host 子树关闭选中。

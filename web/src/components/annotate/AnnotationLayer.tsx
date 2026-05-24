@@ -12,6 +12,7 @@ import {
   type RectPx,
 } from "./selection";
 import { extractSamples, isDrawingPointer } from "./inputPipeline";
+import { videoContentRect } from "./videoFit";
 import type { AnnotationApi } from "./useAnnotation";
 
 // 覆盖在播放器画面上的批注画布。两层：
@@ -31,7 +32,7 @@ type Drag =
   | { mode: "rotate"; snap: Map<string, Transform>; center: Pt; startAng: number }
   | { mode: "scale"; snap: Map<string, Transform>; center: Pt; startDist: number };
 
-export default function AnnotationLayer({ api }: { api: AnnotationApi }) {
+export default function AnnotationLayer({ api, video }: { api: AnnotationApi; video?: HTMLVideoElement | null }) {
   const wrapRef = React.useRef<HTMLDivElement>(null);
   const committedRef = React.useRef<HTMLCanvasElement>(null);
   const liveRef = React.useRef<HTMLCanvasElement>(null);
@@ -160,14 +161,25 @@ export default function AnnotationLayer({ api }: { api: AnnotationApi }) {
     if (b) drawChrome(ctx, b);
   }, []);
 
-  // 尺寸同步
+  // 尺寸同步：把批注画布定位/缩放到「视频实际显示矩形」(object-fit:contain 的内容区)，
+  // 让笔迹坐标锚定到视频帧而非播放器盒——否则非 16:9 视频被 letterbox 后，以盒归一化存的
+  // 笔迹合成回原始帧会整体平移/缩放错位(转 AI 助教时看到的「定位跑偏」)。
   React.useEffect(() => {
     const wrap = wrapRef.current;
     if (!wrap) return;
+    const host = wrap.parentElement; // 批注宿主层 inset:0 铺满 $player，其尺寸=播放器盒
     const resize = () => {
-      const w = wrap.clientWidth;
-      const h = wrap.clientHeight;
+      const boxW = host?.clientWidth ?? 0;
+      const boxH = host?.clientHeight ?? 0;
+      if (!boxW || !boxH) return;
+      const rect = videoContentRect(boxW, boxH, video?.videoWidth ?? 0, video?.videoHeight ?? 0);
+      const w = rect.width;
+      const h = rect.height;
       if (!w || !h) return;
+      wrap.style.left = rect.left + "px";
+      wrap.style.top = rect.top + "px";
+      wrap.style.width = w + "px";
+      wrap.style.height = h + "px";
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
       for (const c of [committedRef.current, liveRef.current]) {
         if (!c) continue;
@@ -183,10 +195,18 @@ export default function AnnotationLayer({ api }: { api: AnnotationApi }) {
       drawLive();
     };
     resize();
+    // 观察播放器盒尺寸变化(全屏/分屏/旋转/窗口)；wrap 自身尺寸由我们设定，故观察 host 而非 wrap。
     const ro = new ResizeObserver(resize);
-    ro.observe(wrap);
-    return () => ro.disconnect();
-  }, [redrawCommitted, drawLive]);
+    if (host) ro.observe(host);
+    // 视频元数据就绪或换源(内在尺寸变化)时重算 letterbox 矩形。
+    video?.addEventListener("loadedmetadata", resize);
+    video?.addEventListener("resize", resize);
+    return () => {
+      ro.disconnect();
+      video?.removeEventListener("loadedmetadata", resize);
+      video?.removeEventListener("resize", resize);
+    };
+  }, [redrawCommitted, drawLive, video]);
 
   // 对象/选区变化 → 重画底层 + 选区框。用 layout effect（绘制前同步重画），
   // 否则提交一笔后 committed 要等下一帧才更新，会闪一下「笔迹消失再出现」。
@@ -491,7 +511,7 @@ export default function AnnotationLayer({ api }: { api: AnnotationApi }) {
           : "crosshair";
 
   return (
-    <div ref={wrapRef} style={{ position: "absolute", inset: 0, zIndex: 30 }}>
+    <div ref={wrapRef} style={{ position: "absolute", left: 0, top: 0, zIndex: 30 }}>
       <canvas ref={committedRef} style={{ position: "absolute", inset: 0, pointerEvents: "none" }} />
       <canvas
         ref={liveRef}
