@@ -17,6 +17,7 @@ import CloseRoundedIcon from "@mui/icons-material/CloseRounded";
 import NoteAddRoundedIcon from "@mui/icons-material/NoteAddRounded";
 import AutoAwesomeRoundedIcon from "@mui/icons-material/AutoAwesomeRounded";
 import HighlightAltRoundedIcon from "@mui/icons-material/HighlightAltRounded";
+import LensBlurRoundedIcon from "@mui/icons-material/LensBlurRounded";
 import ContentCopyRoundedIcon from "@mui/icons-material/ContentCopyRounded";
 import ContentPasteRoundedIcon from "@mui/icons-material/ContentPasteRounded";
 import DeleteOutlineRoundedIcon from "@mui/icons-material/DeleteOutlineRounded";
@@ -31,7 +32,8 @@ const TOOLS: { tool: ActiveTool; label: string; Icon: React.ElementType }[] = [
   { tool: "rect", label: "矩形", Icon: CropSquareRoundedIcon },
   { tool: "ellipse", label: "圆/椭圆", Icon: RadioButtonUncheckedRoundedIcon },
   { tool: "lasso", label: "套索（选中后可移动/旋转/缩放）", Icon: HighlightAltRoundedIcon },
-  { tool: "eraser", label: "橡皮", Icon: BackspaceOutlinedIcon },
+  { tool: "eraser", label: "整笔橡皮", Icon: BackspaceOutlinedIcon },
+  { tool: "eraser-area", label: "区域橡皮（擦哪消哪，切开笔画）", Icon: LensBlurRoundedIcon },
 ];
 
 export default function AnnotationToolbar({

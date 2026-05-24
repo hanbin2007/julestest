@@ -8,6 +8,7 @@ import {
   composeMove,
   composeRotate,
   composeScale,
+  applyAreaEraser,
   type RectPx,
 } from "./selection";
 import { extractSamples, isDrawingPointer } from "./inputPipeline";
@@ -40,6 +41,10 @@ export default function AnnotationLayer({ api }: { api: AnnotationApi }) {
   const dragRef = React.useRef<Drag | null>(null); // 进行中的选区变换
   const previewRef = React.useRef<Map<string, Transform> | null>(null); // 变换预览
   const excludeRef = React.useRef<Set<string> | null>(null); // committed 重画时排除（变换中）
+  const workRef = React.useRef<AnnObject[] | null>(null); // 区域橡皮进行中的工作副本
+  const eraseChangedRef = React.useRef(false);
+  const lastEraseRef = React.useRef<Pt | null>(null);
+  const eraserCursorRef = React.useRef<{ x: number; y: number; r: number } | null>(null); // px
   const pendingRef = React.useRef<InkSample[]>([]);
   const rafRef = React.useRef<number | null>(null);
   const apiRef = React.useRef(api);
@@ -49,7 +54,8 @@ export default function AnnotationLayer({ api }: { api: AnnotationApi }) {
     const ctx = committedRef.current?.getContext("2d");
     if (!ctx) return;
     const { w, h } = sizeRef.current;
-    clearAndRender(ctx, apiRef.current.objects, w, h, excludeRef.current ?? undefined);
+    const objs = workRef.current ?? apiRef.current.objects; // 区域橡皮进行中用工作副本
+    clearAndRender(ctx, objs, w, h, excludeRef.current ?? undefined);
   }, []);
 
   // 选区框 + 角柄 + 旋转柄
@@ -107,6 +113,19 @@ export default function AnnotationLayer({ api }: { api: AnnotationApi }) {
       ctx.stroke();
       ctx.restore();
       return;
+    }
+    // 区域橡皮光标
+    const ec = eraserCursorRef.current;
+    if (ec && apiRef.current.tool === "eraser-area") {
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(ec.x, ec.y, ec.r, 0, Math.PI * 2);
+      ctx.strokeStyle = "rgba(255,255,255,0.9)";
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      ctx.fillStyle = "rgba(255,255,255,0.12)";
+      ctx.fill();
+      ctx.restore();
     }
     // 选区框柄（含变换预览）
     const ids = apiRef.current.selectedIds;
@@ -210,6 +229,23 @@ export default function AnnotationLayer({ api }: { api: AnnotationApi }) {
     if (id) apiRef.current.setObjects(objects.filter((o) => o.id !== id));
   };
 
+  // 区域橡皮半径(px)：pen 随压感 12–30，鼠标定值。
+  const eraserRadius = (e: React.PointerEvent): number =>
+    e.pointerType === "pen" ? 12 + (e.pressure > 0 ? e.pressure : 0.5) * 18 : 18;
+
+  const startAreaErase = (e: React.PointerEvent) => {
+    const { w, h } = sizeRef.current;
+    const p = ptFrom(e);
+    const r = eraserRadius(e);
+    const res = applyAreaEraser([...apiRef.current.objects], p, p, r, w, h);
+    workRef.current = res.objects;
+    eraseChangedRef.current = res.changed;
+    lastEraseRef.current = p;
+    eraserCursorRef.current = { x: p.x * w, y: p.y * h, r };
+    redrawCommitted();
+    drawLive();
+  };
+
   // 套索工具按下：命中柄/选区内 → 起变换；否则起新套索（清掉旧选区）。
   const startLassoMode = (e: React.PointerEvent) => {
     const { w, h } = sizeRef.current;
@@ -271,6 +307,10 @@ export default function AnnotationLayer({ api }: { api: AnnotationApi }) {
       startLassoMode(e);
       return;
     }
+    if (tool === "eraser-area") {
+      startAreaErase(e);
+      return;
+    }
     if (tool === "pen" || tool === "marker") {
       const samples = extractSamples(e.nativeEvent, rectOf());
       drawingRef.current = { kind: "ink", id: newId(), tool, color, width, samples, transform: identity() };
@@ -324,6 +364,23 @@ export default function AnnotationLayer({ api }: { api: AnnotationApi }) {
       }
       return;
     }
+    if (tool === "eraser-area") {
+      const { w, h } = sizeRef.current;
+      const p = ptFrom(e);
+      const r = eraserRadius(e);
+      eraserCursorRef.current = { x: p.x * w, y: p.y * h, r };
+      if (e.buttons && workRef.current && lastEraseRef.current) {
+        const res = applyAreaEraser(workRef.current, lastEraseRef.current, p, r, w, h);
+        workRef.current = res.objects;
+        if (res.changed) {
+          eraseChangedRef.current = true;
+          redrawCommitted();
+        }
+        lastEraseRef.current = p;
+      }
+      drawLive();
+      return;
+    }
     const d = drawingRef.current;
     if (!d) return;
     if (!isDrawingPointer(e.pointerType)) return;
@@ -363,6 +420,19 @@ export default function AnnotationLayer({ api }: { api: AnnotationApi }) {
   };
 
   const onUp = () => {
+    // 区域橡皮收尾：有改动就把工作副本作为一步撤销提交
+    if (workRef.current) {
+      const changed = eraseChangedRef.current;
+      const work = workRef.current;
+      workRef.current = null;
+      lastEraseRef.current = null;
+      eraseChangedRef.current = false;
+      eraserCursorRef.current = null;
+      if (changed) apiRef.current.setObjects(work); // 经 effect 重画 committed
+      else redrawCommitted();
+      drawLive();
+      return;
+    }
     // 套索工具收尾
     if (dragRef.current) {
       commitDrag();
@@ -388,7 +458,14 @@ export default function AnnotationLayer({ api }: { api: AnnotationApi }) {
     apiRef.current.push(d);
   };
 
-  const cursor = api.tool === "eraser" ? "cell" : api.tool === "lasso" ? "default" : "crosshair";
+  const cursor =
+    api.tool === "eraser-area"
+      ? "none" // 画自定义圆形光标
+      : api.tool === "eraser"
+        ? "cell"
+        : api.tool === "lasso"
+          ? "default"
+          : "crosshair";
 
   return (
     <div ref={wrapRef} style={{ position: "absolute", inset: 0, zIndex: 30 }}>

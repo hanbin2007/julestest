@@ -2,8 +2,10 @@
 // 关键：变换用「统一缩放」（sx=sy），这样把一次拖拽变换 D 叠加到对象已有变换 T 上时，
 // 旋转·缩放·平移仍能落回同一种分解形式（见下 compose*），无需退化为通用矩阵。
 
-import { type AnnObject, type Pt, type Transform } from "./model";
-import { forwardTransformPt, localPolyline } from "./renderEngine";
+import { type AnnObject, type InkObject, type InkSample, type Pt, type Transform, newId } from "./model";
+import { forwardTransformPt, inverseTransformPt, distToSeg, localPolyline } from "./renderEngine";
+
+const avgScale = (t: Transform) => (Math.abs(t.sx) + Math.abs(t.sy)) / 2 || 1;
 
 // 对象在【画布】坐标下的折线近似（像素），= 本地折线经各自 transform 正变换。
 export function objectCanvasPolylinePx(o: AnnObject, w: number, h: number): Array<[number, number]> {
@@ -104,6 +106,79 @@ export function composeScale(t: Transform, k: number, cx: number, cy: number, w:
   const nx = k * (fx - cpx) + cpx;
   const ny = k * (fy - cpy) + cpy;
   return { ...t, sx: t.sx * k, sy: t.sy * k, tx: nx / w - t.px, ty: ny / h - t.py };
+}
+
+// ---- 区域橡皮：用一段「橡皮胶囊」(e0→e1, 半径 rPx, 画布坐标) 切分 / 删除 ----
+
+// 切分一个墨迹对象。橡皮端点逆变换到对象本地空间后逐样本判定；保留段（>=2 点）作为新片段，
+// 继承原 transform。未触及返回 null；全擦返回 []。
+function splitInk(o: InkObject, e0: Pt, e1: Pt, rPx: number, w: number, h: number): InkObject[] | null {
+  const l0 = inverseTransformPt(e0, o.transform, w, h);
+  const l1 = inverseTransformPt(e1, o.transform, w, h);
+  const ax = l0.x * w;
+  const ay = l0.y * h;
+  const bx = l1.x * w;
+  const by = l1.y * h;
+  const effR = rPx / avgScale(o.transform); // 画布容差换算回未缩放的本地空间
+  const keep = o.samples.map((s) => distToSeg(s.x * w, s.y * h, ax, ay, bx, by) > effR);
+  if (keep.every((k) => k)) return null; // 未触及
+  const frags: InkObject[] = [];
+  let run: InkSample[] = [];
+  const flush = () => {
+    if (run.length >= 2) frags.push({ ...o, id: newId(), samples: run });
+    run = [];
+  };
+  for (let i = 0; i < keep.length; i++) {
+    if (keep[i]) run.push(o.samples[i]);
+    else flush();
+  }
+  flush();
+  return frags;
+}
+
+// 形状是否被橡皮胶囊触及（两端逆变换到本地后，shape 折线点对橡皮段、橡皮端点对 shape 段，双向取近）。
+function shapeHit(o: AnnObject, e0: Pt, e1: Pt, rPx: number, w: number, h: number): boolean {
+  const l0 = inverseTransformPt(e0, o.transform, w, h);
+  const l1 = inverseTransformPt(e1, o.transform, w, h);
+  const ax = l0.x * w;
+  const ay = l0.y * h;
+  const bx = l1.x * w;
+  const by = l1.y * h;
+  const effR = rPx / avgScale(o.transform);
+  const poly = localPolyline(o, w, h);
+  for (const [x, y] of poly) if (distToSeg(x, y, ax, ay, bx, by) <= effR) return true;
+  for (let k = 1; k < poly.length; k++) {
+    if (distToSeg(ax, ay, poly[k - 1][0], poly[k - 1][1], poly[k][0], poly[k][1]) <= effR) return true;
+    if (distToSeg(bx, by, poly[k - 1][0], poly[k - 1][1], poly[k][0], poly[k][1]) <= effR) return true;
+  }
+  return false;
+}
+
+// 对整组对象施加一次区域橡皮：墨迹切分、形状整删。返回新列表 + 是否有改动。
+export function applyAreaEraser(
+  objects: AnnObject[],
+  e0: Pt,
+  e1: Pt,
+  rPx: number,
+  w: number,
+  h: number
+): { objects: AnnObject[]; changed: boolean } {
+  const out: AnnObject[] = [];
+  let changed = false;
+  for (const o of objects) {
+    if (o.kind === "shape") {
+      if (shapeHit(o, e0, e1, rPx, w, h)) changed = true;
+      else out.push(o);
+      continue;
+    }
+    const frags = splitInk(o, e0, e1, rPx, w, h);
+    if (frags === null) out.push(o);
+    else {
+      changed = true;
+      out.push(...frags);
+    }
+  }
+  return { objects: out, changed };
 }
 
 // 复制粘贴：深拷贝选中对象，生成新 id，整体平移 (dx,dy) 归一化。
