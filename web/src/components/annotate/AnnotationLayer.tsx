@@ -170,11 +170,15 @@ export default function AnnotationLayer({ api }: { api: AnnotationApi }) {
     return () => ro.disconnect();
   }, [redrawCommitted, drawLive]);
 
-  // 对象/选区变化 → 重画底层 + 选区框
-  React.useEffect(() => {
+  // 对象/选区变化 → 重画底层 + 选区框。用 layout effect（绘制前同步重画），
+  // 否则提交一笔后 committed 要等下一帧才更新，会闪一下「笔迹消失再出现」。
+  React.useLayoutEffect(() => {
     redrawCommitted();
     drawLive();
   }, [api.objects, api.selectedIds, redrawCommitted, drawLive]);
+
+  // 注：工具切换由用户在工具条点击触发，此时画布上没有进行中的指针手势（指针已被 setPointerCapture
+  // 捕获到画布，无法中途点工具条），故无需在工具变化时强制清理手势 ref——onUp 各分支已各自收尾。
 
   // 键盘：复制/粘贴/删除/取消选择（编辑文字时不拦截）
   React.useEffect(() => {
@@ -317,8 +321,6 @@ export default function AnnotationLayer({ api }: { api: AnnotationApi }) {
     } else if (tool === "line" || tool === "rect" || tool === "ellipse" || tool === "arrow") {
       const p = ptFrom(e);
       drawingRef.current = { kind: "shape", id: newId(), tool, color, width, a: p, b: p, transform: identity() };
-    } else {
-      return; // eraser-area：Phase 3
     }
     scheduleRaf();
   };
@@ -356,7 +358,7 @@ export default function AnnotationLayer({ api }: { api: AnnotationApi }) {
       return;
     }
     if (tool === "lasso") {
-      if (!e.buttons) return;
+      if (!e.buttons || !isDrawingPointer(e.pointerType)) return; // 掌拒：杂散触摸不参与框选/变换
       if (dragRef.current) updateDrag(e);
       else if (lassoRef.current) {
         lassoRef.current.push(ptFrom(e));
@@ -365,6 +367,7 @@ export default function AnnotationLayer({ api }: { api: AnnotationApi }) {
       return;
     }
     if (tool === "eraser-area") {
+      if (!isDrawingPointer(e.pointerType)) return; // 掌拒：手指/手掌不擦、不动光标
       const { w, h } = sizeRef.current;
       const p = ptFrom(e);
       const r = eraserRadius(e);

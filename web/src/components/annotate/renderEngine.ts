@@ -15,7 +15,7 @@ import {
 // ---- 变换 ----
 
 // 把对象变换叠加到 ctx（调用方负责 save/restore）。
-export function applyTransform(ctx: CanvasRenderingContext2D, t: Transform, w: number, h: number) {
+function applyTransform(ctx: CanvasRenderingContext2D, t: Transform, w: number, h: number) {
   const px = t.px * w; // 轴心（像素）
   const py = t.py * h;
   ctx.translate(px + t.tx * w, py + t.ty * h);
@@ -81,7 +81,7 @@ function inkOutlinePath(o: InkObject, w: number, h: number, last: boolean): Path
   return path;
 }
 
-export function drawInk(ctx: CanvasRenderingContext2D, o: InkObject, w: number, h: number, last = true) {
+function drawInk(ctx: CanvasRenderingContext2D, o: InkObject, w: number, h: number, last = true) {
   const path = inkOutlinePath(o, w, h, last);
   if (!path) return;
   ctx.save();
@@ -113,7 +113,7 @@ function drawArrowHead(
   ctx.stroke();
 }
 
-export function drawShape(ctx: CanvasRenderingContext2D, o: ShapeObject, w: number, h: number) {
+function drawShape(ctx: CanvasRenderingContext2D, o: ShapeObject, w: number, h: number) {
   ctx.save();
   applyTransform(ctx, o.transform, w, h);
   ctx.lineCap = "round";
@@ -219,7 +219,7 @@ export function localPolyline(o: AnnObject, w: number, h: number): Array<[number
   return [[ax, ay], [bx, by]];
 }
 
-const avgScale = (t: Transform) => (Math.abs(t.sx) + Math.abs(t.sy)) / 2 || 1;
+export const avgScale = (t: Transform) => (Math.abs(t.sx) + Math.abs(t.sy)) / 2 || 1;
 
 // 返回最靠近 pt（归一化画布坐标）且在容差内的【最上层】对象 id，无则 null。整笔橡皮用。
 export function hitTestTop(

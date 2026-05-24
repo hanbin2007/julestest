@@ -3,9 +3,7 @@
 // 旋转·缩放·平移仍能落回同一种分解形式（见下 compose*），无需退化为通用矩阵。
 
 import { type AnnObject, type InkObject, type InkSample, type Pt, type Transform, newId } from "./model";
-import { forwardTransformPt, inverseTransformPt, distToSeg, localPolyline } from "./renderEngine";
-
-const avgScale = (t: Transform) => (Math.abs(t.sx) + Math.abs(t.sy)) / 2 || 1;
+import { forwardTransformPt, inverseTransformPt, distToSeg, localPolyline, avgScale } from "./renderEngine";
 
 // 对象在【画布】坐标下的折线近似（像素），= 本地折线经各自 transform 正变换。
 export function objectCanvasPolylinePx(o: AnnObject, w: number, h: number): Array<[number, number]> {

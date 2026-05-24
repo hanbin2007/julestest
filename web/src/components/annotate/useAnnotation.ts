@@ -58,9 +58,11 @@ export function useAnnotation() {
   const [color, setColor] = React.useState<string>(COLORS[0]);
   const [width, setWidth] = React.useState<number>(WIDTHS[1]);
   const [state, dispatch] = React.useReducer(reducer, { objects: [], undo: [], redo: [] });
-  // 选区不入撤销栈（纯 UI 态）；剪贴板跨编辑会话保留。
+  // 选区不入撤销栈（纯 UI 态）。剪贴板用 ref 存数据（paste 同步读取，连续 copy→paste 也对），
+  // 另用 size state 驱动「粘贴」按钮的可用态（复制后即时点亮，不靠下次无关重渲染）。
   const [selectedIds, setSelectedIds] = React.useState<Set<string>>(new Set());
   const clipboard = React.useRef<AnnObject[]>([]);
+  const [clipboardSize, setClipboardSize] = React.useState(0);
   const objects = state.objects;
 
   // 切到非套索工具时清空选区（套索是唯一的「选择」工具）。
@@ -76,6 +78,7 @@ export function useAnnotation() {
   const copy = () => {
     if (selectedIds.size === 0) return;
     clipboard.current = cloneForPaste(objects, selectedIds, 0, 0, newId); // 深拷贝快照
+    setClipboardSize(clipboard.current.length);
   };
   const paste = () => {
     if (clipboard.current.length === 0) return;
@@ -106,7 +109,7 @@ export function useAnnotation() {
     paste,
     deleteSelected,
     canCopy: selectedIds.size > 0,
-    canPaste: clipboard.current.length > 0,
+    canPaste: clipboardSize > 0,
     canUndo: state.undo.length > 0,
     canRedo: state.redo.length > 0,
     push: React.useCallback((object: AnnObject) => dispatch({ type: "push", object }), []),
