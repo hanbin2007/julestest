@@ -116,10 +116,10 @@ export default function NotesView() {
     try {
       await removeBatch(ids);
       toast(`已删除 ${ids.length} 条笔记`, { severity: "success" });
+      exitSelect(); // 成功后才退出选择模式，失败时保留选中项以便重试
     } catch (e) {
       toast("删除失败：" + (e as Error).message, { severity: "error" });
     }
-    exitSelect();
   };
 
   const jump = (cid: number, vid: number, t: number) =>
