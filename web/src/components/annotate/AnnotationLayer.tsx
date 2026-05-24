@@ -1,23 +1,46 @@
 "use client";
 import * as React from "react";
-import { type AnnObject, type InkSample, type Pt, identity, newId } from "./model";
+import { type AnnObject, type InkSample, type Pt, type Transform, identity, newId } from "./model";
 import { clearAndRender, drawObject, hitTestTop } from "./renderEngine";
+import {
+  objectInLasso,
+  selectionBoundsPx,
+  composeMove,
+  composeRotate,
+  composeScale,
+  type RectPx,
+} from "./selection";
 import { extractSamples, isDrawingPointer } from "./inputPipeline";
 import type { AnnotationApi } from "./useAnnotation";
 
 // 覆盖在播放器画面上的批注画布。两层：
-//  · committed（底，pointer-events:none）只在对象/尺寸变化时重画（静止画面帧背景，零开销）。
-//  · live（顶，收指针）每个 rAF 重画当前正在画的一笔。
-// Goodnotes 级流畅靠：getCoalescedEvents 全速采样 + rAF 批处理（不再每个事件全量重绘）+
-// Apple Pencil 压感 + 掌拒（手指/手掌不画）。
+//  · committed（底，pointer-events:none）只在对象/选区/尺寸变化时重画（静止背景零开销）。
+//  · live（顶，收指针）每 rAF 重画当前一笔；套索/选区框柄/变换预览也画在这。
+// Goodnotes 级流畅：getCoalescedEvents 全速采样 + rAF 批处理 + Apple Pencil 压感 + 掌拒。
+// 套索工具下：拖空白处=框选；拖选区内=移动；拖角柄=统一缩放；拖旋转柄=旋转。变换非破坏，
+// 落点时把这次拖拽变换叠加进各对象的 transform（见 selection.ts）。
+
+const ACCENT = "#4fc3f7";
+const HANDLE_R = 6; // 柄绘制半径(px)
+const HIT_R = 16; // 柄命中容差(px)
+const ROT_OFFSET = 28; // 旋转柄在包围盒上方的距离(px)
+
+type Drag =
+  | { mode: "move"; snap: Map<string, Transform>; start: Pt }
+  | { mode: "rotate"; snap: Map<string, Transform>; center: Pt; startAng: number }
+  | { mode: "scale"; snap: Map<string, Transform>; center: Pt; startDist: number };
 
 export default function AnnotationLayer({ api }: { api: AnnotationApi }) {
   const wrapRef = React.useRef<HTMLDivElement>(null);
   const committedRef = React.useRef<HTMLCanvasElement>(null);
   const liveRef = React.useRef<HTMLCanvasElement>(null);
   const sizeRef = React.useRef({ w: 0, h: 0 }); // CSS 尺寸
-  const drawingRef = React.useRef<AnnObject | null>(null); // 当前正在画的一笔（不入 React 状态）
-  const pendingRef = React.useRef<InkSample[]>([]); // 本帧待并入的采样
+  const drawingRef = React.useRef<AnnObject | null>(null); // 正在画的一笔
+  const lassoRef = React.useRef<Pt[] | null>(null); // 套索轨迹
+  const dragRef = React.useRef<Drag | null>(null); // 进行中的选区变换
+  const previewRef = React.useRef<Map<string, Transform> | null>(null); // 变换预览
+  const excludeRef = React.useRef<Set<string> | null>(null); // committed 重画时排除（变换中）
+  const pendingRef = React.useRef<InkSample[]>([]);
   const rafRef = React.useRef<number | null>(null);
   const apiRef = React.useRef(api);
   apiRef.current = api;
@@ -26,19 +49,81 @@ export default function AnnotationLayer({ api }: { api: AnnotationApi }) {
     const ctx = committedRef.current?.getContext("2d");
     if (!ctx) return;
     const { w, h } = sizeRef.current;
-    clearAndRender(ctx, apiRef.current.objects, w, h);
+    clearAndRender(ctx, apiRef.current.objects, w, h, excludeRef.current ?? undefined);
   }, []);
+
+  // 选区框 + 角柄 + 旋转柄
+  const drawChrome = (ctx: CanvasRenderingContext2D, b: RectPx) => {
+    ctx.save();
+    ctx.strokeStyle = ACCENT;
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([5, 4]);
+    ctx.strokeRect(b.x, b.y, b.w, b.h);
+    ctx.setLineDash([]);
+    const cxTop = b.x + b.w / 2;
+    const rotY = b.y - ROT_OFFSET;
+    ctx.beginPath();
+    ctx.moveTo(cxTop, b.y);
+    ctx.lineTo(cxTop, rotY);
+    ctx.stroke();
+    const dot = (x: number, y: number) => {
+      ctx.beginPath();
+      ctx.arc(x, y, HANDLE_R, 0, Math.PI * 2);
+      ctx.fillStyle = "#fff";
+      ctx.fill();
+      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = ACCENT;
+      ctx.stroke();
+    };
+    dot(b.x, b.y);
+    dot(b.x + b.w, b.y);
+    dot(b.x + b.w, b.y + b.h);
+    dot(b.x, b.y + b.h);
+    dot(cxTop, rotY); // 旋转柄
+    ctx.restore();
+  };
 
   const drawLive = React.useCallback(() => {
     const ctx = liveRef.current?.getContext("2d");
     if (!ctx) return;
     const { w, h } = sizeRef.current;
     ctx.clearRect(0, 0, w, h);
+    // 正在画的一笔
     const d = drawingRef.current;
-    if (d) drawObject(ctx, d, w, h, false); // last:false → 开放笔尾，提交时再封口
+    if (d) {
+      drawObject(ctx, d, w, h, false);
+      return;
+    }
+    // 套索轨迹
+    const lasso = lassoRef.current;
+    if (lasso && lasso.length > 1) {
+      ctx.save();
+      ctx.strokeStyle = ACCENT;
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([6, 4]);
+      ctx.beginPath();
+      ctx.moveTo(lasso[0].x * w, lasso[0].y * h);
+      for (let i = 1; i < lasso.length; i++) ctx.lineTo(lasso[i].x * w, lasso[i].y * h);
+      ctx.stroke();
+      ctx.restore();
+      return;
+    }
+    // 选区框柄（含变换预览）
+    const ids = apiRef.current.selectedIds;
+    if (ids.size === 0) return;
+    const preview = previewRef.current;
+    const objects = apiRef.current.objects;
+    let boundsList = objects;
+    if (preview) {
+      // 变换中：被排除出 committed，这里按预览 transform 画出来
+      boundsList = objects.map((o) => (preview.has(o.id) ? { ...o, transform: preview.get(o.id)! } : o));
+      for (const o of boundsList) if (ids.has(o.id)) drawObject(ctx, o, w, h);
+    }
+    const b = selectionBoundsPx(boundsList, ids, w, h);
+    if (b) drawChrome(ctx, b);
   }, []);
 
-  // 尺寸同步：容器变化时重设两块画布像素尺寸并重绘
+  // 尺寸同步
   React.useEffect(() => {
     const wrap = wrapRef.current;
     if (!wrap) return;
@@ -66,19 +151,42 @@ export default function AnnotationLayer({ api }: { api: AnnotationApi }) {
     return () => ro.disconnect();
   }, [redrawCommitted, drawLive]);
 
-  // 已提交对象变化 → 重画底层
+  // 对象/选区变化 → 重画底层 + 选区框
   React.useEffect(() => {
     redrawCommitted();
-  }, [api.objects, redrawCommitted]);
+    drawLive();
+  }, [api.objects, api.selectedIds, redrawCommitted, drawLive]);
+
+  // 键盘：复制/粘贴/删除/取消选择（编辑文字时不拦截）
+  React.useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const tag = (document.activeElement?.tagName || "").toUpperCase();
+      if (tag === "INPUT" || tag === "TEXTAREA") return;
+      const meta = e.metaKey || e.ctrlKey;
+      if (meta && e.key.toLowerCase() === "c") apiRef.current.copy();
+      else if (meta && e.key.toLowerCase() === "v") apiRef.current.paste();
+      else if (e.key === "Delete" || e.key === "Backspace") {
+        if (apiRef.current.selectedIds.size) {
+          e.preventDefault();
+          apiRef.current.deleteSelected();
+        }
+      } else if (e.key === "Escape") apiRef.current.clearSelection();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   const rectOf = () => liveRef.current!.getBoundingClientRect();
-
   const ptFrom = (e: React.PointerEvent): Pt => {
     const r = rectOf();
     return {
       x: Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)),
       y: Math.min(1, Math.max(0, (e.clientY - r.top) / r.height)),
     };
+  };
+  const pxFrom = (e: React.PointerEvent) => {
+    const r = rectOf();
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
   };
 
   const scheduleRaf = React.useCallback(() => {
@@ -91,7 +199,7 @@ export default function AnnotationLayer({ api }: { api: AnnotationApi }) {
         pendingRef.current.length = 0;
       }
       drawLive();
-      // 不自循环：onMove 每个事件都会再 schedule；笔停住时无 move → 不空转重画。
+      // 不自循环：onMove 每个事件都会再 schedule。
     });
   }, [drawLive]);
 
@@ -100,6 +208,54 @@ export default function AnnotationLayer({ api }: { api: AnnotationApi }) {
     const objects = apiRef.current.objects;
     const id = hitTestTop(objects, p, w, h, 8);
     if (id) apiRef.current.setObjects(objects.filter((o) => o.id !== id));
+  };
+
+  // 套索工具按下：命中柄/选区内 → 起变换；否则起新套索（清掉旧选区）。
+  const startLassoMode = (e: React.PointerEvent) => {
+    const { w, h } = sizeRef.current;
+    const ids = apiRef.current.selectedIds;
+    const px = pxFrom(e);
+    if (ids.size) {
+      const b = selectionBoundsPx(apiRef.current.objects, ids, w, h);
+      if (b) {
+        const snap = new Map<string, Transform>();
+        for (const o of apiRef.current.objects) if (ids.has(o.id)) snap.set(o.id, { ...o.transform });
+        const center: Pt = { x: (b.x + b.w / 2) / w, y: (b.y + b.h / 2) / h };
+        const cpx = { x: center.x * w, y: center.y * h };
+        const corners = [
+          [b.x, b.y],
+          [b.x + b.w, b.y],
+          [b.x + b.w, b.y + b.h],
+          [b.x, b.y + b.h],
+        ];
+        const rot = { x: b.x + b.w / 2, y: b.y - ROT_OFFSET };
+        if (Math.hypot(px.x - rot.x, px.y - rot.y) <= HIT_R) {
+          dragRef.current = { mode: "rotate", snap, center, startAng: Math.atan2(px.y - cpx.y, px.x - cpx.x) };
+          excludeRef.current = ids;
+          redrawCommitted();
+          return true;
+        }
+        for (const [cx, cy] of corners) {
+          if (Math.hypot(px.x - cx, px.y - cy) <= HIT_R) {
+            dragRef.current = { mode: "scale", snap, center, startDist: Math.hypot(px.x - cpx.x, px.y - cpx.y) || 1 };
+            excludeRef.current = ids;
+            redrawCommitted();
+            return true;
+          }
+        }
+        if (px.x >= b.x && px.x <= b.x + b.w && px.y >= b.y && px.y <= b.y + b.h) {
+          dragRef.current = { mode: "move", snap, start: ptFrom(e) };
+          excludeRef.current = ids;
+          redrawCommitted();
+          return true;
+        }
+      }
+    }
+    // 起新套索
+    apiRef.current.clearSelection();
+    lassoRef.current = [ptFrom(e)];
+    drawLive();
+    return true;
   };
 
   const onDown = (e: React.PointerEvent) => {
@@ -111,6 +267,10 @@ export default function AnnotationLayer({ api }: { api: AnnotationApi }) {
       eraseAt(ptFrom(e));
       return;
     }
+    if (tool === "lasso") {
+      startLassoMode(e);
+      return;
+    }
     if (tool === "pen" || tool === "marker") {
       const samples = extractSamples(e.nativeEvent, rectOf());
       drawingRef.current = { kind: "ink", id: newId(), tool, color, width, samples, transform: identity() };
@@ -118,9 +278,35 @@ export default function AnnotationLayer({ api }: { api: AnnotationApi }) {
       const p = ptFrom(e);
       drawingRef.current = { kind: "shape", id: newId(), tool, color, width, a: p, b: p, transform: identity() };
     } else {
-      return; // lasso / eraser-area：后续阶段
+      return; // eraser-area：Phase 3
     }
     scheduleRaf();
+  };
+
+  // 计算变换预览（拖动选区时）
+  const updateDrag = (e: React.PointerEvent) => {
+    const { w, h } = sizeRef.current;
+    const drag = dragRef.current!;
+    const preview = new Map<string, Transform>();
+    if (drag.mode === "move") {
+      const cur = ptFrom(e);
+      const dx = cur.x - drag.start.x;
+      const dy = cur.y - drag.start.y;
+      drag.snap.forEach((t, id) => preview.set(id, composeMove(t, dx, dy)));
+    } else if (drag.mode === "rotate") {
+      const px = pxFrom(e);
+      const cpx = { x: drag.center.x * w, y: drag.center.y * h };
+      const phi = Math.atan2(px.y - cpx.y, px.x - cpx.x) - drag.startAng;
+      drag.snap.forEach((t, id) => preview.set(id, composeRotate(t, phi, drag.center.x, drag.center.y, w, h)));
+    } else {
+      const px = pxFrom(e);
+      const cpx = { x: drag.center.x * w, y: drag.center.y * h };
+      let k = Math.hypot(px.x - cpx.x, px.y - cpx.y) / drag.startDist;
+      k = Math.max(0.1, Math.min(10, k));
+      drag.snap.forEach((t, id) => preview.set(id, composeScale(t, k, drag.center.x, drag.center.y, w, h)));
+    }
+    previewRef.current = preview;
+    drawLive();
   };
 
   const onMove = (e: React.PointerEvent) => {
@@ -129,38 +315,80 @@ export default function AnnotationLayer({ api }: { api: AnnotationApi }) {
       if (e.buttons && isDrawingPointer(e.pointerType)) eraseAt(ptFrom(e));
       return;
     }
+    if (tool === "lasso") {
+      if (!e.buttons) return;
+      if (dragRef.current) updateDrag(e);
+      else if (lassoRef.current) {
+        lassoRef.current.push(ptFrom(e));
+        drawLive();
+      }
+      return;
+    }
     const d = drawingRef.current;
     if (!d) return;
-    if (!isDrawingPointer(e.pointerType)) return; // 落笔后忽略杂散触摸
-    if (d.kind === "ink") {
-      pendingRef.current.push(...extractSamples(e.nativeEvent, rectOf()));
-    } else {
-      d.b = ptFrom(e); // 形状：始终 [起点, 当前]
-    }
+    if (!isDrawingPointer(e.pointerType)) return;
+    if (d.kind === "ink") pendingRef.current.push(...extractSamples(e.nativeEvent, rectOf()));
+    else d.b = ptFrom(e);
     scheduleRaf();
   };
 
+  const commitDrag = () => {
+    const preview = previewRef.current;
+    previewRef.current = null;
+    dragRef.current = null;
+    excludeRef.current = null;
+    if (preview && preview.size) {
+      const objects = apiRef.current.objects;
+      apiRef.current.setObjects(
+        objects.map((o) => (preview.has(o.id) ? { ...o, transform: preview.get(o.id)! } : o))
+      );
+      // 选区保持；setObjects 触发 committed+chrome 重画
+    } else {
+      redrawCommitted();
+      drawLive();
+    }
+  };
+
+  const finishLasso = () => {
+    const { w, h } = sizeRef.current;
+    const pts = lassoRef.current!;
+    lassoRef.current = null;
+    if (pts.length >= 3) {
+      const poly = pts.map((p) => [p.x * w, p.y * h] as [number, number]);
+      const ids = new Set<string>();
+      for (const o of apiRef.current.objects) if (objectInLasso(o, poly, w, h)) ids.add(o.id);
+      apiRef.current.select(ids); // 触发 chrome 重画
+    }
+    drawLive(); // 清掉套索轨迹
+  };
+
   const onUp = () => {
+    // 套索工具收尾
+    if (dragRef.current) {
+      commitDrag();
+      return;
+    }
+    if (lassoRef.current) {
+      finishLasso();
+      return;
+    }
+    // 画笔/形状收尾
     const d = drawingRef.current;
     drawingRef.current = null;
     if (rafRef.current != null) {
       cancelAnimationFrame(rafRef.current);
       rafRef.current = null;
     }
-    // 收尾：把残余采样并入
-    if (d && d.kind === "ink" && pendingRef.current.length) {
-      d.samples.push(...pendingRef.current);
-    }
+    if (d && d.kind === "ink" && pendingRef.current.length) d.samples.push(...pendingRef.current);
     pendingRef.current.length = 0;
-    drawLive(); // 清空 live 层
+    drawLive();
     if (!d) return;
-    // 丢弃无效笔（空墨迹 / 没拖动的形状）
     if (d.kind === "ink" && d.samples.length < 1) return;
     if (d.kind === "shape" && d.a.x === d.b.x && d.a.y === d.b.y) return;
-    apiRef.current.push(d); // → 触发 committed 重画
+    apiRef.current.push(d);
   };
 
-  const cursor = api.tool === "eraser" ? "cell" : "crosshair";
+  const cursor = api.tool === "eraser" ? "cell" : api.tool === "lasso" ? "default" : "crosshair";
 
   return (
     <div ref={wrapRef} style={{ position: "absolute", inset: 0, zIndex: 30 }}>

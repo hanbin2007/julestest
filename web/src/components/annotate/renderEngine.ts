@@ -42,6 +42,19 @@ export function inverseTransformPt(pt: Pt, t: Transform, w: number, h: number): 
   return { x: lx / w, y: ly / h };
 }
 
+// 对象本地点 → 画布归一化坐标（inverseTransformPt 的正变换）。套索包含/包围盒用。
+export function forwardTransformPt(local: Pt, t: Transform, w: number, h: number): Pt {
+  const pvx = t.px * w;
+  const pvy = t.py * h;
+  const lx = (local.x * w - pvx) * t.sx;
+  const ly = (local.y * h - pvy) * t.sy;
+  const cos = Math.cos(t.angle);
+  const sin = Math.sin(t.angle);
+  const rx = lx * cos - ly * sin;
+  const ry = lx * sin + ly * cos;
+  return { x: (rx + pvx + t.tx * w) / w, y: (ry + pvy + t.ty * h) / h };
+}
+
 // ---- 手写墨迹（perfect-freehand）----
 
 const PEN = { thinning: 0.55, smoothing: 0.5, streamline: 0.45 };

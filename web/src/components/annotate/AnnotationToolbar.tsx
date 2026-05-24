@@ -16,6 +16,10 @@ import DeleteSweepRoundedIcon from "@mui/icons-material/DeleteSweepRounded";
 import CloseRoundedIcon from "@mui/icons-material/CloseRounded";
 import NoteAddRoundedIcon from "@mui/icons-material/NoteAddRounded";
 import AutoAwesomeRoundedIcon from "@mui/icons-material/AutoAwesomeRounded";
+import HighlightAltRoundedIcon from "@mui/icons-material/HighlightAltRounded";
+import ContentCopyRoundedIcon from "@mui/icons-material/ContentCopyRounded";
+import ContentPasteRoundedIcon from "@mui/icons-material/ContentPasteRounded";
+import DeleteOutlineRoundedIcon from "@mui/icons-material/DeleteOutlineRounded";
 import { WIDTHS, type ActiveTool } from "./model";
 import type { AnnotationApi } from "./useAnnotation";
 
@@ -26,6 +30,7 @@ const TOOLS: { tool: ActiveTool; label: string; Icon: React.ElementType }[] = [
   { tool: "arrow", label: "箭头", Icon: NorthEastRoundedIcon },
   { tool: "rect", label: "矩形", Icon: CropSquareRoundedIcon },
   { tool: "ellipse", label: "圆/椭圆", Icon: RadioButtonUncheckedRoundedIcon },
+  { tool: "lasso", label: "套索（选中后可移动/旋转/缩放）", Icon: HighlightAltRoundedIcon },
   { tool: "eraser", label: "橡皮", Icon: BackspaceOutlinedIcon },
 ];
 
@@ -170,6 +175,31 @@ export default function AnnotationToolbar({
           <span>
             <IconButton size="small" disabled={!hasInk} onClick={api.clear}>
               <DeleteSweepRoundedIcon fontSize="small" />
+            </IconButton>
+          </span>
+        </Tooltip>
+
+        <Divider orientation="vertical" flexItem sx={{ mx: 0.25 }} />
+
+        {/* 选区操作（套索选中后可用）*/}
+        <Tooltip title="复制选中 (⌘C)">
+          <span>
+            <IconButton size="small" disabled={!api.canCopy} onClick={api.copy}>
+              <ContentCopyRoundedIcon fontSize="small" />
+            </IconButton>
+          </span>
+        </Tooltip>
+        <Tooltip title="粘贴 (⌘V)">
+          <span>
+            <IconButton size="small" disabled={!api.canPaste} onClick={api.paste}>
+              <ContentPasteRoundedIcon fontSize="small" />
+            </IconButton>
+          </span>
+        </Tooltip>
+        <Tooltip title="删除选中 (Del)">
+          <span>
+            <IconButton size="small" disabled={!api.canCopy} onClick={api.deleteSelected}>
+              <DeleteOutlineRoundedIcon fontSize="small" />
             </IconButton>
           </span>
         </Tooltip>

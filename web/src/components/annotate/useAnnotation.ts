@@ -1,7 +1,8 @@
 "use client";
 import * as React from "react";
-import { type AnnObject, type ActiveTool, COLORS, WIDTHS } from "./model";
+import { type AnnObject, type ActiveTool, COLORS, WIDTHS, newId } from "./model";
 import { renderObjects } from "./renderEngine";
+import { cloneForPaste } from "./selection";
 
 // 批注状态：当前工具/颜色/线宽 + 对象列表 + 撤销/重做。
 // 画布绘制在 AnnotationLayer，本 hook 只管数据与历史。内存模型是扁平 AnnObject[]，
@@ -50,11 +51,44 @@ function reducer(s: State, a: Action): State {
 
 export type AnnotationApi = ReturnType<typeof useAnnotation>;
 
+const EMPTY_SET: ReadonlySet<string> = new Set();
+
 export function useAnnotation() {
-  const [tool, setTool] = React.useState<ActiveTool>("pen");
+  const [tool, setToolState] = React.useState<ActiveTool>("pen");
   const [color, setColor] = React.useState<string>(COLORS[0]);
   const [width, setWidth] = React.useState<number>(WIDTHS[1]);
   const [state, dispatch] = React.useReducer(reducer, { objects: [], undo: [], redo: [] });
+  // 选区不入撤销栈（纯 UI 态）；剪贴板跨编辑会话保留。
+  const [selectedIds, setSelectedIds] = React.useState<Set<string>>(new Set());
+  const clipboard = React.useRef<AnnObject[]>([]);
+  const objects = state.objects;
+
+  // 切到非套索工具时清空选区（套索是唯一的「选择」工具）。
+  const setTool = React.useCallback((t: ActiveTool) => {
+    setToolState(t);
+    if (t !== "lasso") setSelectedIds(EMPTY_SET as Set<string>);
+  }, []);
+
+  const setObjects = React.useCallback((objs: AnnObject[]) => dispatch({ type: "set", objects: objs }), []);
+  const select = React.useCallback((ids: Set<string>) => setSelectedIds(ids), []);
+  const clearSelection = React.useCallback(() => setSelectedIds(EMPTY_SET as Set<string>), []);
+
+  const copy = () => {
+    if (selectedIds.size === 0) return;
+    clipboard.current = cloneForPaste(objects, selectedIds, 0, 0, newId); // 深拷贝快照
+  };
+  const paste = () => {
+    if (clipboard.current.length === 0) return;
+    const ids = new Set(clipboard.current.map((o) => o.id));
+    const pasted = cloneForPaste(clipboard.current, ids, 0.03, 0.03, newId); // 粘贴偏移一点
+    setObjects([...objects, ...pasted]);
+    setSelectedIds(new Set(pasted.map((o) => o.id)));
+  };
+  const deleteSelected = () => {
+    if (selectedIds.size === 0) return;
+    setObjects(objects.filter((o) => !selectedIds.has(o.id)));
+    setSelectedIds(EMPTY_SET as Set<string>);
+  };
 
   return {
     tool,
@@ -64,15 +98,26 @@ export function useAnnotation() {
     width,
     setWidth,
     colors: COLORS,
-    objects: state.objects,
+    objects,
+    selectedIds,
+    select,
+    clearSelection,
+    copy,
+    paste,
+    deleteSelected,
+    canCopy: selectedIds.size > 0,
+    canPaste: clipboard.current.length > 0,
     canUndo: state.undo.length > 0,
     canRedo: state.redo.length > 0,
     push: React.useCallback((object: AnnObject) => dispatch({ type: "push", object }), []),
-    setObjects: React.useCallback((objects: AnnObject[]) => dispatch({ type: "set", objects }), []),
+    setObjects,
     clear: React.useCallback(() => dispatch({ type: "clear" }), []),
     undo: React.useCallback(() => dispatch({ type: "undo" }), []),
     redo: React.useCallback(() => dispatch({ type: "redo" }), []),
-    load: React.useCallback((objects: AnnObject[]) => dispatch({ type: "load", objects }), []),
+    load: React.useCallback((objs: AnnObject[]) => {
+      setSelectedIds(EMPTY_SET as Set<string>);
+      dispatch({ type: "load", objects: objs });
+    }, []),
   };
 }
 
