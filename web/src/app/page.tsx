@@ -46,7 +46,8 @@ export default function PlayerView() {
   const { mutate } = useSWRConfig();
   const { courses, isLoading, error: coursesError } = useCourses();
   const [refreshing, setRefreshing] = React.useState(false);
-  // 手动刷新目录:重拉课程列表 + 清网关分片缓存(按需重拉),再就地重验 SWR(不整页刷新,保留播放状态)。
+  // 手动刷新目录:重拉课程列表 + 标记各课讲次待更新(下次打开按需重拉,不清缓存→笔记/进度对应不丢),
+  // 再就地重验 SWR(不整页刷新,保留播放状态)。
   const refreshCourses = React.useCallback(async () => {
     setRefreshing(true);
     try {
