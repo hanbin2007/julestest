@@ -9,7 +9,9 @@ import PlayCircleOutlineRoundedIcon from "@mui/icons-material/PlayCircleOutlineR
 import AppTopBar from "@/components/common/AppTopBar";
 import CourseSidebar from "@/components/sidebar/CourseSidebar";
 import PlayerMeta from "@/components/player/PlayerMeta";
-import NotesPanel from "@/components/player/NotesPanel";
+import NotesPanel, { NOTES_WIDTH } from "@/components/player/NotesPanel";
+import TimelineMarkers from "@/components/player/TimelineMarkers";
+import NoteViewer from "@/components/notes/NoteViewer";
 import UpNextCountdown from "@/components/player/UpNextCountdown";
 import AnnotationOverlay from "@/components/annotate/AnnotationOverlay";
 import FloatingTools from "@/components/annotate/FloatingTools";
@@ -26,10 +28,11 @@ import { useCourses, useCourseVideos } from "@/hooks/data";
 import { useThumbPoll } from "@/hooks/useThumbPoll";
 import { useSegmentMaps } from "@/hooks/useSegmentMaps";
 import { useHotkeys } from "@/hooks/useHotkeys";
-import { play, pickM3u8, postProgress, flushProgress, addNote as apiAddNote, saveNoteSnapshot as apiSaveNoteSnapshot, patchSettings, refreshCatalog } from "@/lib/api";
+import { play, pickM3u8, postProgress, flushProgress, patchSettings, refreshCatalog } from "@/lib/api";
 import { themeForSeed, hashSeed } from "@/lib/color";
-import { useProgressMap, useLast, useNotes, usePrefs } from "@/hooks/persist";
+import { useProgressMap, useLast, useNotes, useAllNotes, usePrefs } from "@/hooks/persist";
 import type { Course, Video, VideoRow } from "@/types/api";
+import type { EnrichedNote } from "@/lib/store";
 
 const ArtPlayer = dynamic(() => import("@/components/player/ArtPlayer"), {
   ssr: false,
@@ -79,9 +82,14 @@ export default function PlayerView() {
   const [pendingEditId, setPendingEditId] = React.useState<string | null>(null); // 深链 ?annotation=
   const [chatPrefill, setChatPrefill] = React.useState<ChatPrefill | null>(null);
   const [savingAnno, setSavingAnno] = React.useState(false);
-  const [splitView, setSplitView] = React.useState(false); // 分屏：播放器左 + 对话右
+  // 分屏：播放器左 + 右侧面板（对话 / 笔记，二选一互斥）。null = 无分屏。
+  const [activeSidePanel, setActiveSidePanel] = React.useState<"chat" | "notes" | null>(null);
+  const [previewNote, setPreviewNote] = React.useState<EnrichedNote | null>(null); // 组合预览弹窗
   const [fsWeb, setFsWeb] = React.useState(false); // ArtPlayer 网页全屏态
   const annotation = useAnnotation();
+  const chatSplit = activeSidePanel === "chat";
+  const notesSplit = activeSidePanel === "notes";
+  const sidePanelWidth = activeSidePanel === "chat" ? CHAT_WIDTH : activeSidePanel === "notes" ? NOTES_WIDTH : 0;
 
   const { videos: courseVideos } = useCourseVideos(sel?.courseId ?? null);
   const course: Course | undefined = courses.find((c) => c.id === sel?.courseId);
@@ -92,6 +100,12 @@ export default function PlayerView() {
   const next = idx >= 0 && idx < curList.length - 1 ? curList[idx + 1] : null;
   // 批注存/改笔记复用 useNotes（与笔记抽屉同一 SWR key，自动同步）；productId 用于建笔记时绑课
   const notesApi = useNotes(video?.videoId ?? null, sel?.courseId ?? null);
+  // 富化全量笔记：供时间轴打点（本讲）+ 组合预览弹窗用（带 hasSnap/缩略图）。
+  const { notes: allNotes } = useAllNotes();
+  const currentLessonNotes = React.useMemo(
+    () => allNotes.filter((n) => n.videoId === sel?.videoId && n.courseId === sel?.courseId),
+    [allNotes, sel]
+  );
   // 悬浮工具开关（缺省视为开），持久化到偏好
   const { prefs, setPrefs } = usePrefs();
   const floatTools = prefs.floatTools !== false;
@@ -296,7 +310,9 @@ export default function PlayerView() {
       const image = await composeImage();
       setChatPrefill({ text: annotationText.trim() || "请讲解一下这道题的思路。", image: image ?? undefined });
       setAnnotateOpen(false);
-      setChatOpen(true);
+      setNotesOpen(false); // 与笔记面板互斥
+      setActiveSidePanel((cur) => (cur === "notes" ? null : cur));
+      setChatOpen(true); // 若处于网页全屏，下面的 effect 会自动切成对话分屏
     } finally {
       setSavingAnno(false);
     }
@@ -335,36 +351,104 @@ export default function PlayerView() {
       }
     };
   }, [art]);
-  // 网页全屏里打开对话 → 自动切到分屏（退出 ArtPlayer 网页全屏，换我们自管的并排布局，
-  // 否则对话被播放器的 z-index:9999 盖住看不到）。
-  React.useEffect(() => {
-    if (chatOpen && fsWeb && !splitView) {
-      try {
-        if (artRef.current?.fullscreenWeb) artRef.current.fullscreenWeb = false;
-      } catch {
-        /* ignore */
-      }
-      setSplitView(true);
+  const exitWebFs = () => {
+    try {
+      if (artRef.current?.fullscreenWeb) artRef.current.fullscreenWeb = false;
+    } catch {
+      /* ignore */
     }
-  }, [chatOpen, fsWeb, splitView]);
-  const toggleSplit = React.useCallback(() => {
-    setSplitView((v) => {
-      const next = !v;
-      if (next) {
-        setChatOpen(true);
-        try {
-          if (artRef.current?.fullscreenWeb) artRef.current.fullscreenWeb = false;
-        } catch {
-          /* ignore */
-        }
+  };
+  // 打开对话/笔记面板：两者互斥（开一个关另一个）。网页全屏里 → 进分屏（退出 ArtPlayer 网页全屏，
+  // 否则面板被播放器 z-index:9999 盖住）；否则普通态走 Drawer（顺带退掉另一个面板可能残留的分屏）。
+  const openPanel = React.useCallback(
+    (kind: "chat" | "notes") => {
+      setChatOpen(kind === "chat");
+      setNotesOpen(kind === "notes");
+      if (fsWeb) {
+        exitWebFs();
+        setActiveSidePanel(kind);
+      } else {
+        setActiveSidePanel((cur) => (cur && cur !== kind ? null : cur));
       }
-      return next;
-    });
+    },
+    [fsWeb]
+  );
+  // 显式进分屏（面板头部「分屏」按钮）：无论是否网页全屏都切成并排窗格。
+  const enterSplit = React.useCallback((kind: "chat" | "notes") => {
+    setChatOpen(kind === "chat");
+    setNotesOpen(kind === "notes");
+    exitWebFs();
+    setActiveSidePanel(kind);
   }, []);
+  // 网页全屏里打开对话 → 自动切到分屏（覆盖「先开对话抽屉再进网页全屏」的边角）。
+  React.useEffect(() => {
+    if (chatOpen && fsWeb && activeSidePanel !== "chat") {
+      setNotesOpen(false);
+      exitWebFs();
+      setActiveSidePanel("chat");
+    }
+  }, [chatOpen, fsWeb, activeSidePanel]);
+
+  const openChat = React.useCallback(() => openPanel("chat"), [openPanel]);
+  const openNotes = React.useCallback(() => openPanel("notes"), [openPanel]);
+  const toggleSplit = React.useCallback(
+    () => (activeSidePanel === "chat" ? setActiveSidePanel(null) : enterSplit("chat")),
+    [activeSidePanel, enterSplit]
+  );
+  const toggleNotesSplit = React.useCallback(
+    () => (activeSidePanel === "notes" ? setActiveSidePanel(null) : enterSplit("notes")),
+    [activeSidePanel, enterSplit]
+  );
   const closeChat = React.useCallback(() => {
     setChatOpen(false);
-    setSplitView(false);
+    setActiveSidePanel((cur) => (cur === "chat" ? null : cur));
   }, []);
+  const closeNotes = React.useCallback(() => {
+    setNotesOpen(false);
+    setActiveSidePanel((cur) => (cur === "notes" ? null : cur));
+  }, []);
+
+  // 笔记跳转：同讲只 seek；跨讲原地切讲 + 定位（保持分屏布局，视频重新取流）。
+  const jumpToNote = React.useCallback(
+    (cid: number, vid: number, t: number) => {
+      if (cid === sel?.courseId && vid === sel?.videoId) {
+        const p = artRef.current;
+        if (p?.video) p.currentTime = t;
+      } else {
+        setSeekOverride(t);
+        setSel({ courseId: cid, videoId: vid });
+        void patchSettings({ last: { productId: cid, videoId: vid } });
+      }
+    },
+    [sel]
+  );
+  // 从面板编辑批注：切到该讲（同讲不重载）+ 进批注模式（pendingEditId 待笔记加载后载入笔迹）。腾出整屏。
+  const editAnnotationFromPanel = React.useCallback(
+    (cid: number, vid: number, t: number, id: string) => {
+      if (cid !== sel?.courseId || vid !== sel?.videoId) {
+        setSeekOverride(t); // 跨讲：新流就绪后由 startTime 定位到该时刻
+        setSel({ courseId: cid, videoId: vid });
+        void patchSettings({ last: { productId: cid, videoId: vid } });
+      } else {
+        const p = artRef.current; // 同讲：直接 seek 到批注那一刻，看到原帧再改
+        if (p?.video) p.currentTime = t;
+      }
+      setPendingEditId(id);
+      setNotesOpen(false);
+      setActiveSidePanel(null);
+    },
+    [sel]
+  );
+  // 面板「记到本讲」：当前讲当前时刻 + 截图（notesApi.add 会顺带重验统一管理 key）。
+  const addNoteHere = React.useCallback(
+    (text: string) => {
+      const v = artRef.current?.video as HTMLVideoElement | undefined;
+      if (!video || !v) return;
+      void notesApi.add(Math.floor(v.currentTime), text, captureSnapshot());
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [video, notesApi]
+  );
 
   useHotkeys({
     " ": () => {
@@ -392,10 +476,8 @@ export default function PlayerView() {
     b: () => {
       const v = a()?.video;
       if (v && video) {
-        const snap = captureSnapshot();
-        void apiAddNote(video.videoId, sel?.courseId ?? null, Math.floor(v.currentTime), "书签").then((r) => {
-          if (snap && r.note) void apiSaveNoteSnapshot(r.note.id, snap);
-        });
+        // 走 notesApi.add：附带截图 + 同步重验单讲/统一管理两个 SWR key（抽屉/分屏/打点即时刷新）
+        void notesApi.add(Math.floor(v.currentTime), "书签", captureSnapshot());
         toast("已记书签");
       }
     },
@@ -482,12 +564,13 @@ export default function PlayerView() {
                     borderRadius: (t) => t.radius.lg,
                     overflow: "hidden",
                     boxShadow: 6,
-                    // 分屏：播放器变成左侧固定窗格（不重挂 ArtPlayer，避免视频重载）
-                    ...(splitView && {
+                    // 分屏：播放器变成左侧固定窗格（不重挂 ArtPlayer，避免视频重载）。
+                    // 右偏移按当前激活的面板宽度（对话 / 笔记）。
+                    ...(activeSidePanel && {
                       position: "fixed",
                       top: 0,
                       left: 0,
-                      right: `${CHAT_WIDTH}px`,
+                      right: `${sidePanelWidth}px`,
                       bottom: 0,
                       width: "auto",
                       height: "auto",
@@ -559,9 +642,9 @@ export default function PlayerView() {
                   hasNext={!!next}
                   onPrev={() => prev && selectVideo(prev, course)}
                   onNext={() => next && selectVideo(next, course)}
-                  onNotes={() => setNotesOpen(true)}
+                  onNotes={openNotes}
                   onAnnotate={openAnnotateFresh}
-                  onChat={() => setChatOpen(true)}
+                  onChat={openChat}
                   onCopyDownload={copyDownload}
                   floatTools={floatTools}
                   onToggleFloat={(v) => void setPrefs({ floatTools: v })}
@@ -574,22 +657,35 @@ export default function PlayerView() {
 
       <NotesPanel
         open={notesOpen}
-        onClose={() => setNotesOpen(false)}
-        videoId={video?.videoId ?? null}
-        productId={sel?.courseId ?? null}
-        getCurrentTime={() => artRef.current?.video?.currentTime ?? 0}
-        getSnapshot={captureSnapshot}
-        onSeek={(t) => {
-          setSeekOverride(undefined);
-          const p = artRef.current;
-          if (p) p.currentTime = t;
-        }}
+        onClose={closeNotes}
+        split={notesSplit}
+        onToggleSplit={toggleNotesSplit}
+        currentVideoId={video?.videoId ?? null}
+        currentCourseId={sel?.courseId ?? null}
+        onAddNote={addNoteHere}
+        onJump={jumpToNote}
+        onPreview={(n) => setPreviewNote(n)}
+        onEditAnnotation={editAnnotationFromPanel}
       />
+      {/* 时间轴打点：本讲笔记处打点，悬浮预览、点击跳转（挂进播放器进度条，全屏也在） */}
+      {art && video && (
+        <TimelineMarkers
+          art={art}
+          notes={currentLessonNotes}
+          accent={course ? hashSeed(course.name) : undefined}
+          onSeek={(t) => {
+            const p = artRef.current;
+            if (p?.video) p.currentTime = t;
+          }}
+          onPreview={(n) => setPreviewNote(n)}
+        />
+      )}
       <FloatingTools
         art={art}
         visible={floatTools && !!video && !annotateOpen}
+        onNotes={openNotes}
         onAnnotate={openAnnotateFresh}
-        onChat={() => setChatOpen(true)}
+        onChat={openChat}
       />
       {annotateOpen && art && video && (
         <AnnotationOverlay
@@ -610,12 +706,16 @@ export default function PlayerView() {
         productId={sel?.courseId ?? null}
         prefill={chatPrefill}
         onConsumePrefill={() => setChatPrefill(null)}
-        split={splitView}
+        split={chatSplit}
         onToggleSplit={toggleSplit}
-        onSaveNote={async (text) => {
-          const t = Math.floor(artRef.current?.video?.currentTime ?? 0);
+        getVideoTime={() => artRef.current?.video?.currentTime ?? 0}
+        onSaveNote={async (text, videoT) => {
+          // 锚到「提问那一刻」：videoT 来自该问答；缺省退回当前播放位置
+          const t = videoT ?? Math.floor(artRef.current?.video?.currentTime ?? 0);
           try {
-            await notesApi.add(t, text);
+            // 截图取那一刻的画面：服务端 ffmpeg 取帧（解决 HLS 黑帧），失败再退回当前画面抓帧
+            const snap = (await bakeWithServerFrame(src, t, [])) ?? captureSnapshot();
+            await notesApi.add(t, text, snap);
             toast("AI 问答已存入笔记");
           } catch (e) {
             toast("保存失败：" + (e as Error).message, { severity: "error" });
@@ -624,6 +724,20 @@ export default function PlayerView() {
       />
       <CommandPalette open={cmdOpen} onClose={() => setCmdOpen(false)} courses={courses} onPick={pickFromPalette} />
       <ShortcutsOverlay open={scOpen} onClose={() => setScOpen(false)} />
+      {/* 组合预览弹窗：截图 + 文字（Markdown/LaTeX）+ 跳转/编辑批注 */}
+      <NoteViewer
+        note={previewNote}
+        open={!!previewNote}
+        onClose={() => setPreviewNote(null)}
+        onJump={(cid, vid, t) => {
+          setPreviewNote(null);
+          jumpToNote(cid, vid, t);
+        }}
+        onEditAnnotation={(cid, vid, t, id) => {
+          setPreviewNote(null);
+          editAnnotationFromPanel(cid, vid, t, id);
+        }}
+      />
     </Box>
   );
 }

@@ -71,6 +71,7 @@ model ChatMessage {
   role      String // "user" | "assistant"
   text      String
   image     String? // 附图文件 id（用户消息可带批注画面，落盘在 chat-imgs/）
+  videoT    Int? // 提问时的播放位置(秒)；存问答为笔记时作截图/跳转的时间锚点
   at        DateTime @default(now())
 
   @@index([videoId])

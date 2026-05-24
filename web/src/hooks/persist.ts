@@ -44,6 +44,7 @@ export function useNotes(videoId: number | null, productId: number | null = null
         revalidate: false,
       },
     );
+    void globalMutate("/api/notes/all"); // 让统一管理页 / 分屏面板 / 时间轴打点同步
   };
 
   const update = async (id: string, text: string, strokes?: string, snap?: string | null) => {
@@ -70,6 +71,7 @@ export function useNotes(videoId: number | null, productId: number | null = null
         revalidate: false,
       },
     );
+    void globalMutate("/api/notes/all");
   };
 
   const remove = async (id: string) => {
@@ -82,6 +84,7 @@ export function useNotes(videoId: number | null, productId: number | null = null
         revalidate: false,
       },
     );
+    void globalMutate("/api/notes/all");
   };
 
   return { notes, add, update, remove };

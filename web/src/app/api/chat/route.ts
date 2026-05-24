@@ -14,7 +14,7 @@ export async function GET(req: NextRequest) {
   if (!videoId) return Response.json({ error: "missing videoId" }, { status: 400 });
   const rows = await prisma.chatMessage.findMany({ where: { videoId }, orderBy: { at: "asc" } });
   return Response.json({
-    messages: rows.map((r) => ({ id: r.id, role: r.role, text: r.text, image: r.image, at: r.at.getTime() })),
+    messages: rows.map((r) => ({ id: r.id, role: r.role, text: r.text, image: r.image, videoT: r.videoT, at: r.at.getTime() })),
   });
 }
 
@@ -24,7 +24,7 @@ const rid = () => `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 export async function POST(req: NextRequest) {
   const { data, error } = await parseBody(req, chatSchema);
   if (error) return error;
-  const { videoId, productId, text, image, effort } = data;
+  const { videoId, productId, text, image, effort, videoT } = data;
 
   // 落用户消息（附图存盘）
   const userId = rid();
@@ -45,7 +45,7 @@ export async function POST(req: NextRequest) {
     }
   }
   await prisma.chatMessage.create({
-    data: { id: userId, videoId, productId: productId ?? null, role: "user", text, image: imageRef },
+    data: { id: userId, videoId, productId: productId ?? null, role: "user", text, image: imageRef, videoT: videoT ?? null },
   });
 
   // 上下文：课程/讲标题（best-effort）。有 productId 则精确取课，否则回退 byVid。
@@ -95,7 +95,7 @@ export async function POST(req: NextRequest) {
         // 落助手消息 + 会话 id（用于下次 resume）
         if (finalText.trim()) {
           await prisma.chatMessage.create({
-            data: { id: `${rid()}-a`, videoId, productId: productId ?? null, role: "assistant", text: finalText },
+            data: { id: `${rid()}-a`, videoId, productId: productId ?? null, role: "assistant", text: finalText, videoT: videoT ?? null },
           });
         }
         if (sessionId) {

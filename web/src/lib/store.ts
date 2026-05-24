@@ -32,6 +32,7 @@ export interface ChatMessage {
   role: "user" | "assistant";
   text: string;
   image?: string | null; // 附图文件 id（=消息 id），用 chatImageUrl(id) 取图
+  videoT?: number | null; // 提问时的播放位置(秒)；存问答为笔记时作截图/跳转锚点
   at: number; // ms
 }
 

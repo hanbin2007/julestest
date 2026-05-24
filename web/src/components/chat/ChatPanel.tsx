@@ -159,6 +159,7 @@ export default function ChatPanel({
   split = false,
   onToggleSplit,
   onSaveNote,
+  getVideoTime,
 }: {
   open: boolean;
   onClose: () => void;
@@ -168,7 +169,9 @@ export default function ChatPanel({
   onConsumePrefill?: () => void;
   split?: boolean;
   onToggleSplit?: () => void;
-  onSaveNote?: (text: string) => void | Promise<void>; // 把一段问答存成当前讲的笔记
+  // 把一段问答存成当前讲的笔记；videoT = 提问时的播放位置(秒)，缺省由 page 用 currentTime 兜底
+  onSaveNote?: (text: string, videoT?: number) => void | Promise<void>;
+  getVideoTime?: () => number; // 发消息时记录提问时刻的播放位置
 }) {
   const { history, send, clear, streaming, draftReply, pendingUser, error } = useChat(videoId, productId);
   const { prefs, setPrefs } = usePrefs();
@@ -180,11 +183,15 @@ export default function ChatPanel({
   const effortLabel = EFFORT_LEVELS.find((l) => l.value === effort)?.label ?? "深入";
 
   // 全屏阅读器
-  const [reader, setReader] = React.useState<{ open: boolean; content: string; title: string }>({
+  const [reader, setReader] = React.useState<{ open: boolean; content: string; title: string; videoT?: number }>({
     open: false,
     content: "",
     title: "",
   });
+
+  // 一组消息的时间锚点 = 其中第一条带 videoT 的（通常是问句的提问时刻）
+  const pairVideoT = (msgs: ChatMessage[]): number | undefined =>
+    msgs.find((m) => m.videoT != null)?.videoT ?? undefined;
   // 多选「可选范围」存笔记
   const [selectMode, setSelectMode] = React.useState(false);
   const [selectedIds, setSelectedIds] = React.useState<Set<string>>(new Set());
@@ -216,7 +223,7 @@ export default function ChatPanel({
       const msgs = pairFor(id);
       if (!msgs.length) return;
       const q = msgs.find((m) => m.role === "user")?.text;
-      setReader({ open: true, content: buildQA(msgs), title: q ? q.slice(0, 40) : "AI 回答" });
+      setReader({ open: true, content: buildQA(msgs), title: q ? q.slice(0, 40) : "AI 回答", videoT: pairVideoT(msgs) });
     },
     [pairFor],
   );
@@ -224,7 +231,7 @@ export default function ChatPanel({
   const saveMsgs = React.useCallback(
     (msgs: ChatMessage[]) => {
       const text = buildQA(msgs).trim();
-      if (text && onSaveNote) void onSaveNote(text);
+      if (text && onSaveNote) void onSaveNote(text, pairVideoT(msgs));
     },
     [onSaveNote],
   );
@@ -263,7 +270,8 @@ export default function ChatPanel({
   const doSend = () => {
     const text = input.trim();
     if (!text || streaming || videoId == null) return;
-    void send(text, attached ?? undefined, effort);
+    const videoT = getVideoTime ? Math.floor(getVideoTime()) : undefined;
+    void send(text, attached ?? undefined, effort, videoT);
     setInput("");
     setAttached(null);
   };
@@ -454,7 +462,7 @@ export default function ChatPanel({
           onClose={() => setReader((r) => ({ ...r, open: false }))}
           content={reader.content}
           title={reader.title}
-          onSaveNote={onSaveNote ? () => { if (reader.content) void onSaveNote(reader.content); } : undefined}
+          onSaveNote={onSaveNote ? () => { if (reader.content) void onSaveNote(reader.content, reader.videoT); } : undefined}
         />
       </Box>
   );

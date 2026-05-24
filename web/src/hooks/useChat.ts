@@ -23,7 +23,7 @@ export function useChat(videoId: number | null, productId: number | null = null)
   React.useEffect(() => () => abortRef.current?.abort(), []);
 
   const send = React.useCallback(
-    async (text: string, image?: string, effort?: ChatEffort) => {
+    async (text: string, image?: string, effort?: ChatEffort, videoT?: number) => {
       const vid = videoId;
       if (vid == null || !text.trim() || streaming) return;
       setError(null);
@@ -36,7 +36,7 @@ export function useChat(videoId: number | null, productId: number | null = null)
         const res = await fetch("/api/chat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ videoId: vid, productId, text: text.trim(), image, effort }),
+          body: JSON.stringify({ videoId: vid, productId, text: text.trim(), image, effort, videoT }),
           signal: ctrl.signal,
         });
         if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);

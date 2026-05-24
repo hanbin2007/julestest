@@ -29,6 +29,7 @@ export const chatSchema = z.object({
   text: z.string().trim().min(1),
   image: z.string().startsWith("data:image/").max(6_000_000).optional(),
   effort: z.enum(["low", "medium", "high", "xhigh"]).optional(), // 思考等级
+  videoT: z.coerce.number().int().min(0).optional(), // 提问时的播放位置(秒)
 });
 
 export const noteDeleteSchema = z.object({
