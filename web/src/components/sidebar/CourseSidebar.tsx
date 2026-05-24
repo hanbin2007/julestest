@@ -12,6 +12,7 @@ import {
   Typography,
 } from "@mui/material";
 import SearchIcon from "@mui/icons-material/Search";
+import RefreshRoundedIcon from "@mui/icons-material/RefreshRounded";
 import MyLocationRoundedIcon from "@mui/icons-material/MyLocationRounded";
 import UnfoldLessRoundedIcon from "@mui/icons-material/UnfoldLessRounded";
 import { SidebarSkeleton } from "@/components/common/Skeletons";
@@ -26,6 +27,8 @@ export default function CourseSidebar({
   activeCourseId,
   onSelect,
   onJumpToCurrent,
+  onRefresh,
+  refreshing = false,
 }: {
   courses: Course[];
   loading: boolean;
@@ -33,6 +36,8 @@ export default function CourseSidebar({
   activeCourseId: number | null;
   onSelect: SelectFn;
   onJumpToCurrent?: () => void;
+  onRefresh?: () => void;
+  refreshing?: boolean;
 }) {
   const [query, setQuery] = React.useState("");
   const [cardFilter, setCardFilter] = React.useState<string | null>(null);
@@ -91,6 +96,28 @@ export default function CourseSidebar({
             我的课程
           </Typography>
           <Box sx={{ flex: 1 }} />
+          <Tooltip title="刷新课程列表">
+            <span>
+              <IconButton
+                size="small"
+                aria-label="刷新课程列表"
+                onClick={onRefresh}
+                disabled={!onRefresh || refreshing}
+              >
+                <RefreshRoundedIcon
+                  fontSize="small"
+                  sx={
+                    refreshing
+                      ? {
+                          animation: "cs-refresh-spin 0.8s linear infinite",
+                          "@keyframes cs-refresh-spin": { to: { transform: "rotate(360deg)" } },
+                        }
+                      : undefined
+                  }
+                />
+              </IconButton>
+            </span>
+          </Tooltip>
           <Tooltip title="回到正在看">
             <span>
               <IconButton

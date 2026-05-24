@@ -2,6 +2,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import * as React from "react";
 import dynamic from "next/dynamic";
+import { useSWRConfig } from "swr";
 import { Alert, Box, Button, Drawer, Typography } from "@mui/material";
 import { ThemeProvider } from "@mui/material/styles";
 import PlayCircleOutlineRoundedIcon from "@mui/icons-material/PlayCircleOutlineRounded";
@@ -42,8 +43,22 @@ interface Sel {
 
 export default function PlayerView() {
   const toast = useToast();
+  const { mutate } = useSWRConfig();
   const { courses, isLoading, error: coursesError } = useCourses();
   const [refreshing, setRefreshing] = React.useState(false);
+  // 手动刷新目录:重拉课程列表 + 清网关分片缓存(按需重拉),再就地重验 SWR(不整页刷新,保留播放状态)。
+  const refreshCourses = React.useCallback(async () => {
+    setRefreshing(true);
+    try {
+      const { courses: n } = await refreshCatalog();
+      await mutate((key) => typeof key === "string" && key.startsWith("/api/course"));
+      toast(`已刷新课程列表（${n} 门）`);
+    } catch {
+      toast("刷新失败，请检查 req.txt 与网关", { severity: "error" });
+    } finally {
+      setRefreshing(false);
+    }
+  }, [mutate, toast]);
   const progressMap = useProgressMap();
   const last = useLast();
   const [sel, setSel] = React.useState<Sel | null>(null);
@@ -386,6 +401,8 @@ export default function PlayerView() {
       onJumpToCurrent={() => {
         if (!sel && last) resume(last.productId, last.videoId);
       }}
+      onRefresh={refreshCourses}
+      refreshing={refreshing}
     />
   );
 
