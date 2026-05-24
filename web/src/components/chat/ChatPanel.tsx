@@ -13,6 +13,10 @@ import SendRoundedIcon from "@mui/icons-material/SendRounded";
 import CloseRoundedIcon from "@mui/icons-material/CloseRounded";
 import DeleteSweepRoundedIcon from "@mui/icons-material/DeleteSweepRounded";
 import AutoAwesomeRoundedIcon from "@mui/icons-material/AutoAwesomeRounded";
+import SplitscreenRoundedIcon from "@mui/icons-material/SplitscreenRounded";
+import CloseFullscreenRoundedIcon from "@mui/icons-material/CloseFullscreenRounded";
+
+export const CHAT_WIDTH = 420;
 import { useChat } from "@/hooks/useChat";
 import { chatImageUrl } from "@/lib/api";
 
@@ -69,12 +73,16 @@ export default function ChatPanel({
   videoId,
   prefill,
   onConsumePrefill,
+  split = false,
+  onToggleSplit,
 }: {
   open: boolean;
   onClose: () => void;
   videoId: number | null;
   prefill?: ChatPrefill | null;
   onConsumePrefill?: () => void;
+  split?: boolean;
+  onToggleSplit?: () => void;
 }) {
   const { history, send, clear, streaming, draftReply, pendingUser, error } = useChat(videoId);
   const [input, setInput] = React.useState("");
@@ -104,8 +112,7 @@ export default function ChatPanel({
 
   const empty = history.length === 0 && !pendingUser && !streaming;
 
-  return (
-    <Drawer anchor="right" open={open} onClose={onClose} PaperProps={{ sx: { width: 440, maxWidth: "96vw" } }}>
+  const body = (
       <Box sx={{ display: "flex", flexDirection: "column", height: "100%" }}>
         {/* 头部 */}
         <Stack
@@ -116,6 +123,13 @@ export default function ChatPanel({
           <Typography variant="h6" sx={{ flex: 1 }}>
             AI 助教
           </Typography>
+          {onToggleSplit && (
+            <Tooltip title={split ? "退出分屏" : "分屏（边看边聊）"}>
+              <IconButton size="small" onClick={onToggleSplit} aria-label="toggle split">
+                {split ? <CloseFullscreenRoundedIcon fontSize="small" /> : <SplitscreenRoundedIcon fontSize="small" />}
+              </IconButton>
+            </Tooltip>
+          )}
           <Tooltip title="清空对话">
             <span>
               <IconButton size="small" disabled={history.length === 0 || streaming} onClick={() => void clear()}>
@@ -194,6 +208,32 @@ export default function ChatPanel({
           </Stack>
         </Box>
       </Box>
+  );
+
+  // 分屏模式：固定在右侧的常驻面板（不是 Drawer），与左侧播放器并排，z-index 自控。
+  if (split) {
+    return (
+      <Box
+        sx={{
+          position: "fixed",
+          top: 0,
+          right: 0,
+          width: CHAT_WIDTH,
+          height: "100dvh",
+          zIndex: 1300,
+          bgcolor: "background.paper",
+          borderLeft: (t) => `1px solid ${t.palette.divider}`,
+          boxShadow: 8,
+        }}
+      >
+        {body}
+      </Box>
+    );
+  }
+
+  return (
+    <Drawer anchor="right" open={open} onClose={onClose} PaperProps={{ sx: { width: 440, maxWidth: "96vw" } }}>
+      {body}
     </Drawer>
   );
 }

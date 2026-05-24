@@ -14,7 +14,7 @@ import AnnotationOverlay from "@/components/annotate/AnnotationOverlay";
 import FloatingTools from "@/components/annotate/FloatingTools";
 import { useAnnotation, bakeAnnotation, bakeWithServerFrame } from "@/components/annotate/useAnnotation";
 import { serializeStrokes, parseStrokes } from "@/components/annotate/strokes";
-import ChatPanel, { type ChatPrefill } from "@/components/chat/ChatPanel";
+import ChatPanel, { type ChatPrefill, CHAT_WIDTH } from "@/components/chat/ChatPanel";
 import ContinueWatchingRail from "@/components/home/ContinueWatchingRail";
 import CommandPalette from "@/components/common/CommandPalette";
 import ShortcutsOverlay from "@/components/common/ShortcutsOverlay";
@@ -63,6 +63,8 @@ export default function PlayerView() {
   const [pendingEditId, setPendingEditId] = React.useState<string | null>(null); // 深链 ?annotation=
   const [chatPrefill, setChatPrefill] = React.useState<ChatPrefill | null>(null);
   const [savingAnno, setSavingAnno] = React.useState(false);
+  const [splitView, setSplitView] = React.useState(false); // 分屏：播放器左 + 对话右
+  const [fsWeb, setFsWeb] = React.useState(false); // ArtPlayer 网页全屏态
   const annotation = useAnnotation();
 
   const { videos: courseVideos } = useCourseVideos(sel?.courseId ?? null);
@@ -286,6 +288,55 @@ export default function PlayerView() {
     setPendingEditId(null);
   }, [pendingEditId, art, video, notesList, annoLoad]);
 
+  // ---- 分屏（边看边聊）----
+  // 监听 ArtPlayer 网页全屏态
+  React.useEffect(() => {
+    if (!art) return;
+    const on = (s: boolean) => setFsWeb(s);
+    try {
+      art.on("fullscreenWeb", on);
+    } catch {
+      /* ignore */
+    }
+    return () => {
+      try {
+        art.off("fullscreenWeb", on);
+      } catch {
+        /* ignore */
+      }
+    };
+  }, [art]);
+  // 网页全屏里打开对话 → 自动切到分屏（退出 ArtPlayer 网页全屏，换我们自管的并排布局，
+  // 否则对话被播放器的 z-index:9999 盖住看不到）。
+  React.useEffect(() => {
+    if (chatOpen && fsWeb && !splitView) {
+      try {
+        if (artRef.current?.fullscreenWeb) artRef.current.fullscreenWeb = false;
+      } catch {
+        /* ignore */
+      }
+      setSplitView(true);
+    }
+  }, [chatOpen, fsWeb, splitView]);
+  const toggleSplit = React.useCallback(() => {
+    setSplitView((v) => {
+      const next = !v;
+      if (next) {
+        setChatOpen(true);
+        try {
+          if (artRef.current?.fullscreenWeb) artRef.current.fullscreenWeb = false;
+        } catch {
+          /* ignore */
+        }
+      }
+      return next;
+    });
+  }, []);
+  const closeChat = React.useCallback(() => {
+    setChatOpen(false);
+    setSplitView(false);
+  }, []);
+
   useHotkeys({
     " ": () => {
       const v = a()?.video as HTMLVideoElement | undefined;
@@ -399,6 +450,20 @@ export default function PlayerView() {
                     borderRadius: (t) => t.radius.lg,
                     overflow: "hidden",
                     boxShadow: 6,
+                    // 分屏：播放器变成左侧固定窗格（不重挂 ArtPlayer，避免视频重载）
+                    ...(splitView && {
+                      position: "fixed",
+                      top: 0,
+                      left: 0,
+                      right: `${CHAT_WIDTH}px`,
+                      bottom: 0,
+                      width: "auto",
+                      height: "auto",
+                      aspectRatio: "auto",
+                      borderRadius: 0,
+                      boxShadow: "none",
+                      zIndex: 1300,
+                    }),
                   }}
                 >
                   {src ? (
@@ -506,10 +571,12 @@ export default function PlayerView() {
       )}
       <ChatPanel
         open={chatOpen}
-        onClose={() => setChatOpen(false)}
+        onClose={closeChat}
         videoId={video?.videoId ?? null}
         prefill={chatPrefill}
         onConsumePrefill={() => setChatPrefill(null)}
+        split={splitView}
+        onToggleSplit={toggleSplit}
       />
       <CommandPalette open={cmdOpen} onClose={() => setCmdOpen(false)} courses={courses} onPick={pickFromPalette} />
       <ShortcutsOverlay open={scOpen} onClose={() => setScOpen(false)} />

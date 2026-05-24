@@ -34,6 +34,8 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
         autoHideDuration={3200}
         onClose={close}
         anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
+        // 高于 ArtPlayer 网页全屏(z-index:9999)，全屏/分屏下保存等反馈也可见
+        sx={{ zIndex: 100000 }}
       >
         <Alert
           variant="filled"
