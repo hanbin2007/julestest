@@ -27,7 +27,7 @@ export default function ContinueWatchingRail({
           const color = hashSeed(e.courseName ?? "");
           const ratio = Math.min(1, e.t / e.d);
           return (
-            <motion.div key={e.videoId} whileHover={{ y: -3 }} style={{ flex: "0 0 auto" }}>
+            <motion.div key={`${e.productId}:${e.videoId}`} whileHover={{ y: -3 }} style={{ flex: "0 0 auto" }}>
               <Card
                 onClick={() => onResume(e.productId!, e.videoId!)}
                 sx={{ width: 240, p: 1.5, cursor: "pointer", borderColor: color }}
