@@ -24,7 +24,9 @@ def api_headers(session):
     for k, v in session.items():
         if k.lower() in _API_HEADER_KEYS:
             out[k] = v
-    out.setdefault("User-Agent", "YoudaoCourse/iPhone")
+    # 用大小写无关检查，避免 session 里已有小写 user-agent 时再插入大写副本
+    if not any(k.lower() == "user-agent" for k in out):
+        out["User-Agent"] = "YoudaoCourse/iPhone"
     out.setdefault("Keyfrom", "aicard.1.4.9.ios")
     out["Accept"] = "application/json"
     out["Accept-Encoding"] = "identity"
@@ -91,8 +93,9 @@ def _walk_live(node, product_id, out, tab=None, year=None, month=None):
         return
     y = node.get("year", year)
     m = node.get("month", month)
-    # 直播项：自身带 videoId + downloadUrl/liveId（不再有子 outline）
-    if node.get("videoId") and (node.get("downloadUrl") or node.get("liveId")):
+    # 直播项：自身带 videoId（可能未解锁，downloadUrl/liveId 均为空）；
+    # 未解锁的节点仍加入列表（locked=True），与 _walk_outline 行为一致。
+    if node.get("videoId"):
         out.append({
             "videoId": node.get("videoId"),
             "contentId": node.get("id"),
@@ -184,15 +187,44 @@ def get_product_watch_state(session, product_id):
     return list(out.values())
 
 
-def find_video(session, video_id):
-    """在所有课程里找到指定 videoId 的视频条目。"""
+def find_video(session, video_id, product_id=None):
+    """在所有课程里找到指定 videoId 的视频条目。
+
+    product_id — 可选。传入时只在该课程里查找（精确匹配 productId + videoId）；
+                 不传时扫全部课程，若 videoId 出现在多门课中会打 WARNING 并返回第一条。
+    """
     video_id = int(video_id)
+    if product_id is not None:
+        product_id = int(product_id)
+
+    if product_id is not None:
+        # 精确模式：只扫目标课程
+        for prod in list_products(session):
+            if int(prod["id"]) != product_id:
+                continue
+            for v in get_product_videos(session, prod["id"]):
+                if v.get("videoId") == video_id:
+                    v["productName"] = prod.get("name")
+                    return v
+        return None
+
+    # 模糊模式：扫全部课程，收集所有匹配项
+    matches = []
     for prod in list_products(session):
         for v in get_product_videos(session, prod["id"]):
             if v.get("videoId") == video_id:
                 v["productName"] = prod.get("name")
-                return v
-    return None
+                matches.append((prod["id"], v))
+    if not matches:
+        return None
+    if len(matches) > 1:
+        prod_ids = [str(pid) for pid, _ in matches]
+        _log.warning(
+            "videoId=%s 在多门课中均有出现（productId: %s），返回第一条，"
+            "建议用 --product 指定课程以消除歧义。",
+            video_id, ", ".join(prod_ids),
+        )
+    return matches[0][1]
 
 
 def _pick_clarity(clist, quality="highest"):

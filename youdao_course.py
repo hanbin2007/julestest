@@ -97,7 +97,7 @@ def cmd_list(args):
 
 def _resolve_video(args, session):
     print("正在按 videoId=%s 查找视频……" % args.video)
-    v = find_video(session, args.video)
+    v = find_video(session, args.video, product_id=getattr(args, "product", None))
     if not v:
         raise SystemExit("没找到 videoId=%s（确认它在你的已购课程里）。" % args.video)
     if v["locked"]:
@@ -114,7 +114,7 @@ def cmd_serve(args):
     auto = None
     if getattr(args, "video", None):
         print("正在定位 videoId=%s 以便自动播放……" % args.video)
-        v = find_video(session, args.video)
+        v = find_video(session, args.video, product_id=getattr(args, "product", None))
         if v:
             auto = {"productId": v["productId"], "videoId": v["videoId"]}
         else:
@@ -193,6 +193,8 @@ def build_parser():
 
     sp = sub.add_parser("serve", parents=[common], help="起本地代理 + 网页播放器，浏览器在线看。")
     sp.add_argument("--video", "-V", help="打开时自动播放的 videoId（用 list 查到）。")
+    sp.add_argument("--product", "-P", type=int, default=None,
+                    help="指定课程 productId（同一 videoId 出现在多门课时消除歧义，用 list 查到）。")
     sp.add_argument("--no-prefetch", action="store_true",
                     help="关闭整集后台预缓存（默认开启：边看边下整节课，切走自动暂停）。")
     sp.add_argument("--cache-mb", type=int, default=20480,
@@ -204,6 +206,8 @@ def build_parser():
 
     dp = sub.add_parser("download", parents=[common], help="下载并合并成 mp4（需要 ffmpeg）。")
     dp.add_argument("--video", "-V", help="要下载的 videoId（用 list 查到）。")
+    dp.add_argument("--product", "-P", type=int, default=None,
+                    help="指定课程 productId（同一 videoId 出现在多门课时消除歧义，用 list 查到）。")
     dp.add_argument("--url", "-u", help="要下载的 m3u8 地址；不传则用 --video 或原文里那条。")
     dp.add_argument("--output", "-o", default="output.mp4", help="输出文件名（默认 output.mp4）。")
     dp.set_defaults(func=cmd_download)
