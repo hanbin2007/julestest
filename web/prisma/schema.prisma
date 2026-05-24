@@ -36,13 +36,17 @@ model Video {
 
 // ---- 自有结构化状态 ----
 model Progress {
-  videoId    Int      @id
-  productId  Int?
+  // 同一讲（videoId）可被多门课（productId）打包售卖，故 videoId 不是全局唯一；
+  // 主键用 (productId, videoId) 复合，否则两门课共享同一 videoId 时后写者会在 DB 层覆盖前者（丢进度）。
+  videoId    Int
+  productId  Int
   t          Float    @default(0) // 已看到（秒）
   d          Float    @default(0) // 时长（秒）
   title      String?
   courseName String?
   at         DateTime @updatedAt
+
+  @@id([productId, videoId])
 }
 
 model Note {
