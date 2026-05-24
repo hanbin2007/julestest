@@ -100,10 +100,13 @@ export async function getCourseVideos(productId: number): Promise<GwVideo[]> {
   return rows.map((r) => JSON.parse(r.raw) as GwVideo);
 }
 
-// 主动刷新:重拉课程列表，并清空视频缓存(下次打开各课时按需重拉)。
+// 主动刷新:重拉课程列表，并把各课的视频结构版本标记作废，下次打开该课时按需重拉。
+// 注意:不再 deleteMany Video —— 笔记/进度等都按 videoId 关联讲次,清空会让它们在懒重拉
+// 发生前暂时找不到对应(显示「未知课程」)。改为只删 videosSchema:* 标记:旧讲次行保留作
+// 兜底,getCourseVideos 见版本不符即重拉,且替换是原子事务,关联全程不丢。
 export async function refreshCatalog(): Promise<number> {
   const courses = await syncCourses();
-  await prisma.video.deleteMany({});
+  await prisma.syncMeta.deleteMany({ where: { key: { startsWith: "videosSchema:" } } });
   invalidateCatalogRollup();
   return courses.length;
 }
