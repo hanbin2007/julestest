@@ -325,7 +325,7 @@ export default function SettingsView() {
           onThumbs={(c) => courseAction(c, "thumb")}
         />
       ) : (
-        <Card sx={{ p: 0, height: { xs: "calc(100vh - 320px)", md: "min(72vh, 820px)" }, minHeight: 420, overflow: "hidden" }}>
+        <Card sx={{ p: 0, height: { xs: "calc(100dvh - 320px)", md: "min(72dvh, 820px)" }, minHeight: 420, overflow: "hidden" }}>
           <LectureGrid
             rows={gridRows}
             selected={selected}
