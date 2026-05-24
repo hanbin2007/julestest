@@ -28,7 +28,7 @@ const SLIDERS: { p: Path; label: string; min: number; max: number; step: number;
   { p: "pen.taperEnd", label: "收笔出锋", min: 0, max: 4, step: 0.1, hint: "收笔收尖长度(×笔宽)" },
   { p: "pen.taperStart", label: "起笔出锋", min: 0, max: 4, step: 0.1, hint: "起笔收尖长度(×笔宽)" },
   { p: "pressMinCutoff", label: "压感平滑", min: 0.5, max: 6, step: 0.5, hint: "越小线宽越均匀" },
-  { p: "minSampleDist", label: "抽稀间距", min: 0.5, max: 3, step: 0.1, hint: "采样最小间距(px)" },
+  { p: "minSampleDist", label: "采样间距", min: 0, max: 2, step: 0.05, hint: "越小采样越密(0=不抽稀,全留)" },
 ];
 
 export default function InkTune() {
@@ -56,7 +56,7 @@ export default function InkTune() {
   const copyValues = async () => {
     const json = JSON.stringify(
       { posMinCutoff: tuning.posMinCutoff, posBeta: tuning.posBeta, dCutoff: tuning.dCutoff,
-        pressMinCutoff: tuning.pressMinCutoff, pressBeta: tuning.pressBeta,
+        pressMinCutoff: tuning.pressMinCutoff, pressBeta: tuning.pressBeta, cornerStrength: tuning.cornerStrength,
         pen: tuning.pen, marker: tuning.marker, minSampleDist: tuning.minSampleDist },
       null, 2
     );

@@ -24,16 +24,18 @@ export interface InkTuning {
   minSampleDist: number; // 抽稀最小间距(px)
 }
 
+// 默认值 = 用户在 /ink-tune 上 iPad 实测定下的（2026-05-24）；cornerStrength 用户未导出(当时复制有 bug)，
+// 角已反馈 OK，保留 0.7。minSampleDist 仍在微调（用户要更细），起点设 0.25，滑条放到 0–2。
 export const tuning: InkTuning = {
-  posMinCutoff: 1.2,
-  posBeta: 0.5,
+  posMinCutoff: 4,
+  posBeta: 0.95,
   dCutoff: 1.0,
-  pressMinCutoff: 2.0,
+  pressMinCutoff: 1.5,
   pressBeta: 0.3,
   cornerStrength: 0.7,
-  pen: { thinning: 0.6, smoothing: 0.5, streamline: 0.15, taperStart: 0, taperEnd: 2 },
+  pen: { thinning: 0.6, smoothing: 0.5, streamline: 0.58, taperStart: 0, taperEnd: 2.5 },
   marker: { thinning: 0, smoothing: 0.5, streamline: 0.25, taperStart: 0, taperEnd: 0 },
-  minSampleDist: 1.2,
+  minSampleDist: 0.25,
 };
 
 // 调优页用的预设（名字 → 覆盖值）。生产不引用。
