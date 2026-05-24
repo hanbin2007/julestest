@@ -35,6 +35,7 @@ export function attachLiveScrub(art: any): () => void {
     try {
       v.currentTime = t;
     } catch {
+      v.removeEventListener("seeked", done); // Bug 2: 赋值抛出时移除泄漏的监听器
       busy = false;
     }
   };
@@ -67,10 +68,12 @@ export function attachLiveScrub(art: any): () => void {
   prog.addEventListener("pointerdown", onDown as EventListener);
   window.addEventListener("pointermove", onMove as EventListener);
   window.addEventListener("pointerup", onUp);
+  window.addEventListener("pointercancel", onUp); // Bug 1: 触摸被系统手势打断时也要结束拖拽
   return () => {
     vEl?.removeEventListener("touchmove", blockSeekWhileFF, { capture: true });
     prog.removeEventListener("pointerdown", onDown as EventListener);
     window.removeEventListener("pointermove", onMove as EventListener);
     window.removeEventListener("pointerup", onUp);
+    window.removeEventListener("pointercancel", onUp);
   };
 }
