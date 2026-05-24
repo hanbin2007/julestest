@@ -47,6 +47,7 @@ class DiskLRU:
     # ---- 持久化：index.json 记录 key->(ctype,size,fname) 与 LRU 顺序 ----
     def _load_index(self):
         items = []
+        index_loaded_ok = True   # 索引是否可信（损坏时不能清孤儿，避免误删合法文件）
         try:
             with open(self.index_path, "r", encoding="utf-8") as f:
                 items = json.load(f) or []
@@ -55,6 +56,7 @@ class DiskLRU:
         except Exception:  # noqa: BLE001
             _log.warning("缓存索引损坏，按空缓存启动：%s", self.index_path, exc_info=True)
             items = []
+            index_loaded_ok = False  # 索引不可信，跳过孤儿清理
         size = 0
         for entry in items:
             try:
@@ -67,7 +69,10 @@ class DiskLRU:
                 self.meta[key] = (ctype, sz, fname)
                 size += sz
         self.size = size
-        # 清掉 index 里没有的孤儿文件（崩溃残留 / 半截 .tmp），避免白占盘
+        # 清掉 index 里没有的孤儿文件（崩溃残留 / 半截 .tmp），避免白占盘。
+        # 索引损坏时跳过：meta 为空会把所有合法段文件当孤儿删掉，造成数据丢失。
+        if not index_loaded_ok:
+            return
         keep = {m[2] for m in self.meta.values()}
         keep.add("index.json")
         try:
@@ -87,7 +92,7 @@ class DiskLRU:
             if not self._dirty:
                 return
             items = [[list(k), [v[0], v[1], v[2]]] for k, v in self.meta.items()]
-            self._dirty = False
+            self._dirty = False   # 先清，IO 失败时在 except 里恢复
         with self._io_lock:
             tmp = self.index_path + ".tmp"
             try:
@@ -96,6 +101,9 @@ class DiskLRU:
                 os.replace(tmp, self.index_path)   # 原子替换，避免半截 index
             except Exception:  # noqa: BLE001
                 _log.warning("缓存索引落盘失败：%s", self.index_path, exc_info=True)
+                # IO 失败：恢复 dirty，下次 flush 继续重试
+                with self.lock:
+                    self._dirty = True
 
     def _flush_loop(self):
         while True:
@@ -143,10 +151,17 @@ class DiskLRU:
         n = len(data)
         fn = self._fname(key)
         path = os.path.join(self.dir, fn)
+        # 先写临时文件，再原子替换到目标路径，避免写一半时进程崩溃留下截断文件
+        tmp_fd, tmp_path = tempfile.mkstemp(dir=self.dir, suffix=".tmp")
         try:
-            with open(path, "wb") as f:
+            with os.fdopen(tmp_fd, "wb") as f:
                 f.write(data)
-        except OSError:
+            os.replace(tmp_path, path)   # 原子落盘
+        except Exception:  # noqa: BLE001
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
             return
         with self.lock:
             if key in self.meta:
