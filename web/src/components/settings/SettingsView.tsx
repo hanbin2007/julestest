@@ -52,7 +52,7 @@ export default function SettingsView() {
   const [sort, setSort] = React.useState<CourseSort>("default");
   const [thumbF, setThumbF] = React.useState("");
   const [bufF, setBufF] = React.useState("");
-  const [selected, setSelected] = React.useState<Set<number>>(new Set());
+  const [selected, setSelected] = React.useState<Set<string>>(new Set());
   const [busyIds, setBusyIds] = React.useState<Set<number>>(new Set());
   const [drawer, setDrawer] = React.useState<CourseStatus | null>(null);
 
@@ -94,7 +94,7 @@ export default function SettingsView() {
       .map((r) => {
         const b = perVid[String(r.v.videoId)];
         return {
-          id: r.v.videoId,
+          id: `${r.courseId}:${r.v.videoId}`,
           courseName: r.courseName,
           title: r.v.title ?? `视频 ${r.v.videoId}`,
           duration: r.v.duration,
@@ -162,13 +162,13 @@ export default function SettingsView() {
   };
 
   const targets = (): Video[] => {
-    if (selected.size) return allRows.filter((r) => selected.has(r.v.videoId)).map((r) => r.v);
+    if (selected.size) return allRows.filter((r) => selected.has(`${r.courseId}:${r.v.videoId}`)).map((r) => r.v);
     return gridRows.map((r) => r.vrow.v);
   };
   const rowThumb = (r: VideoRow) => submit([r.v], "thumb");
   const rowBuf = (r: VideoRow) => submit([r.v], "buffer");
 
-  const toggle = (id: number, on: boolean) =>
+  const toggle = (id: string, on: boolean) =>
     setSelected((s) => {
       const n = new Set(s);
       if (on) n.add(id);

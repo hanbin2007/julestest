@@ -11,7 +11,7 @@ import { fmtDur, fmtBytes } from "@/lib/media";
 import type { SegmentMap, VideoRow } from "@/types/api";
 
 export interface GridRow {
-  id: number;
+  id: string;
   courseName: string;
   title: string;
   duration: number | null;
@@ -60,8 +60,8 @@ export default function LectureGrid({
   density,
 }: {
   rows: GridRow[];
-  selected: Set<number>;
-  onToggle: (id: number, on: boolean) => void;
+  selected: Set<string>;
+  onToggle: (id: string, on: boolean) => void;
   onToggleAll: (on: boolean) => void;
   onRowThumb: (r: VideoRow) => void;
   onRowBuf: (r: VideoRow) => void;
