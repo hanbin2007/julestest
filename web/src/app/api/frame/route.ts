@@ -9,6 +9,17 @@ export const dynamic = "force-dynamic";
 // （硬件解码 overlay 不可读），所以批注/发图必须走服务端取帧。
 const GATEWAY = process.env.GATEWAY_ORIGIN ?? "http://127.0.0.1:8808";
 
+// 只允许有道的流媒体源（防 SSRF：内层 u= 必须指向 stream.youdao.com）
+const ALLOWED_HOST = "stream.youdao.com";
+function isAllowedUpstream(u: string): boolean {
+  try {
+    const h = new URL(u).hostname.toLowerCase();
+    return h === ALLOWED_HOST || h.endsWith("." + ALLOWED_HOST);
+  } catch {
+    return false;
+  }
+}
+
 function runFfmpeg(args: string[], timeoutMs: number): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     let ff;
@@ -43,6 +54,12 @@ export async function GET(req: NextRequest) {
   const t = Math.max(0, Math.floor(Number(sp.get("t") ?? "0")) || 0);
   // 防 SSRF：只允许网关的 /p 代理路径
   if (!src.startsWith("/p?")) return new Response("bad src", { status: 400 });
+
+  // 防 SSRF（纵深防御）：校验内层 u= 的真实目标主机
+  const inner = new URLSearchParams(src.slice(src.indexOf("?") + 1)).get("u");
+  if (!inner || !isAllowedUpstream(inner)) {
+    return new Response("bad upstream", { status: 400 });
+  }
 
   const input = `${GATEWAY}${src}`;
   const args = [

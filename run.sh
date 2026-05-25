@@ -20,11 +20,15 @@ GATE=$!
 # 2) Next：迁移 + 首次构建 + 启动
 cd web
 npx prisma migrate deploy >/dev/null
-[ -f .next/BUILD_ID ] || { echo "首次构建中…"; npm run build; }
+if [ ! -f .next/BUILD_ID ] || [ -n "$(find src prisma package.json next.config.ts -newer .next/BUILD_ID 2>/dev/null | head -n1)" ]; then
+  [ -f .next/BUILD_ID ] && echo "源码有更新，重新构建中…" || echo "首次构建中…"
+  npm run build
+fi
 npx next start -H "$HOST" -p "$PORT" &
 NEXT=$!
 
 echo "✓ gateway pid=${GATE}  next pid=${NEXT}"
 echo "✓ open http://${HOST}:${PORT}  (LAN: <your-ip>:${PORT})"
 trap 'echo; echo "停止…"; kill "$GATE" "$NEXT" 2>/dev/null || true' INT TERM EXIT
-wait
+# 任一进程退出立刻触发 EXIT trap 杀掉另一个（这台 Mac bash 3.2.57 没有 wait -n）
+while kill -0 "$GATE" 2>/dev/null && kill -0 "$NEXT" 2>/dev/null; do sleep 2; done

@@ -10,11 +10,25 @@ export class GatewayError extends Error {
   }
 }
 
-async function call<T>(path: string, init?: RequestInit): Promise<T> {
+async function call<T>(
+  path: string,
+  init?: RequestInit,
+  timeoutMs = 90000,
+): Promise<T> {
   let r: Response;
   try {
-    r = await fetch(`${GATEWAY}${path}`, { cache: "no-store", ...init });
+    r = await fetch(`${GATEWAY}${path}`, {
+      cache: "no-store",
+      // signal 放在 ...init 之前，调用方若自带 signal 仍生效
+      signal: AbortSignal.timeout(timeoutMs),
+      ...init,
+    });
   } catch (e) {
+    const name = (e as Error).name;
+    // AbortSignal.timeout 触发的超时：别让挂死的网关一直占着请求
+    if (name === "TimeoutError" || name === "AbortError") {
+      throw new GatewayError(504, "gateway timeout");
+    }
     // 网关进程没起来 / 连接失败
     throw new GatewayError(502, `gateway unreachable: ${(e as Error).message}`);
   }
@@ -24,11 +38,16 @@ async function call<T>(path: string, init?: RequestInit): Promise<T> {
   return r.json() as Promise<T>;
 }
 
-export const gatewayGet = <T>(path: string) => call<T>(path);
+export const gatewayGet = <T>(path: string, timeoutMs?: number) =>
+  call<T>(path, undefined, timeoutMs);
 
-export const gatewayPost = <T>(path: string, body: unknown) =>
-  call<T>(path, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
+export const gatewayPost = <T>(path: string, body: unknown, timeoutMs?: number) =>
+  call<T>(
+    path,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    },
+    timeoutMs,
+  );

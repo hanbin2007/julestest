@@ -12,7 +12,11 @@ const GATEWAY = process.env.GATEWAY_ORIGIN ?? "http://127.0.0.1:8808";
 async function proxy(req: NextRequest, path: string[]) {
   const search = new URL(req.url).search;
   const target = `${GATEWAY}/api/${path.join("/")}${search}`;
-  const init: RequestInit = { method: req.method, cache: "no-store" };
+  const init: RequestInit = {
+    method: req.method,
+    cache: "no-store",
+    signal: AbortSignal.timeout(90000),
+  };
   if (req.method !== "GET" && req.method !== "HEAD") {
     init.body = await req.text();
     init.headers = {
@@ -29,6 +33,10 @@ async function proxy(req: NextRequest, path: string[]) {
       },
     });
   } catch (e) {
+    const name = (e as Error).name;
+    if (name === "TimeoutError" || name === "AbortError") {
+      return Response.json({ error: "gateway timeout" }, { status: 504 });
+    }
     return Response.json(
       { error: `gateway unreachable: ${(e as Error).message}` },
       { status: 502 },

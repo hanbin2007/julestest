@@ -9,6 +9,10 @@ export const dynamic = "force-dynamic";
 export async function POST(req: NextRequest) {
   const body = await req.json().catch(() => ({}));
   const dir = typeof body?.dir === "string" ? body.dir : "";
+  // 轻量早拒：含 NUL 字符的路径直接挡掉（主要的目录限制在网关侧做）
+  if (dir.includes("\0")) {
+    return Response.json({ error: "目录非法" }, { status: 400 });
+  }
   try {
     const result = await gatewayPost("/api/cache-dir", { dir });
     return Response.json(result);
