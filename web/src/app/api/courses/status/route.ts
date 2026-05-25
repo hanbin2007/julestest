@@ -18,7 +18,7 @@ interface GwStatus {
     queued_vids: string[];
     states?: Record<string, string>;
   };
-  live?: { active: string | null; playhead: Record<string, number | null>; inFlight: { live: number; auto: number; manual: number } };
+  live?: { active: string | null; playhead: Record<string, number | null>; done?: string[]; inFlight: { live: number; auto: number; manual: number } };
   ffmpeg: boolean;
   thumbDir: string;
   cacheDir?: string;
@@ -227,6 +227,9 @@ async function build(): Promise<CoursesStatus> {
   const recent = <T,>(a: T[]) => a.slice(-CAP).reverse();
   const bufEntries = Object.entries(bufStates);
   const thEntries = Object.entries(thStates).filter(([v]) => thSession.has(v));
+  // 预缓存完成（本会话看完且整集缓存满）。去重：已有缓冲任务的讲不再单独列预缓存（缓冲"完成"
+  // 已表达"整集已缓存"）；当前仍在预缓存那讲若刚被淘汰回到进行中，也排除避免与进行中重复。
+  const pfDone = (gw.live?.done ?? []).filter((v) => !(v in bufStates) && v !== activePrefetch);
   const completedTasks: TaskItem[] = [
     ...recent(bufEntries.filter(([, st]) => st === "done" || st === "cancelled")).map(([v, st]) =>
       mk(v, "buffer", st as TaskItem["state"]),
@@ -234,6 +237,7 @@ async function build(): Promise<CoursesStatus> {
     ...recent(thEntries.filter(([, st]) => st === "ready" || st === "cancelled")).map(([v, st]) =>
       mk(v, "thumb", st === "ready" ? "done" : "cancelled"),
     ),
+    ...recent(pfDone).map((v) => mk(v, "prefetch", "done")),
   ];
   const failedTasks: TaskItem[] = [
     ...recent(bufEntries.filter(([, st]) => st === "error")).map(([v]) => mk(v, "buffer", "error")),

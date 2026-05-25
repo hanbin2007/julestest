@@ -13,7 +13,7 @@ Gateway 持有一台网关实例的全部可变状态（原先散在 make_handle
   · pf_active["vid"]  仅在 pf_lock 内写；多处无锁读，读到旧值最多让 worker 多跑一轮即退出。
 有锁保护的状态：video_headers(vh_lock)、
 thumb_meta/thumb_active/thumb_jobs/thumb_procs/thumb_session(thumb_lock)、
-buf_state/buf_jobs(buf_lock)、pf_threads(pf_lock)、seg_cache(自带锁)。
+buf_state/buf_jobs(buf_lock)、pf_threads/pf_done(pf_lock)、seg_cache(自带锁)。
 """
 import concurrent.futures
 import json
@@ -136,6 +136,7 @@ class Gateway:
         # 自动预缓存：以"播放头"为中心向前后双向补未缓存分片。
         self.pf_lock = threading.Lock()
         self.pf_active = {"vid": None}
+        self.pf_done = set()     # 本会话预缓存到「整集已满」的 vid（供设置页「已完成」显示看过的讲）
         self.pf_threads = {}     # vid -> (thread, stop_event)
         self.pf_segidx = {}      # vid -> {seg_url: index}
         self.playhead = {}       # vid -> 最近一次直播请求到的分片下标
@@ -477,7 +478,10 @@ class Gateway:
             if recenter:
                 continue
             if not fetched:
-                time.sleep(2.0)  # 整集已在缓存里，歇会儿再巡（播放头移动/被淘汰后回补）
+                # 整集都在缓存里 = 这讲预缓存完成：记进本会话完成集（供设置页「已完成」显示）。
+                with self.pf_lock:
+                    self.pf_done.add(vid)
+                time.sleep(2.0)  # 歇会儿再巡（播放头移动/被淘汰后回补）
 
     def start_prefetch(self, vid, m3u8):
         with self.pf_lock:
@@ -709,6 +713,8 @@ def make_handler(gateway):
                 tsession = sorted(gw.thumb_session)  # 本会话排过队的缩略图任务
             with gw.buf_lock:
                 bstates = dict(gw.buf_state)  # 一次持锁快照，避免并发遍历崩溃 + 供任务标签全量态
+            with gw.pf_lock:
+                pf_done = sorted(gw.pf_done)  # 本会话预缓存满的讲（供「已完成」）
             stats = gw.seg_cache.vid_stats()  # 一次遍历拿到磁盘真相
             real, thumbb = stats["real"], stats["thumb"]
             vids = qs.get("videoId") or []  # 可选：只查这些 vid 的缓冲明细
@@ -755,6 +761,7 @@ def make_handler(gateway):
                 "live": {"active": gw.pf_active["vid"],
                          "playhead": ({gw.pf_active["vid"]: gw.playhead.get(gw.pf_active["vid"])}
                                       if gw.pf_active["vid"] else {}),
+                         "done": pf_done,
                          "inFlight": {"live": gw.gate.n[0], "auto": gw.gate.n[1], "manual": gw.gate.n[2]}},
                 "ffmpeg": gw.have_ffmpeg, "thumbDir": gw.thumb_dir,
                 "cacheDir": gw.seg_cache.dir if gw.seg_cache.persist else "",
