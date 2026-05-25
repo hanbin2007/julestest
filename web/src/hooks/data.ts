@@ -24,6 +24,8 @@ export function useCourseVideos(productId: number | null) {
 export function useAllCourseVideos(courses: Course[]) {
   const [rows, setRows] = useState<VideoRow[]>([]);
   const [loaded, setLoaded] = useState(0);
+  // 仅当课程集合（按 id）真正变化时重新拉取，避免数组 identity 抖动触发全量重取。
+  const key = courses.map((c) => c.id).sort((a, b) => a - b).join(",");
   useEffect(() => {
     if (!courses.length) return;
     let cancelled = false;
@@ -49,7 +51,8 @@ export function useAllCourseVideos(courses: Course[]) {
     return () => {
       cancelled = true;
     };
-  }, [courses]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
   return { rows, loaded, total: courses.length, done: courses.length > 0 && loaded >= courses.length };
 }
 
@@ -81,7 +84,10 @@ export function useCoursesStatus() {
     dedupingInterval: 800,
     refreshInterval: (d) => {
       if (!d) return 1000;
-      const busy = d.activity.queue.thumb + d.activity.queue.buffer + d.tasks.length > 0;
+      // 仅「真正在跑」的任务算忙；纯暂停的稳态回落到 5s（暂停不消耗、无需 1s 刷新）。
+      const busy =
+        d.activity.queue.thumb + d.activity.queue.buffer > 0 ||
+        d.tasks.some((t) => t.state === "working");
       return busy ? 1000 : 5000;
     },
   });

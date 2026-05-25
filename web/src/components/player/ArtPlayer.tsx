@@ -130,12 +130,52 @@ export default function ArtPlayer({ src, thumbnails, startTime, onEnded, onTime,
           m3u8: (video: HTMLVideoElement, url: string, a: any) => {
             if (Hls.isSupported()) {
               const hls = new Hls(HLS_CONFIG as any);
+              // HLS 致命错误有界恢复：网络/媒体错误各自重试，超过上限或遇到其它致命类型则销毁并提示。
+              // 计数用闭包局部变量而非 ref —— 每次切源/重建都会跑这个回调并 new 一个全新 Hls，
+              // 用 ref 会把上一源的计数错误地带过来；局部 let 的生命周期恰好与本 Hls 实例一致。
+              const MAX_RECOVER = 3;
+              let netRecover = 0;
+              let mediaRecover = 0;
+              const giveUp = () => {
+                try {
+                  hls.destroy();
+                } catch {
+                  /* ignore */
+                }
+                try {
+                  a.notice.show = "播放失败，请重试";
+                } catch {
+                  /* ignore */
+                }
+              };
               hls.loadSource(url);
               hls.attachMedia(video);
+              // 成功缓冲分片 / 加载到层级即视为已恢复，复位重试计数。
+              const resetCounters = () => {
+                netRecover = 0;
+                mediaRecover = 0;
+              };
+              hls.on(Hls.Events.FRAG_BUFFERED, resetCounters);
+              hls.on(Hls.Events.LEVEL_LOADED, resetCounters);
               hls.on(Hls.Events.ERROR, (_e: unknown, d: any) => {
                 if (!d?.fatal) return;
-                if (d.type === Hls.ErrorTypes.NETWORK_ERROR) hls.startLoad();
-                else if (d.type === Hls.ErrorTypes.MEDIA_ERROR) hls.recoverMediaError();
+                if (d.type === Hls.ErrorTypes.NETWORK_ERROR) {
+                  if (netRecover < MAX_RECOVER) {
+                    netRecover++;
+                    hls.startLoad();
+                  } else giveUp();
+                } else if (d.type === Hls.ErrorTypes.MEDIA_ERROR) {
+                  if (mediaRecover === 0) {
+                    mediaRecover++;
+                    hls.recoverMediaError();
+                  } else if (mediaRecover === 1) {
+                    mediaRecover++;
+                    hls.swapAudioCodec();
+                    hls.recoverMediaError();
+                  } else giveUp();
+                } else {
+                  giveUp();
+                }
               });
               a._hls = hls;
             } else if (video.canPlayType("application/vnd.apple.mpegurl")) {

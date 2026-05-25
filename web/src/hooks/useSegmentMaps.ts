@@ -14,7 +14,23 @@ export function useSegmentMaps(
   const { data } = useSWR(
     key,
     () => getSegmentMaps(sorted, buckets),
-    { revalidateOnFocus: false, keepPreviousData: true, dedupingInterval: 800, refreshInterval },
+    {
+      revalidateOnFocus: false,
+      keepPreviousData: true,
+      dedupingInterval: 800,
+      refreshInterval: (d) => {
+        // 所有请求的讲都「已知总数且已缓存满」→ bitmap 不会再增长，停止轮询。
+        if (
+          d &&
+          sorted.every((v) => {
+            const m = d.segments[String(v)];
+            return m && m.total != null && m.cached >= m.total;
+          })
+        )
+          return 0;
+        return refreshInterval; // 仍在增长 / 总数未知 → 维持轮询
+      },
+    },
   );
   return data?.segments ?? {};
 }
