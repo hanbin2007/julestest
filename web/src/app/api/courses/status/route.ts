@@ -35,6 +35,11 @@ type VidAgg = { cached: number; total: number | null; state: VidStatusDetail["st
 // 把"逐讲缓存/缩略图状态 -> 每门课汇总(CourseStatus)"的聚合抽成单一实现。
 // 网关在线(build)与离线回退(fallback)只是取数来源不同：用 getVid/getThumb 注入，
 // countTasks 仅在线时统计 buffering/queued（DB 回退里无任务态，恒 0）。同时填充 perVid。
+// 注意：CacheStatus / ThumbStatus 两张镜像表「故意」只按 videoId 建键（@id videoId），
+// 因为它们镜像的是网关那份「物理上只认 vid」的磁盘缓存——同一讲被多门课打包时磁盘上只有
+// 一份。所以这里 per-course 的 cachedBytes 会把这一份字节「重复算进每门拥有它的课」；
+// 这对单门课视图是对的，但跨课求「全局总字节」必须按 unique videoId 去重（见 build/fallback
+// 里的 totals.bufferBytes）。请勿把这两张表改成复合键。
 function buildCourseStatus(
   courses: RollupCourses,
   watched: Set<string>,
@@ -256,6 +261,8 @@ async function build(): Promise<CoursesStatus> {
     courses: courseStatus,
     perVid,
     totals: {
+      // 全局总字节用网关 buffer.bytes：这是磁盘真实占用，天然按物理 vid 去重，不会像
+      // 「各课 cachedBytes 相加」那样把共享讲重复计数（共享讲磁盘只有一份）。
       bufferBytes: gw.buffer.bytes,
       bufferLimit: gw.buffer.limit,
       thumbBytes,
@@ -267,7 +274,9 @@ async function build(): Promise<CoursesStatus> {
       downloadingVid: downloadingVid ? Number(downloadingVid) : null,
       title: dlMeta?.title ?? null,
       tier: bufWorking[0] ? "buffer" : activePrefetch ? "prefetch" : thWorking[0] ? "thumb" : null,
-      queue: { thumb: gw.thumb.queued ?? 0, buffer: gw.buffer.queued ?? 0 },
+      // 队列深度按 queued_vids 列表长度算，而非原始 qsize：后者会把已取消/在途的条目也算进去，
+      // 虚高显示。queued_vids 是网关在同一把锁里算出的「真正还在排队的 vid」，更准。
+      queue: { thumb: thQueued.length, buffer: bufQueued.length },
     },
     tasks,
     completedTasks,
@@ -284,6 +293,8 @@ async function build(): Promise<CoursesStatus> {
   };
 }
 
+// CacheStatus / ThumbStatus 故意只按 videoId 镜像（与网关物理 vid-only 磁盘缓存一一对应，
+// 同一讲跨课只有一份）。键保持 videoId，勿改成复合键；跨课总量去重在 totals 处处理。
 async function mirror(gw: GwStatus) {
   try {
     const ops = [];
@@ -327,7 +338,9 @@ async function fallback(
     (videoId) => (thumbBy.get(videoId) as VidStatusDetail["thumb"]) ?? null,
     false,
   );
-  const totalBytes = courseStatus.reduce((a, c) => a + c.cachedBytes, 0);
+  // 全局总字节按 unique videoId 去重：cacheBy 本身就是 videoId 建键（每讲一行），直接累加其
+  // 字节即天然去重；不能用「各课 cachedBytes 相加」，那会把共享讲在每门拥有它的课里重复计数。
+  const totalBytes = Array.from(cacheBy.values()).reduce((a, r) => a + (r.bytes || 0), 0);
 
   return {
     courses: courseStatus,

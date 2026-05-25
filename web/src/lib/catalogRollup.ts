@@ -21,6 +21,7 @@ export interface VidMeta {
   courseName: string;
   title: string | null;
   kind: "vod" | "live";
+  duration: number | null;
 }
 export interface CatalogRollup {
   courses: RollupCourse[];
@@ -34,6 +35,30 @@ let cache: CatalogRollup | null = null;
 
 export function invalidateCatalogRollup() {
   cache = null;
+}
+
+// 纯函数：把课程列表归约成 byVid / byCourseVid 两张索引（无 IO，便于单测）。
+// 不变式：byVid 对同一 videoId「后写覆盖」（videoId 跨课不唯一，故只保留最后一门课的
+// meta）；byCourseVid 以 `${productId}:${videoId}` 为键，跨课各自独立、不会互相覆盖。
+export function buildKeyMaps(courses: RollupCourse[]): {
+  byVid: Map<number, VidMeta>;
+  byCourseVid: Map<string, VidMeta>;
+} {
+  const byVid = new Map<number, VidMeta>();
+  const byCourseVid = new Map<string, VidMeta>();
+  for (const c of courses)
+    for (const v of c.vids) {
+      const meta: VidMeta = {
+        courseId: c.productId,
+        courseName: c.name,
+        title: v.title,
+        kind: v.kind,
+        duration: v.duration,
+      };
+      byVid.set(v.videoId, meta);
+      byCourseVid.set(`${c.productId}:${v.videoId}`, meta);
+    }
+  return { byVid, byCourseVid };
 }
 
 export async function getCatalogRollup(): Promise<CatalogRollup> {
@@ -73,14 +98,7 @@ export async function getCatalogRollup(): Promise<CatalogRollup> {
     return { productId: c.productId, name: c.name, cardType, vids: byCourse.get(c.productId) ?? [] };
   });
 
-  const byVid = new Map<number, VidMeta>();
-  const byCourseVid = new Map<string, VidMeta>();
-  for (const c of courses)
-    for (const v of c.vids) {
-      const meta: VidMeta = { courseId: c.productId, courseName: c.name, title: v.title, kind: v.kind };
-      byVid.set(v.videoId, meta);
-      byCourseVid.set(`${c.productId}:${v.videoId}`, meta);
-    }
+  const { byVid, byCourseVid } = buildKeyMaps(courses);
 
   cache = { courses, byVid, byCourseVid };
   return cache;

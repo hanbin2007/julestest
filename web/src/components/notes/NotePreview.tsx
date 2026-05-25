@@ -2,9 +2,19 @@
 import * as React from "react";
 import { Box, CircularProgress, Popper, Typography } from "@mui/material";
 import MovieRoundedIcon from "@mui/icons-material/MovieRounded";
-import { getNoteThumb, noteSnapshotUrl } from "@/lib/api";
+import { noteSnapshotUrl } from "@/lib/api";
+import { fetcher } from "@/lib/fetcher";
 import { fmtDur, thumbSheetUrl, thumbTile } from "@/lib/media";
+import type { ThumbResponse } from "@/types/api";
 import type { ThumbMeta } from "@/lib/store";
+
+// videoId 跨课不唯一：把笔记的 courseId(=productId) 一并带给 /api/notes/thumb，
+// 让后端按 (productId, videoId) 精确取该课的 Video 行（否则会取到最低 productId 那门课的错行）。
+// 不走 api.ts 的 getNoteThumb 是因其签名只收 videoId；这里直连同一接口、复用 fetcher。
+function fetchNoteThumb(videoId: number, courseId?: number) {
+  const pid = courseId && courseId > 0 ? `&productId=${courseId}` : "";
+  return fetcher<ThumbResponse>(`/api/notes/thumb?videoId=${videoId}${pid}`);
+}
 
 const PREVIEW_W = 132; // 卡片内小图宽（16:9 → 高约 74）
 const POPPER_W = 360; // 悬停放大图宽
@@ -42,6 +52,7 @@ export default function NotePreview({
   hasSnap,
   meta,
   color,
+  courseId,
 }: {
   noteId: string;
   videoId: number;
@@ -50,6 +61,8 @@ export default function NotePreview({
   hasSnap: boolean;
   meta?: ThumbMeta;
   color: string;
+  // 可选：所属课 productId。未传（老调用方）→ 后端回退按 videoId 取，行为不变。
+  courseId?: number;
 }) {
   const rootRef = React.useRef<HTMLDivElement | null>(null);
   const [inView, setInView] = React.useState(false);
@@ -95,7 +108,7 @@ export default function NotePreview({
     const tick = async () => {
       if (cancelled) return;
       try {
-        const r = await getNoteThumb(videoId);
+        const r = await fetchNoteThumb(videoId, courseId);
         if (cancelled) return;
         if (r.state === "ready") {
           setLiveMeta({ url: r.url, number: r.number, column: r.column, width: r.width, height: r.height });

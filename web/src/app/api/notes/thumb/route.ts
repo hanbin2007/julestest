@@ -11,10 +11,19 @@ export const dynamic = "force-dynamic";
 // 从 Video.raw 还原 ids + 低清 m3u8，转发网关 /api/thumb（网关会落盘持久保存）；
 // 就绪/生成中则镜像进 ThumbStatus，使 /api/notes/all 与播放器状态保持一致。
 export async function GET(req: NextRequest) {
-  const videoId = Number(new URL(req.url).searchParams.get("videoId") ?? "");
+  const sp = new URL(req.url).searchParams;
+  const videoId = Number(sp.get("videoId") ?? "");
   if (!videoId) return Response.json({ state: "error", reason: "no videoId" }, { status: 400 });
 
-  const row = await prisma.video.findFirst({ where: { videoId }, orderBy: { productId: "asc" } });
+  // videoId 跨课不唯一：有 productId（笔记自带）就按 (productId, videoId) 精确取该课的 Video 行，
+  // 避免 findFirst 按 productId 升序选到「最低 productId 那门课」的错行（再据其转发网关参数）。
+  // 老笔记无 productId（或精确行缺失）时回退 findFirst，保持原行为。
+  const productId = Number(sp.get("productId") ?? "");
+  let row =
+    productId > 0
+      ? await prisma.video.findUnique({ where: { productId_videoId: { productId, videoId } } })
+      : null;
+  if (!row) row = await prisma.video.findFirst({ where: { videoId }, orderBy: { productId: "asc" } });
   if (!row) return Response.json({ state: "error", reason: "no video" });
 
   let v: Video;

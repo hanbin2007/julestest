@@ -16,11 +16,6 @@ export async function GET() {
     listSnapIds(),
   ]);
 
-  // videoId -> duration（byVid 不含时长，从 courses 汇总）
-  const durByVid = new Map<number, number | null>();
-  for (const c of rollup.courses)
-    for (const v of c.vids) if (!durByVid.has(v.videoId)) durByVid.set(v.videoId, v.duration);
-
   const thumbByVid = new Map<number, (typeof thumbs)[number]>();
   for (const ts of thumbs) thumbByVid.set(ts.videoId, ts);
 
@@ -47,7 +42,8 @@ export async function GET() {
       courseId,
       courseName: m?.courseName ?? r.courseName ?? "未知课程",
       lessonTitle: m?.title ?? r.lessonTitle ?? `视频 ${r.videoId}`,
-      duration: durByVid.get(r.videoId) ?? null,
+      // 时长随 meta 同键解析（与课程身份一致）：有 productId 走 byCourseVid，老笔记走 byVid。
+      duration: m?.duration ?? null,
       kind: m?.kind ?? "vod",
       thumbState: ts?.state ?? null,
       thumb: ts

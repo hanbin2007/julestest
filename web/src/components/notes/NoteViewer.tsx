@@ -6,9 +6,19 @@ import CloseRoundedIcon from "@mui/icons-material/CloseRounded";
 import PlayArrowRoundedIcon from "@mui/icons-material/PlayArrowRounded";
 import GestureRoundedIcon from "@mui/icons-material/GestureRounded";
 import MovieRoundedIcon from "@mui/icons-material/MovieRounded";
-import { getNoteThumb, noteSnapshotUrl } from "@/lib/api";
+import { noteSnapshotUrl } from "@/lib/api";
+import { fetcher } from "@/lib/fetcher";
 import { fmtDur, thumbSheetUrl, thumbTile } from "@/lib/media";
+import type { ThumbResponse } from "@/types/api";
 import type { EnrichedNote } from "@/lib/store";
+
+// videoId 跨课不唯一：把笔记的 courseId(=productId) 一并带给 /api/notes/thumb，
+// 让后端按 (productId, videoId) 精确取该课的 Video 行（否则会取到最低 productId 那门课的错行）。
+// 不走 api.ts 的 getNoteThumb 是因其签名只收 videoId；这里直连同一接口、复用 fetcher。
+function fetchNoteThumb(videoId: number, courseId?: number) {
+  const pid = courseId && courseId > 0 ? `&productId=${courseId}` : "";
+  return fetcher<ThumbResponse>(`/api/notes/thumb?videoId=${videoId}${pid}`);
+}
 
 // 懒加载 Markdown + KaTeX（与对话/全屏阅读同一份），AI 问答类笔记按 Markdown 渲染。
 const Markdown = dynamic(() => import("@/components/chat/Markdown").then((m) => m.Markdown), {
@@ -131,7 +141,7 @@ function NoteFrame({ note }: { note: EnrichedNote }) {
     const tick = async () => {
       if (cancelled) return;
       try {
-        const r = await getNoteThumb(note.videoId);
+        const r = await fetchNoteThumb(note.videoId, note.courseId);
         if (cancelled) return;
         if (r.state === "ready") {
           setLiveMeta({ url: r.url, number: r.number, column: r.column, width: r.width, height: r.height });
