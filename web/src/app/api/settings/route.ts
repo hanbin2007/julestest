@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
 import { prisma } from "@/lib/db";
+import { SYSTEM_PROMPT_MAX } from "@/lib/chatPrefs";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -29,8 +30,6 @@ export async function GET() {
   ]);
   return Response.json({ prefs: { ...DEFAULT_PREFS, ...(prefs as object) }, last });
 }
-
-const SYSTEM_PROMPT_MAX = 8192;
 
 // prefs 读-改-写串行锁：防止并发 POST 互相覆盖（lost update）。
 // fn 在上一次 settle（成功或失败）后执行，链本身永不携带拒绝态。

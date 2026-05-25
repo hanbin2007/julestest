@@ -38,3 +38,8 @@ export async function readChatImage(id: string): Promise<Buffer | null> {
     return null;
   }
 }
+
+// 清空对话时连带删掉这些消息的附图文件（best-effort，删失败不报错）。
+export async function deleteChatImages(ids: string[]): Promise<void> {
+  await Promise.all(ids.map((id) => fs.rm(imgPath(id), { force: true }).catch(() => {})));
+}

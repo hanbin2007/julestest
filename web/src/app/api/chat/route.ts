@@ -4,15 +4,25 @@ import { chatSchema, parseBody } from "@/lib/validate";
 import { askStream } from "@/lib/claude";
 import { saveChatImage } from "@/lib/chatImages";
 import { getCatalogRollup } from "@/lib/catalogRollup";
+import { SYSTEM_PROMPT_MAX } from "@/lib/chatPrefs";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 // 某讲的对话历史（UI 渲染真相源）。
 export async function GET(req: NextRequest) {
-  const videoId = Number(new URL(req.url).searchParams.get("videoId") ?? "");
+  const sp = new URL(req.url).searchParams;
+  const videoId = Number(sp.get("videoId") ?? "");
   if (!videoId) return Response.json({ error: "missing videoId" }, { status: 400 });
-  const rows = await prisma.chatMessage.findMany({ where: { videoId }, orderBy: { at: "asc" } });
+  // productId 缺省(空)→按 videoId 取全部同讲消息；传了真值→按 (productId,videoId) 收窄，
+  // 并兜底带上旧的 productId 为 null 的历史行（迁移前写入的）。
+  const pidRaw = sp.get("productId");
+  const pid = pidRaw != null && pidRaw !== "" ? Number(pidRaw) : null;
+  const where =
+    pid != null && Number.isFinite(pid)
+      ? { videoId, OR: [{ productId: pid }, { productId: null }] }
+      : { videoId };
+  const rows = await prisma.chatMessage.findMany({ where, orderBy: { at: "asc" } });
   return Response.json({
     messages: rows.map((r) => ({ id: r.id, role: r.role, text: r.text, image: r.image, videoT: r.videoT, at: r.at.getTime() })),
   });
@@ -45,7 +55,7 @@ export async function POST(req: NextRequest) {
     }
   }
   await prisma.chatMessage.create({
-    data: { id: userId, videoId, productId: productId ?? null, role: "user", text, image: imageRef, videoT: videoT ?? null },
+    data: { id: userId, videoId, productId: productId ?? 0, role: "user", text, image: imageRef, videoT: videoT ?? null },
   });
 
   // 上下文：课程/讲标题（best-effort）。有 productId 则精确取课，否则回退 byVid。
@@ -59,13 +69,18 @@ export async function POST(req: NextRequest) {
     /* ignore */
   }
 
-  const thread = await prisma.chatThread.findUnique({ where: { videoId } });
+  const thread = await prisma.chatThread.findUnique({
+    where: { productId_videoId: { productId: productId ?? 0, videoId } },
+  });
 
   // 用户自定义系统提示词（存在 Setting('prefs').systemPrompt；空则用内置默认）
   let systemPrompt: string | undefined;
   try {
     const row = await prisma.setting.findUnique({ where: { key: "prefs" } });
-    if (row) systemPrompt = (JSON.parse(row.value) as { systemPrompt?: string }).systemPrompt;
+    if (row) {
+      const v = (JSON.parse(row.value) as { systemPrompt?: string }).systemPrompt;
+      if (typeof v === "string" && v.length <= SYSTEM_PROMPT_MAX) systemPrompt = v;
+    }
   } catch {
     /* ignore，退化为默认人格 */
   }
@@ -78,8 +93,9 @@ export async function POST(req: NextRequest) {
     async start(controller) {
       let finalText = "";
       let sessionId: string | null = null;
+      let ok = false; // 只在收到干净 done 时置真；error/异常中断/取消都不落库
       try {
-        for await (const ev of askStream({ text, imageBase64, imageMediaType, sessionId: thread?.sessionId ?? undefined, context, systemPrompt, effort })) {
+        for await (const ev of askStream({ text, imageBase64, imageMediaType, sessionId: thread?.sessionId ?? undefined, context, systemPrompt, effort, signal: req.signal })) {
           if (req.signal.aborted) break;
           if (ev.type === "session") {
             sessionId = ev.sessionId;
@@ -90,19 +106,20 @@ export async function POST(req: NextRequest) {
             send(controller, { error: ev.message });
           } else if (ev.type === "done") {
             if (ev.text) finalText = ev.text; // 以完整助手文本为准
+            ok = true;
           }
         }
-        // 落助手消息 + 会话 id（用于下次 resume）
-        if (finalText.trim()) {
+        // 落助手消息 + 会话 id（用于下次 resume）。仅在干净完成且未被取消时落库。
+        if (ok && !req.signal.aborted && finalText.trim()) {
           await prisma.chatMessage.create({
-            data: { id: `${rid()}-a`, videoId, productId: productId ?? null, role: "assistant", text: finalText, videoT: videoT ?? null },
+            data: { id: `${rid()}-a`, videoId, productId: productId ?? 0, role: "assistant", text: finalText, videoT: videoT ?? null },
           });
         }
-        if (sessionId) {
+        if (ok && !req.signal.aborted && sessionId) {
           await prisma.chatThread.upsert({
-            where: { videoId },
-            create: { videoId, productId: productId ?? null, sessionId },
-            update: { sessionId, productId: productId ?? null },
+            where: { productId_videoId: { productId: productId ?? 0, videoId } },
+            create: { videoId, productId: productId ?? 0, sessionId },
+            update: { sessionId, productId: productId ?? 0 },
           });
         }
         send(controller, { done: true });

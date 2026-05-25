@@ -71,21 +71,25 @@ model Note {
 model ChatMessage {
   id        String   @id
   videoId   Int
-  productId Int? // 课程归属标记（写入时记录）；不改 videoId 键与对话逻辑
+  productId Int? // 课程归属标记（写入时记录）；按 (productId,videoId) 收窄对话归属
   role      String // "user" | "assistant"
   text      String
   image     String? // 附图文件 id（用户消息可带批注画面，落盘在 chat-imgs/）
   videoT    Int? // 提问时的播放位置(秒)；存问答为笔记时作截图/跳转的时间锚点
   at        DateTime @default(now())
 
-  @@index([videoId])
+  @@index([productId, videoId])
 }
 
 model ChatThread {
-  videoId   Int      @id
-  productId Int? // 课程归属标记（写入时记录）；键仍为 videoId，resume 逻辑不变
+  // 同一讲（videoId）可被多门课打包售卖，videoId 不再全局唯一；
+  // 主键改为复合 (productId, videoId)，否则两门课共享同一 videoId 时会串台会话/互相覆盖 sessionId。
+  videoId   Int
+  productId Int      @default(0) // 课程归属（缺省 0）；与 videoId 组成复合主键
   sessionId String? // Claude Agent SDK 会话 id，用于多轮 resume
   updatedAt DateTime @updatedAt
+
+  @@id([productId, videoId])
 }
 
 // 网关缓存/缓冲状态的镜像（真相在网关，这里供 UI 直读 + 跨设备）

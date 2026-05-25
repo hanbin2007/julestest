@@ -17,7 +17,7 @@ export const noteAddSchema = z.object({
 
 export const noteUpdateSchema = z.object({
   videoId: z.coerce.number().int().positive(),
-  productId: z.coerce.number().int().nullish(), // 课程身份;用于回包列表按 (videoId,productId) 收窄,旧客户端可省
+  productId: z.coerce.number().int().nullish().catch(null), // 课程身份;用于回包列表按 (videoId,productId) 收窄,旧客户端可省
   id: z.string().min(1),
   text: z.string().trim().min(1),
   strokes: strokesField,
@@ -26,7 +26,7 @@ export const noteUpdateSchema = z.object({
 // 内置 Claude 助教：发消息入参。image 为可选的 dataURL（批注画面截图）。
 export const chatSchema = z.object({
   videoId: z.coerce.number().int().positive(),
-  productId: z.coerce.number().int().nullish().catch(null), // 课程归属标记;不改对话/键逻辑
+  productId: z.coerce.number().int(), // 必填:ChatThread/ChatMessage 按 (productId,videoId) 复合归属;前端始终上报真实 productId
   text: z.string().trim().min(1),
   image: z.string().startsWith("data:image/").max(6_000_000).optional(),
   effort: z.enum(["low", "medium", "high", "xhigh"]).optional(), // 思考等级
@@ -35,7 +35,7 @@ export const chatSchema = z.object({
 
 export const noteDeleteSchema = z.object({
   videoId: z.coerce.number().int().positive(),
-  productId: z.coerce.number().int().nullish(), // 课程身份;用于回包列表按 (videoId,productId) 收窄,旧客户端可省
+  productId: z.coerce.number().int().nullish().catch(null), // 课程身份;用于回包列表按 (videoId,productId) 收窄,旧客户端可省
   id: z.string().min(1),
 });
 

@@ -20,6 +20,7 @@ export interface AskParams {
   context?: ChatContext;
   systemPrompt?: string; // 用户在设置里自定义的系统提示词（空则用默认）
   effort?: ChatEffort; // 思考等级
+  signal?: AbortSignal; // 客户端断连/切讲时中止 SDK query
 }
 
 export type ChatEvent =
@@ -51,6 +52,14 @@ function buildOptions(p: AskParams): Options {
     /* ignore */
   }
 
+  // SDK 取消用 abortController（非裸 signal）；把传入的 AbortSignal 桥接到一个 controller。
+  let abortController: AbortController | undefined;
+  if (p.signal) {
+    abortController = new AbortController();
+    if (p.signal.aborted) abortController.abort();
+    else p.signal.addEventListener("abort", () => abortController!.abort(), { once: true });
+  }
+
   return {
     model: "claude-opus-4-7",
     tools: [], // 纯问答，关闭全部内置工具
@@ -61,6 +70,7 @@ function buildOptions(p: AskParams): Options {
     cwd,
     env: env as NodeJS.ProcessEnv,
     ...(p.sessionId ? { resume: p.sessionId } : {}),
+    ...(abortController ? { abortController } : {}),
   };
 }
 
@@ -90,6 +100,7 @@ export async function* askStream(p: AskParams): AsyncGenerator<ChatEvent> {
 
   let finalText = "";
   let sessionSent = false;
+  let sawResult = false;
   const q = query({ prompt, options });
   try {
     for await (const m of q as AsyncIterable<any>) {
@@ -109,13 +120,27 @@ export async function* askStream(p: AskParams): AsyncGenerator<ChatEvent> {
           .filter((b: any) => b.type === "text")
           .map((b: any) => b.text)
           .join("");
-        if (m.error) yield { type: "error", message: String(m.error) };
+        // 助手层错误（鉴权/限流等）是终态：报错后立即结束，别再当成功落库。
+        if (m.error) {
+          yield { type: "error", message: String(m.error) };
+          return;
+        }
       } else if (m.type === "result") {
-        yield { type: "done", text: finalText };
+        sawResult = true;
+        // result 是终态：失败子类型/is_error 一律报错，绝不当成功 done。
+        if (m.subtype !== "success" || m.is_error) {
+          yield {
+            type: "error",
+            message: (Array.isArray(m.errors) ? m.errors.join("; ") : "") || m.subtype || "对话失败",
+          };
+          return;
+        }
+        yield { type: "done", text: m.result || finalText };
         return;
       }
     }
-    yield { type: "done", text: finalText };
+    // 流结束却没收到 result（异常中断）：不要发裸 done（会被当成功落库）。
+    if (!sawResult) yield { type: "error", message: "对话异常结束" };
   } catch (e) {
     yield { type: "error", message: (e as Error).message || "Claude 调用失败" };
   } finally {

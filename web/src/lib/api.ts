@@ -178,18 +178,14 @@ export const noteSnapshotUrl = (id: string) =>
   `/api/notes/snapshot?id=${encodeURIComponent(id)}`;
 
 // ---- 内置 Claude 助教（按讲对话）----
-export const getChat = (videoId: number) =>
-  fetcher<{ messages: ChatMessage[] }>(`/api/chat?videoId=${videoId}`);
-export const clearChat = (videoId: number) =>
-  postJson<{ ok: boolean }>("/api/chat/clear", { videoId });
+// productId 缺省(null)时不带该参数：服务端按 videoId 返回全部同讲消息（向后兼容）。
+export const getChat = (videoId: number, productId: number | null = null) =>
+  fetcher<{ messages: ChatMessage[] }>(
+    `/api/chat?videoId=${videoId}` + (productId != null ? `&productId=${productId}` : ""),
+  );
+export const clearChat = (videoId: number, productId: number | null = null) =>
+  postJson<{ ok: boolean }>("/api/chat/clear", { videoId, productId });
 export const chatImageUrl = (id: string) => `/api/chat/image?id=${encodeURIComponent(id)}`;
-// 流式发送：返回原始 Response，由 useChat 读取 SSE（不走 fetcher/JSON）。
-export const sendChat = (videoId: number, text: string, image?: string) =>
-  fetch("/api/chat", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ videoId, text, image }),
-  });
 
 export const getSettings = () =>
   fetcher<{ prefs: Prefs; last: LastWatched | null }>("/api/settings");
