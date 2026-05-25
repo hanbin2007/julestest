@@ -200,6 +200,14 @@ async function build(): Promise<CoursesStatus> {
   const thStates = gw.thumb.states ?? {};
   const thSession = new Set(gw.thumb.session ?? []);
 
+  // 自动预缓存(prefetch)：网关的 pf_active 只增不清（看完 / 缓存满 / 切走都不归零），故"上次在看
+  // 那讲"会一直挂在 live.active。仅当它尚未缓存满才算真正进行中；缓存满即视为完成、不再列为任务
+  // （否则会"完成了还显示进行中"）。total 未知时保守按进行中显示。
+  const liveVid = gw.live?.active ?? null;
+  const livePer = liveVid ? perVidGw[liveVid] : undefined;
+  const liveFull = !!livePer && livePer.total != null && livePer.cached >= livePer.total;
+  const activePrefetch = liveVid && !liveFull ? liveVid : null;
+
   // 进行中：缓冲 working/queued/paused + 预缓存(只读) + 缩略图 working/queued。
   // working/queued/paused 三者天然互斥：网关在同一把 buf_lock 快照里同时算出 buffer.working
   // 与 buffer.states，同一 vid 不会既在 working 列表又被 paused 扫描到，故无重复。
@@ -208,7 +216,7 @@ async function build(): Promise<CoursesStatus> {
   for (const [v, st] of Object.entries(bufStates)) {
     if (st === "paused") tasks.push(mk(v, "buffer", "paused"));
   }
-  if (gw.live?.active) tasks.push(mk(gw.live.active, "prefetch", "working"));
+  if (activePrefetch) tasks.push(mk(activePrefetch, "prefetch", "working"));
   for (const v of thWorking) tasks.push(mk(v, "thumb", "working"));
   for (const v of bufQueued) tasks.push(mk(v, "buffer", "queued"));
   for (const v of thQueued) tasks.push(mk(v, "thumb", "queued"));
@@ -237,7 +245,7 @@ async function build(): Promise<CoursesStatus> {
     .filter(([vid, b]) => b.cached > 0 && !byVid.has(Number(vid)))
     .map(([vid, b]) => ({ vid: Number(vid), segments: b.cached, bytes: b.bytes || 0 }));
 
-  const downloadingVid = bufWorking[0] ?? gw.live?.active ?? thWorking[0] ?? null;
+  const downloadingVid = bufWorking[0] ?? activePrefetch ?? thWorking[0] ?? null;
   const dlMeta = downloadingVid ? byVid.get(Number(downloadingVid)) : null;
 
   return {
@@ -254,7 +262,7 @@ async function build(): Promise<CoursesStatus> {
     activity: {
       downloadingVid: downloadingVid ? Number(downloadingVid) : null,
       title: dlMeta?.title ?? null,
-      tier: bufWorking[0] ? "buffer" : gw.live?.active ? "prefetch" : thWorking[0] ? "thumb" : null,
+      tier: bufWorking[0] ? "buffer" : activePrefetch ? "prefetch" : thWorking[0] ? "thumb" : null,
       queue: { thumb: gw.thumb.queued ?? 0, buffer: gw.buffer.queued ?? 0 },
     },
     tasks,
