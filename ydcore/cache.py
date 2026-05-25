@@ -8,6 +8,7 @@ import shutil
 import tempfile
 import threading
 import time
+import urllib.parse
 from collections import OrderedDict
 
 _log = logging.getLogger(__name__)
@@ -183,7 +184,8 @@ class DiskLRU:
 
     def count_vid(self, vid):
         with self.lock:
-            return sum(1 for (t, v) in self.meta if v == vid and t.endswith(".ts"))
+            return sum(1 for (t, v) in self.meta
+                       if v == vid and urllib.parse.urlparse(t).path.endswith((".ts", ".m4s")))
 
     def vid_stats(self):
         """一次遍历汇总每个 vid 的磁盘占用：真实视频段 vs 缩略图源段(t_ 前缀)。
@@ -192,7 +194,7 @@ class DiskLRU:
         real, thumb = {}, {}
         with self.lock:
             for (url, vid), (_ctype, size, _fname) in self.meta.items():
-                is_seg = url.endswith(".ts")
+                is_seg = urllib.parse.urlparse(url).path.endswith((".ts", ".m4s"))
                 if isinstance(vid, str) and vid.startswith("t_"):
                     d = thumb.setdefault(vid[2:], {"segments": 0, "bytes": 0})
                 else:
@@ -208,7 +210,7 @@ class DiskLRU:
         out = {}
         with self.lock:
             for (url, vid), _meta in self.meta.items():
-                if url.endswith(".ts"):
+                if urllib.parse.urlparse(url).path.endswith((".ts", ".m4s")):
                     out.setdefault(vid, set()).add(url)
         return out
 

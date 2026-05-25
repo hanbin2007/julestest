@@ -76,6 +76,14 @@ def asset_bytes(name):
     return _ASSET_CACHE[name]
 
 
+# 允许回源的上游主机（精确等值，无通配后缀）：
+#   stream.youdao.com    —— m3u8 播放列表 + .ts 分片
+#   live.ydshengxue.com  —— 直播回放 AES 解密 key 接口（/p 的 key 分支会回源到此）
+# 三处校验（buffer 入口/thumb 入口/_proxy）共用此常量，避免各自硬编码漂移。
+_ALLOWED_HOSTS = frozenset({"stream.youdao.com", "live.ydshengxue.com"})
+
+MAX_BODY = 8 * 1024 * 1024  # 请求体上限 8MB，防超大 POST body 拖垮内存
+
 # 缩略图雪碧图参数
 THUMB_INTERVAL = 10   # 每 10 秒一帧
 THUMB_W = 160
@@ -263,7 +271,7 @@ class Gateway:
             return {"state": "error", "reason": "no ffmpeg"}
         with self.thumb_lock:
             st = self.thumb_meta.get(vid)
-            if st and st["state"] in ("ready", "gen"):
+            if st and st.get("state") in ("ready", "gen"):
                 return st
             self.thumb_meta[vid] = {"state": "gen"}
             self.thumb_jobs[vid] = (video, m3u8, duration, tier)  # 供重试重新入队
@@ -338,11 +346,13 @@ class Gateway:
     def start_buffer(self, video, m3u8):
         vid = str(video["videoId"])
         with self.buf_lock:
-            if self.buf_state.get(vid) in ("queued", "working", "paused"):
-                return
+            # done 也跳过：整集已缓存好的不再重排（批量计数据此判定为「跳过」）。
+            if self.buf_state.get(vid) in ("queued", "working", "paused", "done"):
+                return False
             self.buf_state[vid] = "queued"
             self.buf_jobs[vid] = (video, m3u8)  # 供继续/重试重新入队
         self.buf_q.put((video, m3u8))
+        return True
 
     # ---- 任务操作（暂停/继续/取消/重试）------------------------------------
     # 全部即时复查当前状态后再决策，幂等：非法转换返回 ok=False 而不抛错，便于前端
@@ -457,31 +467,39 @@ class Gateway:
                     yield b
 
         # 不停地以播放头为中心、前后双向补未缓存分片；播放头一动就立刻重新居中。
-        while not stop.is_set() and self.pf_active["vid"] == vid:
-            center = self.playhead.get(vid, 0)
-            fetched = recenter = False
-            for idx in _order(center):
-                if stop.is_set() or self.pf_active["vid"] != vid:
-                    return  # 被切走 -> 停（已缓存的保留，回来可续）
-                if self.playhead.get(vid, 0) != center:
-                    recenter = True
-                    break  # 播放头移动了 -> 重新居中
-                s = segs[idx]
-                if self.seg_cache.has((s, vid)):
+        # 任何退出路径（被切走 return / 整集缓存完成 return / 循环条件退出）都经 finally
+        # 清掉 pf_active，避免 worker 退出后 pf_active 仍残留本 vid 误导状态/重建判断。
+        try:
+            while not stop.is_set() and self.pf_active["vid"] == vid:
+                center = self.playhead.get(vid, 0)
+                fetched = recenter = False
+                for idx in _order(center):
+                    if stop.is_set() or self.pf_active["vid"] != vid:
+                        return  # 被切走 -> 停（已缓存的保留，回来可续）
+                    if self.playhead.get(vid, 0) != center:
+                        recenter = True
+                        break  # 播放头移动了 -> 重新居中
+                    s = segs[idx]
+                    if self.seg_cache.has((s, vid)):
+                        continue
+                    try:
+                        d, c, _ = self.pri_fetch(1, hdrs, s)
+                        self.seg_cache.put((s, vid), (c or "video/mp2t", d))
+                        fetched = True
+                    except Exception:  # noqa: BLE001
+                        _log.debug("预缓存分片失败 vid=%s：%s", vid, s, exc_info=True)
+                if recenter:
                     continue
-                try:
-                    d, c, _ = self.pri_fetch(1, hdrs, s)
-                    self.seg_cache.put((s, vid), (c or "video/mp2t", d))
-                    fetched = True
-                except Exception:  # noqa: BLE001
-                    _log.debug("预缓存分片失败 vid=%s：%s", vid, s, exc_info=True)
-            if recenter:
-                continue
-            if not fetched:
-                # 整集都在缓存里 = 这讲预缓存完成：记进本会话完成集（供设置页「已完成」显示）。
-                with self.pf_lock:
-                    self.pf_done.add(vid)
-                time.sleep(2.0)  # 歇会儿再巡（播放头移动/被淘汰后回补）
+                if not fetched:
+                    # 整集都在缓存里 = 这讲预缓存完成：记进本会话完成集（供设置页「已完成」显示），
+                    # 然后退出本线程（不再空转 sleep）。再次 /api/play 会经 start_prefetch 重建线程续巡。
+                    with self.pf_lock:
+                        self.pf_done.add(vid)
+                    return
+        finally:
+            with self.pf_lock:
+                if self.pf_active.get("vid") == vid:
+                    self.pf_active["vid"] = None
 
     def start_prefetch(self, vid, m3u8):
         with self.pf_lock:
@@ -514,7 +532,6 @@ def make_handler(gateway):
             self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
-            self.send_header("Access-Control-Allow-Origin", "*")
             for k, v in (extra or {}).items():
                 self.send_header(k, v)
             self.end_headers()
@@ -576,6 +593,9 @@ def make_handler(gateway):
 
         def _read_json(self):
             length = int(self.headers.get("Content-Length") or 0)
+            if length > MAX_BODY:
+                self._send_json({"error": "请求体过大"}, 413)
+                return None
             return json.loads(self.rfile.read(length).decode("utf-8"))
 
         def _buffer_video(self, d):
@@ -586,7 +606,10 @@ def make_handler(gateway):
             except (KeyError, ValueError, TypeError):
                 return None
             src = d.get("src") or ""
-            if not (isinstance(src, str) and src.startswith("https://stream.youdao.com")):
+            if not isinstance(src, str):
+                return None
+            p = urllib.parse.urlparse(src)
+            if p.scheme not in ("http", "https") or (p.hostname or "").lower() not in _ALLOWED_HOSTS:
                 return None
             return video, src
 
@@ -597,15 +620,19 @@ def make_handler(gateway):
                 _log.debug("请求体解析失败：%s", e)
                 self._send_json({"error": str(e)}, 400)
                 return
+            if payload is None:
+                return  # _read_json 已回 413
             queued = skipped = 0
             for d in payload.get("videos") or []:
                 bv = self._buffer_video(d)
-                vid = str(d.get("videoId"))
-                if not bv or self.gw.buf_state.get(vid) in ("queued", "working", "done"):
+                if not bv:
                     skipped += 1
                     continue
-                self.gw.start_buffer(*bv)
-                queued += 1
+                # start_buffer 在 buf_lock 内判重并入队，返回是否真排入（避免无锁预读 buf_state）。
+                if self.gw.start_buffer(*bv):
+                    queued += 1
+                else:
+                    skipped += 1
             self._send_json({"queued": queued, "skipped": skipped})
 
         def _api_tasks_action(self):
@@ -617,6 +644,8 @@ def make_handler(gateway):
             except Exception as e:  # noqa: BLE001
                 self._send_json({"error": str(e)}, 400)
                 return
+            if payload is None:
+                return  # _read_json 已回 413
             verb = payload.get("verb")
             kind = payload.get("kind")
             vid = str(payload.get("vid") or "")
@@ -682,11 +711,18 @@ def make_handler(gateway):
                 _log.debug("请求体解析失败：%s", e)
                 self._send_json({"error": str(e)}, 400)
                 return
+            if payload is None:
+                return  # _read_json 已回 413
             raw = (payload.get("dir") or "").strip()
             if not raw:
                 self._send_json({"error": "缓存目录不能为空"}, 400)
                 return
-            d = os.path.abspath(os.path.expanduser(raw))
+            # realpath（而非 abspath）解掉符号链接，防经软链逃逸到主目录外；再限定在用户主目录下。
+            d = os.path.realpath(os.path.expanduser(raw))
+            base = os.path.realpath(os.path.expanduser("~"))
+            if os.path.commonpath([base, d]) != base:
+                self._send_json({"error": "目录必须在用户主目录下"}, 400)
+                return
             try:
                 os.makedirs(d, exist_ok=True)
                 probe = os.path.join(d, ".ydcourse_write_test")
@@ -747,11 +783,13 @@ def make_handler(gateway):
             tready = sum(1 for s in tstates.values() if s == "ready")
             tgen = [k for k, s in tstates.items() if s == "gen"]
             terr = sum(1 for s in tstates.values() if s == "error")
+            tqueued = [k for k in tgen if k not in tactive]
             self._send_json({
                 "thumb": {"states": tstates, "ready": tready, "generating": tgen,
                           "working": sorted(tactive),
-                          "queued_vids": [k for k in tgen if k not in tactive],
-                          "queued": gw.thumb_q.qsize(), "errors": terr,
+                          "queued_vids": tqueued,
+                          # 由 queued_vids 推数：thumb_q.qsize() 会把已取消/在途的也算进去而高报。
+                          "queued": len(tqueued), "errors": terr,
                           "session": tsession},
                 "buffer": {"perVid": buffer, "bytes": gw.seg_cache.size, "limit": gw.seg_cache.max,
                            "queued": gw.buf_q.qsize(),
@@ -776,7 +814,10 @@ def make_handler(gateway):
             except (KeyError, ValueError, TypeError):
                 return None
             src = d.get("src") or ""
-            if not (isinstance(src, str) and src.startswith("https://stream.youdao.com")):
+            if not isinstance(src, str):
+                return None
+            p = urllib.parse.urlparse(src)
+            if p.scheme not in ("http", "https") or (p.hostname or "").lower() not in _ALLOWED_HOSTS:
                 return None
             try:
                 duration = int(float(d.get("duration") or 0))
@@ -791,7 +832,7 @@ def make_handler(gateway):
                 return
             with self.gw.thumb_lock:
                 st = self.gw.thumb_meta.get(vid)
-            if st and st["state"] in ("ready", "gen", "error"):
+            if st and st.get("state") in ("ready", "gen", "error"):
                 self._send_json(st)
                 return
             parsed = {k: (v[0] if v else None) for k, v in qs.items()}
@@ -803,17 +844,18 @@ def make_handler(gateway):
 
         def _api_thumbs_batch(self):
             try:
-                length = int(self.headers.get("Content-Length") or 0)
-                payload = json.loads(self.rfile.read(length).decode("utf-8"))
+                payload = self._read_json()
             except Exception as e:  # noqa: BLE001
                 _log.debug("缩略图批量请求体解析失败：%s", e)
                 self._send_json({"error": str(e)}, 400)
                 return
+            if payload is None:
+                return  # _read_json 已回 413
             queued = skipped = 0
             for d in payload.get("videos") or []:
                 with self.gw.thumb_lock:
                     st = self.gw.thumb_meta.get(str(d.get("videoId")))
-                if st and st["state"] in ("ready", "gen"):
+                if st and st.get("state") in ("ready", "gen"):
                     skipped += 1
                     continue
                 tv = self._thumb_video(d)
@@ -930,6 +972,12 @@ def make_handler(gateway):
                 self._send_bytes(400, b"missing u", "text/plain")
                 return
             target = qs["u"][0]
+            # 仅允许回源到白名单上游主机（按解析出的 hostname 精确等值，绝不用 URL 字符串 startswith）：
+            # m3u8 与 分片/key 两条分支都在此守卫之后，故二者都被保护。
+            tp = urllib.parse.urlparse(target)
+            if tp.scheme not in ("http", "https") or (tp.hostname or "").lower() not in _ALLOWED_HOSTS:
+                self._send_bytes(400, b"forbidden target", "text/plain")
+                return
             vid = (qs.get("vid") or [None])[0]
 
             # 记录播放头：把这次直播分片请求映射到下标，预缓存据此向两边扩散。
