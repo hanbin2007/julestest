@@ -51,8 +51,6 @@ function reducer(s: State, a: Action): State {
 
 export type AnnotationApi = ReturnType<typeof useAnnotation>;
 
-const EMPTY_SET: ReadonlySet<string> = new Set();
-
 export function useAnnotation() {
   const [tool, setToolState] = React.useState<ActiveTool>("pen");
   const [color, setColor] = React.useState<string>(COLORS[0]);
@@ -68,12 +66,12 @@ export function useAnnotation() {
   // 切到非套索工具时清空选区（套索是唯一的「选择」工具）。
   const setTool = React.useCallback((t: ActiveTool) => {
     setToolState(t);
-    if (t !== "lasso") setSelectedIds(EMPTY_SET as Set<string>);
+    if (t !== "lasso") setSelectedIds(new Set<string>());
   }, []);
 
   const setObjects = React.useCallback((objs: AnnObject[]) => dispatch({ type: "set", objects: objs }), []);
   const select = React.useCallback((ids: Set<string>) => setSelectedIds(ids), []);
-  const clearSelection = React.useCallback(() => setSelectedIds(EMPTY_SET as Set<string>), []);
+  const clearSelection = React.useCallback(() => setSelectedIds(new Set<string>()), []);
 
   const copy = () => {
     if (selectedIds.size === 0) return;
@@ -84,13 +82,19 @@ export function useAnnotation() {
     if (clipboard.current.length === 0) return;
     const ids = new Set(clipboard.current.map((o) => o.id));
     const pasted = cloneForPaste(clipboard.current, ids, 0.03, 0.03, newId); // 粘贴偏移一点
+    // 把剪贴板里的源 transform 也推进 +0.03/+0.03，使连续 Cmd+V 逐次错开成阶梯，
+    // 而不是全堆在同一处（重新 copy 会重建剪贴板，自然复位级联）。
+    clipboard.current = clipboard.current.map((o) => ({
+      ...o,
+      transform: { ...o.transform, tx: o.transform.tx + 0.03, ty: o.transform.ty + 0.03 },
+    }));
     setObjects([...objects, ...pasted]);
     setSelectedIds(new Set(pasted.map((o) => o.id)));
   };
   const deleteSelected = () => {
     if (selectedIds.size === 0) return;
     setObjects(objects.filter((o) => !selectedIds.has(o.id)));
-    setSelectedIds(EMPTY_SET as Set<string>);
+    setSelectedIds(new Set<string>());
   };
 
   return {
@@ -118,7 +122,7 @@ export function useAnnotation() {
     undo: React.useCallback(() => dispatch({ type: "undo" }), []),
     redo: React.useCallback(() => dispatch({ type: "redo" }), []),
     load: React.useCallback((objs: AnnObject[]) => {
-      setSelectedIds(EMPTY_SET as Set<string>);
+      setSelectedIds(new Set<string>());
       dispatch({ type: "load", objects: objs });
     }, []),
   };

@@ -187,6 +187,9 @@ export default function AnnotationLayer({ api, video }: { api: AnnotationApi; vi
       const w = rect.width;
       const h = rect.height;
       if (!w || !h) return;
+      // 尺寸未变就跳过：ResizeObserver 会重复触发，重设 canvas.width/height 会清空 GPU
+      // 缓冲并触发整页重描笔迹，纯属浪费。
+      if (sizeRef.current.w === w && sizeRef.current.h === h) return;
       wrap.style.left = rect.left + "px";
       wrap.style.top = rect.top + "px";
       wrap.style.width = w + "px";
@@ -202,6 +205,10 @@ export default function AnnotationLayer({ api, video }: { api: AnnotationApi; vi
         if (ctx) ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       }
       sizeRef.current = { w, h };
+      // 平滑器在像素空间工作（基于 sizeRef），样本却按 rectOf() 归一化；中途改尺寸会让
+      // 滤波基准与采样基准错位。尺寸真正变化时重置进行中的平滑器，避免混入旧基准的历史。
+      smootherRef.current.reset();
+      lastSampleRef.current = null;
       redrawCommitted();
       drawLive();
     };
@@ -246,6 +253,15 @@ export default function AnnotationLayer({ api, video }: { api: AnnotationApi; vi
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  // 卸载清理：取消挂起的 rAF 并清空 drawingRef。drawingRef 置空是关键——它切断
+  // scheduleRaf 里 `if (drawingRef.current) scheduleRaf()` 的自我续命，否则中途关闭
+  // 批注层时若一笔仍在进行，rAF 回调会无限重排（内存/CPU 泄漏）。
+  React.useEffect(() => () => {
+    if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
+    rafRef.current = null;
+    drawingRef.current = null;
   }, []);
 
   const rectOf = () => liveRef.current!.getBoundingClientRect();
