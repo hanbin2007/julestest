@@ -24,13 +24,44 @@ export const noteUpdateSchema = z.object({
 });
 
 // 内置 Claude 助教：发消息入参。image 为可选的 dataURL（批注画面截图）。
+// chatId 必填：新建 chat 走 /api/chat/new 拿到 id 后再发消息（两步），这样客户端 stream
+// 状态从 t=0 就以 chatId 为键，免去 "pending → real" 换键的复杂度，是支撑后台并行的关键。
+// currentProductId/videoId = 发送时所看的讲(与 chat 绑定可能不同)，用于:
+//   1) 写入 ChatMessage.productId/videoId 让 videoT 跳回正确;
+//   2) 仅 chat.kind==='lesson' 时注入 system 上下文(课程名/讲名)。
 export const chatSchema = z.object({
-  videoId: z.coerce.number().int().positive(),
-  productId: z.coerce.number().int(), // 必填:ChatThread/ChatMessage 按 (productId,videoId) 复合归属;前端始终上报真实 productId
+  chatId: z.string().min(1),
   text: z.string().trim().min(1),
   image: z.string().startsWith("data:image/").max(6_000_000).optional(),
-  effort: z.enum(["low", "medium", "high", "xhigh"]).optional(), // 思考等级
-  videoT: z.coerce.number().int().min(0).optional(), // 提问时的播放位置(秒)
+  effort: z.enum(["low", "medium", "high", "xhigh"]).optional(),
+  videoT: z.coerce.number().int().min(0).optional(),
+  currentProductId: z.coerce.number().int().nullish().catch(null),
+  currentVideoId: z.coerce.number().int().nullish().catch(null),
+});
+
+// 创建新 chat：kind=lesson 必带 productId+videoId;independent 两者必须缺省。
+export const chatNewSchema = z
+  .object({
+    kind: z.enum(["lesson", "independent"]),
+    productId: z.coerce.number().int().optional(),
+    videoId: z.coerce.number().int().positive().optional(),
+  })
+  .refine(
+    (d) =>
+      d.kind === "lesson"
+        ? d.productId != null && d.videoId != null
+        : d.productId == null && d.videoId == null,
+    { message: "lesson 需带 productId+videoId;independent 不可带" },
+  );
+
+// 重命名 chat：服务端会再 trim,空串拒,长度 ≤120 字。
+export const chatRenameSchema = z.object({
+  chatId: z.string().min(1),
+  title: z.string().trim().min(1).max(120),
+});
+
+export const chatDeleteSchema = z.object({
+  chatId: z.string().min(1),
 });
 
 export const noteDeleteSchema = z.object({

@@ -2,15 +2,17 @@
 import * as React from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { AppBar, Box, IconButton, Toolbar, Tooltip, Typography } from "@mui/material";
+import { AppBar, Badge, Box, IconButton, Toolbar, Tooltip, Typography } from "@mui/material";
 import MenuRoundedIcon from "@mui/icons-material/MenuRounded";
 import SearchRoundedIcon from "@mui/icons-material/SearchRounded";
 import SettingsRoundedIcon from "@mui/icons-material/SettingsRounded";
 import NoteAltOutlinedIcon from "@mui/icons-material/NoteAltOutlined";
+import ForumOutlinedIcon from "@mui/icons-material/ForumOutlined";
 import ArrowBackRoundedIcon from "@mui/icons-material/ArrowBackRounded";
 import LightModeRoundedIcon from "@mui/icons-material/LightModeRounded";
 import DarkModeRoundedIcon from "@mui/icons-material/DarkModeRounded";
 import { useColorScheme } from "@mui/material/styles";
+import { useAnyChatStreaming } from "@/hooks/useChatStream";
 
 function ThemeModeToggle() {
   const { mode, setMode } = useColorScheme();
@@ -33,14 +35,17 @@ export default function AppTopBar({
   onCommand,
 }: {
   onMenu?: () => void;
-  // ☰ 按钮的悬停 / a11y 文案：桌面端「折叠 / 展开课程列表」、移动端「目录」。
+  // ☰ 按钮的悬停 / a11y 文案:桌面端「折叠 / 展开课程列表」、移动端「目录」。
   menuTooltip?: string;
   onCommand?: () => void;
 }) {
   const pathname = usePathname();
   const onSettings = pathname?.startsWith("/settings");
   const onNotes = pathname?.startsWith("/notes");
-  const onHome = !onSettings && !onNotes;
+  const onChats = pathname?.startsWith("/chats");
+  const onHome = !onSettings && !onNotes && !onChats;
+  // 全局活跃指示器:任一 chat 在后台跑 → /chats 图标右上角加 dot,点击进 /chats 看具体哪个。
+  const anyStreaming = useAnyChatStreaming();
   return (
     <AppBar position="static">
       <Toolbar variant="dense" sx={{ gap: 1 }}>
@@ -71,6 +76,18 @@ export default function AppTopBar({
             </IconButton>
           </Tooltip>
         )}
+        <Tooltip title={anyStreaming ? "对话(有进行中的)" : "对话"}>
+          <IconButton component={Link} href="/chats" color={onChats ? "primary" : "default"}>
+            <Badge
+              variant="dot"
+              color="primary"
+              invisible={!anyStreaming}
+              overlap="circular"
+            >
+              <ForumOutlinedIcon />
+            </Badge>
+          </IconButton>
+        </Tooltip>
         <Tooltip title="笔记">
           <IconButton component={Link} href="/notes" color={onNotes ? "primary" : "default"}>
             <NoteAltOutlinedIcon />

@@ -26,14 +26,44 @@ export interface Note {
   at: number; // ms
 }
 
-// 内置 Claude 助教消息（按讲）。
+// 内置 Claude 助教消息(一条 chat 下的一条消息)。
+// videoId/productId 是「发送时所看的讲」(供 videoT 跳回 / 存为笔记锚定),可空(独立聊天发送时无)。
 export interface ChatMessage {
   id: string;
   role: "user" | "assistant";
   text: string;
-  image?: string | null; // 附图文件 id（=消息 id），用 chatImageUrl(id) 取图
-  videoT?: number | null; // 提问时的播放位置(秒)；存问答为笔记时作截图/跳转锚点
+  image?: string | null; // 附图文件 id(=消息 id),用 chatImageUrl(id) 取图
+  videoT?: number | null; // 提问时的播放位置(秒)
+  videoId?: number | null;
+  productId?: number | null;
   at: number; // ms
+}
+
+// 单个聊天的元信息(GET /api/chat 也返回这块给 UI 显示标题/原绑定)。
+export interface ChatMeta {
+  id: string;
+  kind: "lesson" | "independent";
+  productId: number | null;
+  videoId: number | null;
+  title: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+// 列表富化后的聊天(中心页 + 切换器);课程名/讲名靠目录 live 富化,删课时回退 null。
+export interface EnrichedChat extends ChatMeta {
+  sessionId: "set" | null; // 不暴露真值,只告知有无续接能力
+  messageCount: number;
+  lastMessage: { role: string; text: string; at: number } | null;
+  courseName: string | null;
+  lessonTitle: string | null;
+}
+
+export interface ChatsStats {
+  total: number;
+  lesson: number;
+  independent: number;
+  courses: number; // 覆盖课程数
 }
 
 // 缩略图雪碧图元数据（多为 null，前端按常量回退）。

@@ -20,7 +20,9 @@ import AnnotationOverlay from "@/components/annotate/AnnotationOverlay";
 import FloatingTools from "@/components/annotate/FloatingTools";
 import { useAnnotation, bakeAnnotation, bakeWithServerFrame } from "@/components/annotate/useAnnotation";
 import { serializeDoc, parseDoc } from "@/components/annotate/model";
-import ChatPanel, { type ChatPrefill, CHAT_WIDTH } from "@/components/chat/ChatPanel";
+import ChatPanel, { CHAT_WIDTH } from "@/components/chat/ChatPanel";
+import type { ChatPrefill } from "@/components/chat/ChatBody";
+import * as api from "@/lib/api";
 import ContinueWatchingRail from "@/components/home/ContinueWatchingRail";
 import CommandPalette from "@/components/common/CommandPalette";
 import ShortcutsOverlay from "@/components/common/ShortcutsOverlay";
@@ -80,9 +82,13 @@ export default function PlayerView() {
   // 批注 + AI 助教
   const [annotateOpen, setAnnotateOpen] = React.useState(false);
   const [chatOpen, setChatOpen] = React.useState(false);
+  // 多聊天:activeChatId 是当前在 ChatPanel 里显示的那条;null = 未选/新建空白。
+  // 关闭面板不清 — 再开还是同一条;切讲时也不清 — 同一条聊天可跨讲继续。
+  const [activeChatId, setActiveChatId] = React.useState<string | null>(null);
   const [annotationText, setAnnotationText] = React.useState("");
   const [editingNoteId, setEditingNoteId] = React.useState<string | null>(null);
   const [pendingEditId, setPendingEditId] = React.useState<string | null>(null); // 深链 ?annotation=
+  const [pendingChatId, setPendingChatId] = React.useState<string | null>(null); // 深链 ?chat=
   const [chatPrefill, setChatPrefill] = React.useState<ChatPrefill | null>(null);
   const [savingAnno, setSavingAnno] = React.useState(false);
   // 分屏：播放器左 + 右侧面板（对话 / 笔记，二选一互斥）。null = 无分屏。
@@ -139,12 +145,18 @@ export default function PlayerView() {
     const v = Number(sp.get("videoId"));
     const t = Number(sp.get("t"));
     const an = sp.get("annotation"); // 编辑批注深链
+    const ch = sp.get("chat"); // 指定打开某个 chat(从 /chats 跳进来)
     if (p && v) {
       setSel({ courseId: p, videoId: v });
       if (t > 0) setSeekOverride(t);
       if (an) setPendingEditId(an);
-      if (t > 0 || an) {
-        // 抹掉一次性参数：可分享的跳转链接不该变成"刷新即丢进度/重入编辑"的链接
+      if (ch) {
+        setPendingChatId(ch);
+        setActiveChatId(ch);
+        setChatOpen(true);
+      }
+      if (t > 0 || an || ch) {
+        // 抹掉一次性参数:可分享的跳转链接不该变成"刷新即丢进度/重入编辑/重开聊天"的链接
         window.history.replaceState(null, "", `/?productId=${p}&videoId=${v}`);
       }
       resumedRef.current = true;
@@ -156,6 +168,24 @@ export default function PlayerView() {
     resumedRef.current = true;
     setSel({ courseId: last.productId, videoId: last.videoId });
   }, [last, sel]);
+
+  // 默认聊天解析:面板开 + activeChatId 为空 → 拉本讲 chat 列表,挑最近一条;空则保留 null(懒建)。
+  // 注意 sel 不在 deps — 换讲不能重置 activeChatId(req: 跨讲不再打断聊天)。
+  React.useEffect(() => {
+    if (!chatOpen || activeChatId || !sel) return;
+    let cancelled = false;
+    api
+      .getChats({ scope: "lesson", productId: sel.courseId, videoId: sel.videoId })
+      .then((r) => {
+        if (cancelled) return;
+        if (r.chats[0]) setActiveChatId(r.chats[0].id);
+      })
+      .catch(() => {/* 拉失败保留 null,首条消息会触发新建 */});
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chatOpen, activeChatId]);
 
   // 取流
   React.useEffect(() => {
@@ -740,8 +770,11 @@ export default function PlayerView() {
       <ChatPanel
         open={chatOpen}
         onClose={closeChat}
-        videoId={video?.videoId ?? null}
-        productId={sel?.courseId ?? null}
+        chatId={activeChatId}
+        onChangeChatId={setActiveChatId}
+        getCurrentLesson={() =>
+          sel && video ? { productId: sel.courseId, videoId: video.videoId } : null
+        }
         prefill={chatPrefill}
         onConsumePrefill={() => setChatPrefill(null)}
         split={chatSplit}
