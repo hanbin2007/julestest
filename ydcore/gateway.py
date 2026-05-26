@@ -638,6 +638,8 @@ def make_handler(gateway):
                 self._api_tasks_action()
             elif parsed.path == "/api/cache-dir":
                 self._api_set_cache_dir()
+            elif parsed.path == "/api/warm":
+                self._api_warm()
             else:
                 self._send_bytes(404, b"not found", "text/plain")
 
@@ -655,6 +657,10 @@ def make_handler(gateway):
                          "cardPackageId": int(d["cardPackageId"]), "productId": int(d["productId"])}
             except (KeyError, ValueError, TypeError):
                 return None
+            # 直播回放：play_headers 据此挂 Liveid 头去取 AES key
+            live_id = d.get("liveId")
+            if live_id:
+                video["liveId"] = str(live_id)
             src = d.get("src") or ""
             if not isinstance(src, str):
                 return None
@@ -662,6 +668,49 @@ def make_handler(gateway):
             if p.scheme not in ("http", "https") or (p.hostname or "").lower() not in _ALLOWED_HOSTS:
                 return None
             return video, src
+
+        def _api_warm(self):
+            """轻量回填:给一批 (vid, src, ids, liveId?), 只取 m3u8 学到分片顺序+总数,
+            不下分片。给设置页"重启后大量已缓存讲总数未知"一次性补齐用。"""
+            try:
+                payload = self._read_json()
+            except Exception as e:  # noqa: BLE001
+                _log.debug("warm 请求体解析失败：%s", e)
+                self._send_json({"error": str(e)}, 400)
+                return
+            if payload is None:
+                return  # _read_json 已回 413
+            warmed = 0
+            skipped = 0
+            errors = []
+            for d in payload.get("videos") or []:
+                tv = self._thumb_video(d)  # 复用 (video, src, duration) 解析；duration 忽略
+                if not tv:
+                    errors.append({"videoId": d.get("videoId"), "reason": "bad payload"})
+                    continue
+                video, m3u8, _ = tv
+                vid = str(video["videoId"])
+                if self.gw.seg_urls.get(vid):
+                    skipped += 1
+                    continue
+                try:
+                    th = play_headers(self.gw.session, video, m3u8)
+                    with self.gw.vh_lock:
+                        self.gw.video_headers[vid] = th
+                    data, _ctype, _st = self.gw.pri_fetch(2, th, m3u8)  # MANUAL 档,不抢观看带宽
+                    text = data.decode("utf-8", "replace")
+                    segs = parse_segments(text, m3u8)
+                    if not segs:
+                        errors.append({"videoId": video["videoId"], "reason": "no segments"})
+                        continue
+                    self.gw.seg_urls[vid] = list(segs)
+                    self.gw.seg_total[vid] = len(segs)
+                    self.gw._save_seg_urls()
+                    warmed += 1
+                except Exception as e:  # noqa: BLE001
+                    _log.debug("warm 失败 vid=%s", vid, exc_info=True)
+                    errors.append({"videoId": video["videoId"], "reason": str(e)[:200]})
+            self._send_json({"warmed": warmed, "skipped": skipped, "errors": errors})
 
         def _api_buffer_batch(self):
             try:

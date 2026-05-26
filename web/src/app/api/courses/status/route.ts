@@ -1,5 +1,5 @@
 import { prisma } from "@/lib/db";
-import { gatewayGet } from "@/lib/gateway";
+import { gatewayGet, gatewayPost } from "@/lib/gateway";
 import { getCatalogRollup, type VidMeta } from "@/lib/catalogRollup";
 import type { CoursesStatus, CourseStatus, TaskItem, VidStatusDetail } from "@/types/api";
 
@@ -118,6 +118,65 @@ function buildCourseStatus(
 let last: { at: number; data: CoursesStatus } | null = null;
 let pending: Promise<CoursesStatus> | null = null;
 
+// 已 fire 给网关 /api/warm 的 vid：同一会话不重复触发。
+// 用途：网关重启后某些已缓存讲 seg_urls 还没回载完，会显示 total=null；
+// 我们从 DB 取这些 vid 的 src/ids 让网关只取 m3u8 学到 total（不下分片）。
+const warmTried = new Set<number>();
+const warmInflight = new Set<number>();
+
+async function triggerWarmIfNeeded(
+  perVidGw: Record<string, { cached: number; total: number | null }>,
+  byVid: Map<number, VidMeta>,
+) {
+  const needed: number[] = [];
+  for (const [vid, b] of Object.entries(perVidGw)) {
+    const id = Number(vid);
+    if (!id) continue;
+    if (b.cached > 0 && b.total === null && byVid.has(id) && !warmInflight.has(id) && !warmTried.has(id)) {
+      needed.push(id);
+    }
+  }
+  if (needed.length === 0) return;
+  needed.forEach((v) => warmInflight.add(v));
+
+  try {
+    const rows = await prisma.video.findMany({
+      where: { videoId: { in: needed } },
+      select: { videoId: true, productId: true, raw: true },
+    });
+    const videos = rows.map((r) => {
+      let raw: Record<string, unknown> = {};
+      try { raw = JSON.parse(r.raw) as Record<string, unknown>; } catch { /* ignore */ }
+      const clarity = Array.isArray(raw.clarity) ? raw.clarity as Array<{ url?: string }> : [];
+      const src = (raw.downloadUrl as string) || clarity[0]?.url || "";
+      return {
+        videoId: r.videoId,
+        contentId: raw.contentId as number,
+        cardPackageId: raw.cardPackageId as number,
+        productId: r.productId,
+        src,
+        duration: (raw.duration as number) ?? 0,
+        liveId: (raw.liveId as number) ?? null,
+      };
+    }).filter((v) => v.src && v.contentId && v.cardPackageId);
+
+    if (videos.length === 0) {
+      needed.forEach((v) => { warmInflight.delete(v); warmTried.add(v); });
+      return;
+    }
+
+    // fire-and-forget: 网关侧逐个串行取 m3u8，耗时可能数秒；下一次 polling 就能看到 total。
+    void gatewayPost("/api/warm", { videos })
+      .catch(() => { /* 失败下次轮询会再试，warmTried 不加 */ })
+      .finally(() => {
+        videos.forEach((v) => warmInflight.delete(v.videoId));
+        videos.forEach((v) => warmTried.add(v.videoId));
+      });
+  } catch {
+    needed.forEach((v) => warmInflight.delete(v));
+  }
+}
+
 export async function GET() {
   const now = Date.now();
   if (last && now - last.at < 200) return Response.json(last.data);
@@ -161,6 +220,9 @@ async function build(): Promise<CoursesStatus> {
   void mirror(gw);
 
   const perVidGw = gw.buffer.perVid;
+  // 网关重启后若 seg_urls.json 缺失（首次升级或被删），perVid 会有大批 cached>0 但 total=null。
+  // 一次性 fire 给 /api/warm 让网关只取 m3u8 学到分片顺序+总数（不下分片）。下次轮询就有 total 了。
+  void triggerWarmIfNeeded(perVidGw, byVid);
   const perVid: Record<string, VidStatusDetail> = {};
   const thumbState = (vid: number): VidStatusDetail["thumb"] => {
     const s = gw!.thumb.states[String(vid)];
