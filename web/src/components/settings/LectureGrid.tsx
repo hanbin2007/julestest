@@ -58,6 +58,7 @@ export default function LectureGrid({
   onRowThumb,
   onRowBuf,
   density,
+  hideCourseColumn = false,
 }: {
   rows: GridRow[];
   selected: Set<string>;
@@ -66,6 +67,8 @@ export default function LectureGrid({
   onRowThumb: (r: VideoRow) => void;
   onRowBuf: (r: VideoRow) => void;
   density: "comfortable" | "compact";
+  // 课程详情抽屉(760px)里所有行同一课程 → 隐藏「课程」列腾出 120px，避免 缓冲/操作 越出抽屉。
+  hideCourseColumn?: boolean;
 }) {
   const allOn = rows.length > 0 && rows.every((r) => selected.has(r.id));
   const someOn = rows.some((r) => selected.has(r.id));
@@ -94,7 +97,9 @@ export default function LectureGrid({
         />
       ),
     },
-    { field: "courseName", headerName: "课程", flex: 1.1, minWidth: 120 },
+    ...(hideCourseColumn
+      ? []
+      : ([{ field: "courseName", headerName: "课程", flex: 1.1, minWidth: 120 }] as GridColDef<GridRow>[])),
     { field: "title", headerName: "讲次", flex: 1.6, minWidth: 160 },
     {
       field: "kind",
@@ -189,8 +194,10 @@ export default function LectureGrid({
         "& .MuiDataGrid-columnHeaders": { bgcolor: "md3.surfaceContainerHighest" },
         // Cells: vertically centered, no overflow bleed
         "& .MuiDataGrid-cell": { display: "flex", alignItems: "center" },
-        // Prevent horizontal scroll leak on narrow containers
-        overflow: "hidden",
+        // 窄容器(如 760px 抽屉)里列宽合计仍可能 > 容器：允许 grid 内部横向滚动,
+        // 避免「缓冲/操作」列被裁掉。父 Card 已 overflow: hidden，不会再外溢到页面。
+        overflowX: "auto",
+        overflowY: "hidden",
       }}
     />
   );

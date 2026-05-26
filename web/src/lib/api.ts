@@ -49,6 +49,7 @@ export function getThumb(v: Video, src: string): Promise<ThumbResponse> {
   const q =
     `videoId=${v.videoId}&contentId=${v.contentId}` +
     `&cardPackageId=${v.cardPackageId}&productId=${v.productId}` +
+    (v.liveId ? `&liveId=${v.liveId}` : "") + // 直播回放：解密 key 需要 Liveid 头
     `&duration=${v.duration ?? 0}&src=${encodeURIComponent(src)}`;
   return fetcher<ThumbResponse>(`/api/thumb?${q}`);
 }

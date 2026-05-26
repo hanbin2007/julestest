@@ -109,6 +109,7 @@ export default function CourseDetailDrawer({
             onRowThumb={onRowThumb}
             onRowBuf={onRowBuf}
             density={density}
+            hideCourseColumn
           />
         )}
       </Box>

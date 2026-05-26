@@ -29,9 +29,13 @@ import { batchThumbs, batchBuffer, getCourseVideos, syncYoudaoProgress, taskActi
 import { pickLow, pickM3u8 } from "@/lib/media";
 import type { CourseStatus, TaskItem, TaskVerb, Video, VideoRow } from "@/types/api";
 
+// 缩略图源：点播取最低清晰度（解码更快）；直播回放无清晰度档 → 回退到 m3u8 (即 downloadUrl)。
+// liveId 给网关拼 Liveid 头取 AES key；点播为 null。
+const thumbSrc = (v: Video) => pickLow(v) || pickM3u8(v) || "";
 const MK_THUMB = (v: Video) => ({
   videoId: v.videoId, contentId: v.contentId, cardPackageId: v.cardPackageId,
-  productId: v.productId, duration: v.duration, src: pickLow(v),
+  productId: v.productId, duration: v.duration, src: thumbSrc(v),
+  liveId: v.liveId ?? null,
 });
 const MK_BUF = (v: Video) => ({
   videoId: v.videoId, contentId: v.contentId, cardPackageId: v.cardPackageId,
@@ -112,7 +116,7 @@ export default function SettingsView() {
 
   // ---- 操作 ----
   const submit = async (vids: Video[], kind: "thumb" | "buffer") => {
-    const t = kind === "thumb" ? vids.filter((v) => pickLow(v)) : vids.filter((v) => pickM3u8(v));
+    const t = kind === "thumb" ? vids.filter((v) => thumbSrc(v)) : vids.filter((v) => pickM3u8(v));
     if (!t.length) return toast("没有可处理的讲次");
     try {
       const r = kind === "thumb" ? await batchThumbs(t.map(MK_THUMB)) : await batchBuffer(t.map(MK_BUF));

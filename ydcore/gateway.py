@@ -813,6 +813,10 @@ def make_handler(gateway):
                          "cardPackageId": int(d["cardPackageId"]), "productId": int(d["productId"])}
             except (KeyError, ValueError, TypeError):
                 return None
+            # 直播回放：play_headers 据此挂 Liveid 头去取 AES key；点播缺省即可。
+            live_id = d.get("liveId")
+            if live_id:
+                video["liveId"] = str(live_id)
             src = d.get("src") or ""
             if not isinstance(src, str):
                 return None

@@ -95,6 +95,8 @@ export interface BatchThumbVideo {
   productId: number;
   duration: number | null;
   src: string;
+  // 直播回放：网关侧拼 Liveid 头取 AES key；点播置 null
+  liveId?: number | null;
 }
 export interface BatchBufferVideo {
   videoId: number;
