@@ -9,34 +9,63 @@ import { SYSTEM_PROMPT_MAX } from "@/lib/chatPrefs";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-// 某讲的对话历史（UI 渲染真相源）。
+// 单聊天历史 + chat 元信息。chat 元用于 UI 上方标题/绑定标识(原绑定课程/讲)。
 export async function GET(req: NextRequest) {
   const sp = new URL(req.url).searchParams;
-  const videoId = Number(sp.get("videoId") ?? "");
-  if (!videoId) return Response.json({ error: "missing videoId" }, { status: 400 });
-  // productId 缺省(空)→按 videoId 取全部同讲消息；传了真值→按 (productId,videoId) 收窄，
-  // 并兜底带上旧的 productId 为 null 的历史行（迁移前写入的）。
-  const pidRaw = sp.get("productId");
-  const pid = pidRaw != null && pidRaw !== "" ? Number(pidRaw) : null;
-  const where =
-    pid != null && Number.isFinite(pid)
-      ? { videoId, OR: [{ productId: pid }, { productId: null }] }
-      : { videoId };
-  const rows = await prisma.chatMessage.findMany({ where, orderBy: { at: "asc" } });
+  const chatId = sp.get("chatId");
+  if (!chatId) return Response.json({ error: "missing chatId" }, { status: 400 });
+  const chat = await prisma.chat.findUnique({ where: { id: chatId } });
+  if (!chat) return Response.json({ error: "chat not found" }, { status: 404 });
+  const rows = await prisma.chatMessage.findMany({
+    where: { chatId },
+    orderBy: { at: "asc" },
+  });
   return Response.json({
-    messages: rows.map((r) => ({ id: r.id, role: r.role, text: r.text, image: r.image, videoT: r.videoT, at: r.at.getTime() })),
+    chat: {
+      id: chat.id,
+      kind: chat.kind,
+      productId: chat.productId,
+      videoId: chat.videoId,
+      title: chat.title,
+      createdAt: chat.createdAt.getTime(),
+      updatedAt: chat.updatedAt.getTime(),
+    },
+    messages: rows.map((r) => ({
+      id: r.id,
+      role: r.role,
+      text: r.text,
+      image: r.image,
+      videoT: r.videoT,
+      videoId: r.videoId,
+      productId: r.productId,
+      at: r.at.getTime(),
+    })),
   });
 }
 
 const rid = () => `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 
-// 发一条消息：落用户消息 → 调订阅版 Claude（resume 续上下文）→ SSE 流式回传 → 落助手消息。
+// 把首条用户消息截到 ~40 字作为 chat 标题(尾部 …)。已有 title 不动。
+function deriveTitle(text: string): string {
+  const t = text.trim().replace(/\s+/g, " ");
+  if (t.length <= 40) return t;
+  // 防止 surrogate pair 截一半
+  let cut = 40;
+  while (cut > 0 && /[\uD800-\uDBFF]/.test(t.charAt(cut - 1))) cut--;
+  return t.slice(0, cut) + "…";
+}
+
+// 发消息：要求 chatId(新建走 /api/chat/new),落用户消息 → askStream(resume) → SSE 流回 →
+// 落助手消息 + 更新 sessionId。abort 时只保留用户消息,sessionId/助手消息都不写(下次能续上)。
 export async function POST(req: NextRequest) {
   const { data, error } = await parseBody(req, chatSchema);
   if (error) return error;
-  const { videoId, productId, text, image, effort, videoT } = data;
+  const { chatId, text, image, effort, videoT, currentProductId, currentVideoId } = data;
 
-  // 落用户消息（附图存盘）
+  const chat = await prisma.chat.findUnique({ where: { id: chatId } });
+  if (!chat) return Response.json({ error: "chat not found" }, { status: 404 });
+
+  // 落用户消息(附图存盘)。productId/videoId 记录「发送时所看的讲」,可空。
   const userId = rid();
   let imageBase64: string | undefined;
   let imageMediaType: string | undefined;
@@ -55,25 +84,42 @@ export async function POST(req: NextRequest) {
     }
   }
   await prisma.chatMessage.create({
-    data: { id: userId, videoId, productId: productId ?? 0, role: "user", text, image: imageRef, videoT: videoT ?? null },
+    data: {
+      id: userId,
+      chatId,
+      videoId: currentVideoId ?? null,
+      productId: currentProductId ?? null,
+      role: "user",
+      text,
+      image: imageRef,
+      videoT: videoT ?? null,
+    },
   });
 
-  // 上下文：课程/讲标题（best-effort）。有 productId 则精确取课，否则回退 byVid。
-  let context: { courseName?: string; lessonTitle?: string } | undefined;
-  try {
-    const rollup = await getCatalogRollup();
-    const meta =
-      productId != null ? rollup.byCourseVid.get(`${productId}:${videoId}`) : rollup.byVid.get(videoId);
-    if (meta) context = { courseName: meta.courseName, lessonTitle: meta.title ?? undefined };
-  } catch {
-    /* ignore */
+  // 首条用户消息且 chat 还无标题 → 派生一个。乐观写,不阻塞流。
+  if (!chat.title) {
+    const title = deriveTitle(text);
+    if (title) {
+      prisma.chat
+        .update({ where: { id: chatId }, data: { title } })
+        .catch(() => {/* 标题派生失败不影响主流程 */});
+    }
   }
 
-  const thread = await prisma.chatThread.findUnique({
-    where: { productId_videoId: { productId: productId ?? 0, videoId } },
-  });
+  // 上下文：仅 lesson 类 chat 注入 课程/讲 上下文，且用「当前所看的讲」而不是 chat 自己
+  // 绑定的讲(支持跨讲复用同一 chat 时,system prompt 跟得上)。independent 不注入。
+  let context: { courseName?: string; lessonTitle?: string } | undefined;
+  if (chat.kind === "lesson" && currentProductId != null && currentVideoId != null) {
+    try {
+      const rollup = await getCatalogRollup();
+      const meta = rollup.byCourseVid.get(`${currentProductId}:${currentVideoId}`);
+      if (meta) context = { courseName: meta.courseName, lessonTitle: meta.title ?? undefined };
+    } catch {
+      /* ignore */
+    }
+  }
 
-  // 用户自定义系统提示词（存在 Setting('prefs').systemPrompt；空则用内置默认）
+  // 用户自定义系统提示词(空则用内置默认)
   let systemPrompt: string | undefined;
   try {
     const row = await prisma.setting.findUnique({ where: { key: "prefs" } });
@@ -93,9 +139,18 @@ export async function POST(req: NextRequest) {
     async start(controller) {
       let finalText = "";
       let sessionId: string | null = null;
-      let ok = false; // 只在收到干净 done 时置真；error/异常中断/取消都不落库
+      let ok = false;
       try {
-        for await (const ev of askStream({ text, imageBase64, imageMediaType, sessionId: thread?.sessionId ?? undefined, context, systemPrompt, effort, signal: req.signal })) {
+        for await (const ev of askStream({
+          text,
+          imageBase64,
+          imageMediaType,
+          sessionId: chat.sessionId ?? undefined,
+          context,
+          systemPrompt,
+          effort,
+          signal: req.signal,
+        })) {
           if (req.signal.aborted) break;
           if (ev.type === "session") {
             sessionId = ev.sessionId;
@@ -105,21 +160,33 @@ export async function POST(req: NextRequest) {
           } else if (ev.type === "error") {
             send(controller, { error: ev.message });
           } else if (ev.type === "done") {
-            if (ev.text) finalText = ev.text; // 以完整助手文本为准
+            if (ev.text) finalText = ev.text;
             ok = true;
           }
         }
-        // 落助手消息 + 会话 id（用于下次 resume）。仅在干净完成且未被取消时落库。
+        // 仅在干净完成且未被取消时落库 + 更新 sessionId。abort 时这两步都跳过,保留
+        // 停止前的 sessionId,下次发消息能从上次成功的位置 resume。
         if (ok && !req.signal.aborted && finalText.trim()) {
           await prisma.chatMessage.create({
-            data: { id: `${rid()}-a`, videoId, productId: productId ?? 0, role: "assistant", text: finalText, videoT: videoT ?? null },
+            data: {
+              id: `${rid()}-a`,
+              chatId,
+              videoId: currentVideoId ?? null,
+              productId: currentProductId ?? null,
+              role: "assistant",
+              text: finalText,
+              videoT: videoT ?? null,
+            },
           });
         }
-        if (ok && !req.signal.aborted && sessionId) {
-          await prisma.chatThread.upsert({
-            where: { productId_videoId: { productId: productId ?? 0, videoId } },
-            create: { videoId, productId: productId ?? 0, sessionId },
-            update: { sessionId, productId: productId ?? 0 },
+        if (ok && !req.signal.aborted) {
+          // 拿到新 sessionId 就覆盖;否则只动 updatedAt(让 /api/chats 排序贴最新),
+          // 不动 sessionId 防丢上次 session。
+          await prisma.chat.update({
+            where: { id: chatId },
+            data: sessionId
+              ? { sessionId, updatedAt: new Date() }
+              : { updatedAt: new Date() },
           });
         }
         send(controller, { done: true });

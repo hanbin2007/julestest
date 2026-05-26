@@ -17,6 +17,9 @@ import type {
 } from "@/types/api";
 import type {
   ChatMessage,
+  ChatMeta,
+  ChatsStats,
+  EnrichedChat,
   EnrichedNote,
   LastWatched,
   Note,
@@ -177,14 +180,49 @@ export const saveNoteSnapshot = (id: string, image: string) =>
 export const noteSnapshotUrl = (id: string) =>
   `/api/notes/snapshot?id=${encodeURIComponent(id)}`;
 
-// ---- 内置 Claude 助教（按讲对话）----
-// productId 缺省(null)时不带该参数：服务端按 videoId 返回全部同讲消息（向后兼容）。
-export const getChat = (videoId: number, productId: number | null = null) =>
-  fetcher<{ messages: ChatMessage[] }>(
-    `/api/chat?videoId=${videoId}` + (productId != null ? `&productId=${productId}` : ""),
+// ---- 内置 Claude 助教（多聊天）----
+// 单个 chat 历史(GET /api/chat?chatId=)。返回 chat 元 + 消息列表。
+export const getChat = (chatId: string) =>
+  fetcher<{ chat: ChatMeta; messages: ChatMessage[] }>(
+    `/api/chat?chatId=${encodeURIComponent(chatId)}`,
   );
-export const clearChat = (videoId: number, productId: number | null = null) =>
-  postJson<{ ok: boolean }>("/api/chat/clear", { videoId, productId });
+
+// 聊天列表;chatsListKey 是构造 SWR key 的真相源(useLessonChats/useAllChats 都用)。
+export interface ChatsListParams {
+  scope?: "lesson" | "independent" | "all";
+  productId?: number;
+  videoId?: number;
+}
+export function chatsListKey(p: ChatsListParams = {}): string {
+  const sp = new URLSearchParams();
+  if (p.scope && p.scope !== "all") sp.set("scope", p.scope);
+  if (p.productId != null) sp.set("productId", String(p.productId));
+  if (p.videoId != null) sp.set("videoId", String(p.videoId));
+  const q = sp.toString();
+  return q ? `/api/chats?${q}` : "/api/chats";
+}
+export const getChats = (p: ChatsListParams = {}) =>
+  fetcher<{ chats: EnrichedChat[]; stats: ChatsStats }>(chatsListKey(p));
+
+export const newChat = (
+  kind: "lesson" | "independent",
+  productId?: number,
+  videoId?: number,
+) =>
+  postJson<{ chat: ChatMeta }>("/api/chat/new", {
+    kind,
+    ...(kind === "lesson" ? { productId, videoId } : {}),
+  });
+
+export const renameChat = (chatId: string, title: string) =>
+  postJson<{ ok: boolean; chat: { id: string; title: string; updatedAt: number } }>(
+    "/api/chat/rename",
+    { chatId, title },
+  );
+
+export const deleteChat = (chatId: string) =>
+  postJson<{ ok: boolean }>("/api/chat/delete", { chatId });
+
 export const chatImageUrl = (id: string) => `/api/chat/image?id=${encodeURIComponent(id)}`;
 
 export const getSettings = () =>

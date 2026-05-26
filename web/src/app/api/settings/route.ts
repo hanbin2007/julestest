@@ -52,9 +52,9 @@ export async function POST(req: NextRequest) {
     await withPrefsLock(async () => {
       const cur = (await readKey("prefs", DEFAULT_PREFS)) as Record<string, unknown>;
       await writeKey("prefs", { ...cur, ...patch });
-      // 系统提示词变了：清掉所有讲的会话 id，让新人格在下一条消息生效（UI 历史保留）。
+      // 系统提示词变了：清掉所有 chat 的会话 id，让新人格在下一条消息生效（UI 历史保留）。
       if ("systemPrompt" in patch && (patch.systemPrompt ?? "") !== (cur.systemPrompt ?? "")) {
-        await prisma.chatThread.updateMany({ data: { sessionId: null } });
+        await prisma.chat.updateMany({ data: { sessionId: null } });
       }
     });
   }

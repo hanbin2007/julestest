@@ -2,103 +2,80 @@
 import * as React from "react";
 import useSWR from "swr";
 import * as api from "@/lib/api";
-import type { ChatMessage } from "@/lib/store";
+import * as chatStreams from "@/lib/chatStreams";
+import type { ChatMessage, ChatMeta } from "@/lib/store";
 import type { ChatEffort } from "@/lib/chatPrefs";
 
-// 按讲对话：SWR 拉历史 + 流式发送（读 SSE）。流式中把「待发用户消息 + 进行中的助手回复」
-// 叠加在历史之上展示；done 后 revalidate，让服务端落库的消息接管。
-
-// productId:对话的课程归属标记（来自 sel.courseId），按 (productId,videoId) 复合归属;并入 SWR key。
-export function useChat(videoId: number | null, productId: number | null = null) {
-  const key = videoId == null ? null : `/api/chat?videoId=${videoId}&productId=${productId ?? ""}`;
-  const { data, mutate } = useSWR(key, () => api.getChat(videoId as number, productId), { revalidateOnFocus: false });
+// 单聊天 hook(按 chatId):
+//   - SWR 拉历史(只读) + 订阅 chatStreams 拿实时流态(进度/draft/error)
+//   - send: 转发到 chatStreams.startSend(此处不再持有 ctrl,卸载/切 chat 不打断流)
+//   - stop / deleteCurrent
+//
+// 关键变化:不再有 cleanup-on-unmount abort — 这是允许后台并行的关键。abort 只在用户主动按
+// 「停止」、删除当前 chat 时发生。换 chatId 时,旧的流继续在 store 里跑,新 chatId 渲染各自状态。
+export function useChat(
+  chatId: string | null,
+  getCurrentLesson?: () => { productId: number; videoId: number } | null,
+) {
+  const swrKey = chatId ? `/api/chat?chatId=${chatId}` : null;
+  const { data, mutate } = useSWR(
+    swrKey,
+    chatId ? () => api.getChat(chatId) : null,
+    { revalidateOnFocus: false },
+  );
   const history: ChatMessage[] = data?.messages ?? [];
+  const chat: ChatMeta | null = data?.chat ?? null;
 
-  const [streaming, setStreaming] = React.useState(false);
-  const [draftReply, setDraftReply] = React.useState("");
-  const [pendingUser, setPendingUser] = React.useState<{ text: string; image?: string } | null>(null);
-  const [error, setError] = React.useState<string | null>(null);
-  const abortRef = React.useRef<AbortController | null>(null);
-
-  // videoId 切换时（切换讲次）中止进行中的流并清空瞬态，让新讲从干净状态开始。
-  // 卸载时同理（空 deps 已无需，videoId 变化覆盖了卸载场景）。
-  React.useEffect(() => {
-    return () => {
-      abortRef.current?.abort();
-      abortRef.current = null;
-      setStreaming(false);
-      setPendingUser(null);
-      setDraftReply("");
-      setError(null);
-    };
-  }, [videoId]);
-
-  const send = React.useCallback(
-    async (text: string, image?: string, effort?: ChatEffort, videoT?: number) => {
-      const vid = videoId;
-      if (vid == null || !text.trim() || streaming) return;
-      setError(null);
-      setPendingUser({ text: text.trim(), image });
-      setDraftReply("");
-      setStreaming(true);
-      const ctrl = new AbortController();
-      abortRef.current = ctrl;
-      try {
-        const res = await fetch("/api/chat", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ videoId: vid, productId, text: text.trim(), image, effort, videoT }),
-          signal: ctrl.signal,
-        });
-        if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
-        const reader = res.body.getReader();
-        const dec = new TextDecoder();
-        let buf = "";
-        let acc = "";
-        // 逐帧解析 SSE：以空行分隔，data: <json>
-        for (;;) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          buf += dec.decode(value, { stream: true });
-          let nl: number;
-          while ((nl = buf.indexOf("\n\n")) >= 0) {
-            const frame = buf.slice(0, nl).trim();
-            buf = buf.slice(nl + 2);
-            if (!frame.startsWith("data:")) continue;
-            const payload = frame.slice(5).trim();
-            let obj: { delta?: string; done?: boolean; error?: string };
-            try {
-              obj = JSON.parse(payload);
-            } catch {
-              continue;
-            }
-            if (obj.delta) {
-              acc += obj.delta;
-              setDraftReply(acc);
-            } else if (obj.error) {
-              setError(obj.error);
-            }
-            // obj.done 时不必特殊处理，循环会随流结束
-          }
-        }
-      } catch (e) {
-        if ((e as Error).name !== "AbortError") setError((e as Error).message || "对话失败");
-      } finally {
-        setStreaming(false);
-        setPendingUser(null);
-        setDraftReply("");
-        abortRef.current = null;
-        await mutate(); // 拉回服务端落库的用户+助手消息
-      }
-    },
-    [videoId, productId, streaming, mutate]
+  // 订阅模块级流态。useSyncExternalStore 让组件在 store 变化时自动 rerender。
+  const stream = React.useSyncExternalStore(
+    React.useCallback((cb) => chatStreams.subscribe(chatId, cb), [chatId]),
+    React.useCallback(() => chatStreams.get(chatId), [chatId]),
+    React.useCallback(() => chatStreams.get(chatId), [chatId]),
   );
 
-  const clear = React.useCallback(async () => {
-    if (videoId == null) return;
-    await api.clearChat(videoId, productId);
-    await mutate({ messages: [] }, { revalidate: false });
-  }, [videoId, productId, mutate]);
+  const send = React.useCallback(
+    (text: string, image?: string, effort?: ChatEffort, videoT?: number) => {
+      if (!chatId || !text.trim()) return;
+      if (stream.phase === "streaming") return; // UI 应已禁用,这里是双保险
+      const cur = getCurrentLesson?.();
+      void chatStreams.startSend({
+        chatId,
+        text: text.trim(),
+        image,
+        effort,
+        videoT,
+        currentProductId: cur?.productId ?? null,
+        currentVideoId: cur?.videoId ?? null,
+      });
+    },
+    [chatId, stream.phase, getCurrentLesson],
+  );
 
-  return { history, send, clear, streaming, draftReply, pendingUser, error };
+  const stop = React.useCallback(() => {
+    if (chatId) chatStreams.stop(chatId);
+  }, [chatId]);
+
+  // 删除当前 chat:先 stop 防 ctrl 泄漏,再调 API。父级负责切到下一个 chat(或 null)。
+  const deleteCurrent = React.useCallback(async () => {
+    if (!chatId) return;
+    chatStreams.stop(chatId);
+    await api.deleteChat(chatId);
+    chatStreams.forget(chatId);
+    await mutate(undefined, { revalidate: false });
+  }, [chatId, mutate]);
+
+  return {
+    chat,
+    history,
+    send,
+    stop,
+    deleteCurrent,
+    // 流态(给 ChatBody 渲染用)
+    streaming: stream.phase === "streaming",
+    draftReply: stream.draftReply,
+    pendingUser: stream.pendingUser,
+    startedAt: stream.startedAt,
+    charCount: stream.charCount,
+    error: stream.error,
+  };
 }

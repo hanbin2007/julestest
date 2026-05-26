@@ -66,30 +66,40 @@ model Note {
   @@index([productId, videoId])
 }
 
-// ---- 内置 Claude 助教（按讲对话）----
-// ChatMessage 是 UI 渲染的真相源；模型上下文续接靠 ChatThread.sessionId（Agent SDK resume）。
+// ---- 内置 Claude 助教（多聊天 + 后台并行）----
+// 一讲可有多个 chat；也可以是 independent（不绑任何讲）。每个 chat 自带 sessionId 用于
+// Claude Agent SDK 续上下文。ChatMessage 是 UI 渲染真相源，FK 到 Chat（级联删）。
+model Chat {
+  id        String        @id // 新建用 nanoid；迁移用 "legacy-{pid}-{vid}"
+  kind      String // "lesson" | "independent"
+  productId Int? // 仅 lesson 有值；independent 必为 null
+  videoId   Int? // 同上
+  title     String? // null=「新对话」；首条用户消息后服务端 trim 截 40 字写入
+  sessionId String? // Agent SDK resume token；abort 时不更新（保持上次成功值，下次能续上）
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+  messages  ChatMessage[]
+
+  @@index([productId, videoId, updatedAt])
+  @@index([kind, updatedAt])
+}
+
 model ChatMessage {
   id        String   @id
-  videoId   Int
-  productId Int? // 课程归属标记（写入时记录）；按 (productId,videoId) 收窄对话归属
+  chatId    String // FK 到 Chat.id（级联删消息）
+  // 语义：发送时所看的讲（供 videoT 跳回 / 存为笔记时锚定）。可空：独立聊天无播放器
+  // 上下文时写 NULL；非空也允许指向 chat 自己绑定之外的讲（chat 跨讲被复用时）。
+  videoId   Int?
+  productId Int?
   role      String // "user" | "assistant"
   text      String
   image     String? // 附图文件 id（用户消息可带批注画面，落盘在 chat-imgs/）
-  videoT    Int? // 提问时的播放位置(秒)；存问答为笔记时作截图/跳转的时间锚点
+  videoT    Int? // 提问时的播放位置(秒)
   at        DateTime @default(now())
+  chat      Chat     @relation(fields: [chatId], references: [id], onDelete: Cascade)
 
-  @@index([productId, videoId])
-}
-
-model ChatThread {
-  // 同一讲（videoId）可被多门课打包售卖，videoId 不再全局唯一；
-  // 主键改为复合 (productId, videoId)，否则两门课共享同一 videoId 时会串台会话/互相覆盖 sessionId。
-  videoId   Int
-  productId Int      @default(0) // 课程归属（缺省 0）；与 videoId 组成复合主键
-  sessionId String? // Claude Agent SDK 会话 id，用于多轮 resume
-  updatedAt DateTime @updatedAt
-
-  @@id([productId, videoId])
+  @@index([chatId, at])
+  @@index([productId, videoId]) // 保留：笔记/批注/跨聊天反查（按讲找消息）时用
 }
 
 // 网关缓存/缓冲状态的镜像（真相在网关，这里供 UI 直读 + 跨设备）
