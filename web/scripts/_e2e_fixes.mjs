@@ -1,7 +1,8 @@
-// e2e 验证两个修复：
-//   Bug #1（抽屉缓存条越界）: 打开课程详情抽屉，校验 "段" 文字盒子在抽屉右边界内。
-//   Bug #2（回放无法手动生成缩略图）: 直接调 /api/thumbs/batch 提交一条 live 视频，
-//          验证 queued=1 / skipped=0，再轮询 thumb 状态从 gen 变 ready（而非 error）。
+// e2e 验证三个修复：
+//   Bug #1（"总数未知"大面积出现）: /api/courses/status 不应再有 cached>0 && total=null 的 vid。
+//          先 fire 一次 status 触发回填，给 30s 让网关取完 m3u8，再核对。
+//   Bug #2（回放无法手动生成缩略图）: /api/thumbs/batch 接受 live 视频 (queued+skipped>=1, state!=error)。
+//   Bug #3（旧版位置 bug）: 抽屉里 "段" 文字盒子右沿 ≤ 抽屉右沿（防 BUG #1 边角情形回归）。
 import { chromium } from "playwright-core";
 
 const HOST = "http://127.0.0.1:3000";
@@ -112,10 +113,35 @@ async function bug2LiveThumb() {
   };
 }
 
+async function bug0UnknownTotal() {
+  // 触发一次 status,让 web 端的 triggerWarmIfNeeded fire 给网关
+  await fetch(`${HOST}/api/courses/status`).catch(() => {});
+  // 给网关 30s 把 m3u8 都取回来。warm 走 MANUAL 档不抢观看带宽。
+  const deadline = Date.now() + 30_000;
+  let last = null;
+  while (Date.now() < deadline) {
+    const r = await fetch(`${HOST}/api/courses/status`).then((x) => x.json()).catch(() => null);
+    if (!r) { await new Promise((res) => setTimeout(res, 2000)); continue; }
+    const perVid = r.perVid || {};
+    const cached = Object.values(perVid).filter((v) => (v.cached || 0) > 0);
+    const unknown = cached.filter((v) => v.total === null || v.total === undefined);
+    last = { cachedCount: cached.length, unknownCount: unknown.length };
+    if (last.unknownCount === 0) break;
+    await new Promise((res) => setTimeout(res, 3000));
+  }
+  return {
+    ok: !!last && last.unknownCount === 0,
+    ...last,
+  };
+}
+
+const r0 = await bug0UnknownTotal();
+console.log("BUG0 总数未知:", JSON.stringify(r0, null, 2));
 const r1 = await bug1Drawer();
 console.log("BUG1 drawer overflow:", JSON.stringify(r1, null, 2));
 const r2 = await bug2LiveThumb();
 console.log("BUG2 live thumb:", JSON.stringify(r2, null, 2));
 
-const ok = (r1.ok === true || r1.ok === "skipped") && (r2.ok === true || r2.ok === "skipped");
+const pass = (x) => x.ok === true || x.ok === "skipped";
+const ok = pass(r0) && pass(r1) && pass(r2);
 process.exit(ok ? 0 : 1);
