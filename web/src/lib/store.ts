@@ -75,6 +75,8 @@ export interface Prefs {
   floatTools?: boolean; // 播放器上常驻「批注/问AI」悬浮按钮（缺省视为开）
   systemPrompt?: string; // AI 助教自定义系统提示词（空/缺省用内置默认）
   chatEffort?: ChatEffort; // AI 助教思考等级（缺省 high）
+  sidebarCollapsed?: boolean; // 首页课程侧栏整列折叠（缺省视为展开）
+  sidebarWidth?: number; // 首页课程侧栏宽度 px（缺省 340，渲染时夹到 [240,560]）
 }
 
 export interface LastWatched {

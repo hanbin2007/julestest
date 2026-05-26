@@ -4,10 +4,13 @@ import * as React from "react";
 import dynamic from "next/dynamic";
 import { useSWRConfig } from "swr";
 import { Alert, Box, Button, Drawer, Typography } from "@mui/material";
+import useMediaQuery from "@mui/material/useMediaQuery";
+import type { Theme } from "@mui/material/styles";
 import { ThemeProvider } from "@mui/material/styles";
 import PlayCircleOutlineRoundedIcon from "@mui/icons-material/PlayCircleOutlineRounded";
 import AppTopBar from "@/components/common/AppTopBar";
 import CourseSidebar from "@/components/sidebar/CourseSidebar";
+import SidebarShell from "@/components/sidebar/SidebarShell";
 import PlayerMeta from "@/components/player/PlayerMeta";
 import NotesPanel, { NOTES_WIDTH } from "@/components/player/NotesPanel";
 import TimelineMarkers from "@/components/player/TimelineMarkers";
@@ -109,6 +112,9 @@ export default function PlayerView() {
   // 悬浮工具开关（缺省视为开），持久化到偏好
   const { prefs, setPrefs } = usePrefs();
   const floatTools = prefs.floatTools !== false;
+  // 课程侧栏折叠态（桌面） & 视口断点：☰ 在桌面切折叠、在移动端开抽屉。
+  const sidebarCollapsed = !!prefs.sidebarCollapsed;
+  const isMdUp = useMediaQuery((t: Theme) => t.breakpoints.up("md"));
 
   const thumbnails = useThumbPoll(video ?? null);
   // 本讲逐片缓存：观看/预缓存会持续补片，快一点刷新让缓存条像在“长”。
@@ -538,7 +544,15 @@ export default function PlayerView() {
 
   return (
     <Box sx={{ display: "flex", flexDirection: "column", height: "100dvh" }}>
-      <AppTopBar onMenu={() => setDrawer(true)} onCommand={() => setCmdOpen(true)} />
+      <AppTopBar
+        onMenu={() => {
+          // 桌面端 ☰ = 折叠 / 展开课程侧栏；移动端 ☰ = 打开抽屉。
+          if (isMdUp) void setPrefs({ sidebarCollapsed: !sidebarCollapsed });
+          else setDrawer(true);
+        }}
+        menuTooltip={isMdUp ? (sidebarCollapsed ? "展开课程列表" : "折叠课程列表") : "目录"}
+        onCommand={() => setCmdOpen(true)}
+      />
       {coursesError && !courses.length && !isLoading && (
         <Alert
           severity="warning"
@@ -568,17 +582,7 @@ export default function PlayerView() {
         </Alert>
       )}
       <Box sx={{ display: "flex", flex: 1, minHeight: 0 }}>
-        <Box
-          sx={{
-            width: 340,
-            flex: "0 0 auto",
-            display: { xs: "none", md: "block" },
-            borderRight: (t) => `1px solid ${t.palette.divider}`,
-            bgcolor: "md3.surfaceContainerLow",
-          }}
-        >
-          {sidebar}
-        </Box>
+        <SidebarShell>{sidebar}</SidebarShell>
         <Drawer open={drawer} onClose={() => setDrawer(false)} PaperProps={{ sx: { width: 320 } }}>
           {sidebar}
         </Drawer>

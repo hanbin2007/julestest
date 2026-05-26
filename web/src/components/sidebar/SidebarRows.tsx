@@ -142,7 +142,8 @@ export function GroupEl({
           {node.name}
         </Typography>
       </ListItemButton>
-      <Collapse in={open} unmountOnExit>
+      {/* 同 CourseItem：保持挂载以保住退出动画 */}
+      <Collapse in={open}>
         <Box sx={{ pl: 1.5, ml: 1.5, borderLeft: (t) => `1px solid ${t.palette.divider}` }}>
           {node.kids.map((k) => (
             <GroupEl key={k.key} node={k} render={render} collapsed={collapsed} onToggle={onToggle} forceOpen={forceOpen} />
