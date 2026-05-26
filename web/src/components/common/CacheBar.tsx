@@ -74,9 +74,16 @@ function CacheBar({
     <Typography
       variant="caption"
       color="text.secondary"
-      sx={{ fontVariantNumeric: "tabular-nums" }}
+      sx={{
+        fontVariantNumeric: "tabular-nums",
+        // 窄容器(课程详情抽屉)里挤不下时截断；完整说明走 Tooltip。
+        display: "block",
+        whiteSpace: "nowrap",
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+      }}
     >
-      {eff.cached > 0 ? `${eff.cached} 段已缓存（总数未知）` : "—"}
+      {eff.cached > 0 ? `${eff.cached} 段（总数未知）` : "—"}
     </Typography>
   ) : (
     <Box

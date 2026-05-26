@@ -149,7 +149,8 @@ export default function LectureGrid({
       field: "buffer",
       headerName: "缓冲",
       flex: 1,
-      minWidth: 160,
+      // 760px 抽屉内：缓冲列宽不能太大，否则前面列累加后把它推出右边。120 仍足够画 buckets/比例条。
+      minWidth: 120,
       valueGetter: (_v, r) => (r.bufTotal ? r.bufCached / r.bufTotal : r.bufCached ? 0.001 : 0),
       renderCell: (p) => <BufferCell r={p.row} />,
     },
