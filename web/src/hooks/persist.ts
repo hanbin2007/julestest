@@ -197,7 +197,9 @@ export function usePrefs() {
       },
     );
   };
-  return { prefs, setPrefs };
+  // loaded：SWR 已有响应（即用户真正的 prefs 已就位，不再是占位默认值）。
+  // 调用方可据此跳过首次解析前的过渡动画/闪烁。
+  return { prefs, setPrefs, loaded: !!data };
 }
 
 export function useLast(): LastWatched | null {

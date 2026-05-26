@@ -29,9 +29,12 @@ function ThemeModeToggle() {
 
 export default function AppTopBar({
   onMenu,
+  menuTooltip,
   onCommand,
 }: {
   onMenu?: () => void;
+  // ☰ 按钮的悬停 / a11y 文案：桌面端「折叠 / 展开课程列表」、移动端「目录」。
+  menuTooltip?: string;
   onCommand?: () => void;
 }) {
   const pathname = usePathname();
@@ -42,9 +45,11 @@ export default function AppTopBar({
     <AppBar position="static">
       <Toolbar variant="dense" sx={{ gap: 1 }}>
         {onMenu && (
-          <IconButton edge="start" onClick={onMenu} sx={{ display: { md: "none" } }}>
-            <MenuRoundedIcon />
-          </IconButton>
+          <Tooltip title={menuTooltip ?? "目录"}>
+            <IconButton edge="start" onClick={onMenu} aria-label={menuTooltip ?? "目录"}>
+              <MenuRoundedIcon />
+            </IconButton>
+          </Tooltip>
         )}
         <Box sx={{ width: 9, height: 9, borderRadius: "50%", bgcolor: "primary.main", boxShadow: (t) => `0 0 10px ${t.palette.primary.main}` }} />
         <Typography variant="subtitle1" sx={{ fontWeight: 700, letterSpacing: 0.3 }}>

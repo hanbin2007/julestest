@@ -40,7 +40,13 @@ export default function CourseItem({
   collapseNonce: number; // 「收起其他」脉冲
 }) {
   const wantOpen = open || !!query;
-  const { videos, isLoading } = useCourseVideos(wantOpen ? course.id : null);
+  // 一旦打开过就一直挂着 SWR 订阅：避免关闭瞬间 videos→[]、内容空掉，
+  // 让 MUI <Collapse> 测得的「自然高度」为 0、动画从 0 跳 0（视觉上「直接跳没」）。
+  const wasEverOpenedRef = React.useRef(false);
+  if (wantOpen) wasEverOpenedRef.current = true;
+  const { videos, isLoading } = useCourseVideos(
+    wasEverOpenedRef.current ? course.id : null,
+  );
   const progress = useProgressMap();
   const color = hashSeed(course.name);
 
@@ -160,7 +166,9 @@ export default function CourseItem({
         )}
         <Chip size="small" label={course.cardType || "课程"} sx={{ height: 22, fontSize: 11 }} />
       </ListItemButton>
-      <Collapse in={wantOpen} unmountOnExit>
+      {/* 保留挂载：unmountOnExit 会在某些条件下抢在 .18s 退出动画完成前摘掉子树，
+          视觉上「直接跳没」。保持挂载让 height→0 平滑过渡到底。 */}
+      <Collapse in={wantOpen}>
         <Box sx={{ pl: 0.5 }}>
           {isLoading && <SidebarSkeleton />}
           {!isLoading && (
