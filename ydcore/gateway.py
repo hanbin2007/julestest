@@ -141,6 +141,24 @@ class Gateway:
         self.buf_lock = threading.Lock()
         self.buf_q = queue.Queue()
 
+        # seg_urls.json：把"该 vid 的分片有序列表"持久化到缓存目录。重启后回载,
+        # 让设置页的"总数 / 缓冲条 buckets"立刻能复原（不必等用户再点一次回放/缓冲）。
+        # 没配持久化缓存目录就跳过（临时目录每次启动都会清,持久化也没意义）。
+        self.seg_urls_path = (
+            os.path.join(self.seg_cache.dir, "seg_urls.json")
+            if self.seg_cache.persist else None
+        )
+        if self.seg_urls_path and os.path.isfile(self.seg_urls_path):
+            try:
+                with open(self.seg_urls_path, "r", encoding="utf-8") as f:
+                    loaded = json.load(f) or {}
+                for vid, urls in loaded.items():
+                    if isinstance(urls, list) and urls:
+                        self.seg_urls[str(vid)] = list(urls)
+                        self.seg_total[str(vid)] = len(urls)
+            except Exception:  # noqa: BLE001
+                _log.warning("seg_urls 索引损坏，忽略：%s", self.seg_urls_path, exc_info=True)
+
         # 自动预缓存：以"播放头"为中心向前后双向补未缓存分片。
         self.pf_lock = threading.Lock()
         self.pf_active = {"vid": None}
@@ -156,6 +174,36 @@ class Gateway:
     def pri_fetch(self, t, hdrs, url, range_header=None):
         """按优先级档位回源（委托给闸门）。"""
         return self.gate.fetch(t, hdrs, url, range_header)
+
+    def _save_seg_urls(self):
+        """落盘 seg_urls 给重启回载用。set 现场调用，开销很小（每个 vid 一次）。
+        seg_urls 按 "单写者-per-key + GIL 原子" 不上锁,这里通过 keys 先快照再逐 key 读取,
+        过程中即便有别的 vid 在写也不会让本次落盘的 dict 视图崩。原子写: tmp + os.replace。"""
+        path = self.seg_urls_path
+        if not path:
+            return
+        try:
+            # keys 快照可能撞 RuntimeError(dict 改大小);重试几次即可,写事件本身很稀。
+            keys = None
+            for _ in range(5):
+                try:
+                    keys = list(self.seg_urls.keys())
+                    break
+                except RuntimeError:
+                    continue
+            if keys is None:
+                return
+            snap = {}
+            for k in keys:
+                v = self.seg_urls.get(k)
+                if v:
+                    snap[k] = list(v)
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(snap, f)
+            os.replace(tmp, path)
+        except Exception:  # noqa: BLE001
+            _log.warning("seg_urls 索引落盘失败：%s", path, exc_info=True)
 
     # ---- 缩略图 ----------------------------------------------------------
     def _save_thumb_index(self):
@@ -295,6 +343,7 @@ class Gateway:
         segs = parse_segments(text, m3u8)
         self.seg_total[vid] = len(segs)
         self.seg_urls[vid] = list(segs)  # 供逐片缓存 bitmap 查询
+        self._save_seg_urls()  # 持久化,重启后总数/buckets 立刻能复原
         urls = list(segs)
         for ln in text.splitlines():
             if ln.startswith("#EXT-X-KEY") and 'URI="' in ln:
@@ -451,6 +500,7 @@ class Gateway:
         n = len(segs)
         self.seg_total[vid] = n
         self.seg_urls[vid] = list(segs)  # 供逐片缓存 bitmap 查询
+        self._save_seg_urls()  # 持久化,重启后总数/buckets 立刻能复原
         if n == 0:
             return
         self.pf_segidx[vid] = {u: i for i, u in enumerate(segs)}
@@ -1007,6 +1057,7 @@ def make_handler(gateway):
                     if segs:
                         self.gw.seg_urls[vid] = segs
                         self.gw.seg_total[vid] = len(segs)
+                        self.gw._save_seg_urls()  # 持久化,重启后总数/buckets 立刻能复原
                 rewritten = rewrite_m3u8(text, target, vid)
                 self._send_bytes(200, rewritten.encode("utf-8"),
                                  "application/vnd.apple.mpegurl")
