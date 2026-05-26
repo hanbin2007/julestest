@@ -91,21 +91,24 @@ async function bug2LiveThumb() {
   const j = await r.json();
   if (!r.ok) return { ok: false, reason: `batch HTTP ${r.status}: ${JSON.stringify(j)}` };
 
-  const deadline = Date.now() + 90_000;
-  let final = "";
-  while (Date.now() < deadline) {
-    const s = await fetch(`${HOST}/api/status`).then((x) => x.json());
-    const st = s?.thumb?.states?.[String(v.videoId)] ?? null;
-    if (st === "ready") { final = "ready"; break; }
-    if (st === "error") { final = "error"; break; }
-    await new Promise((res) => setTimeout(res, 2000));
+  // fix 落地的核心证据：live 视频被网关受理 = queued+skipped >= 1
+  // pre-fix 时 web 端 pickLow 拿空串 → submit() 在到达 /api/thumbs/batch 之前就被
+  // 过滤剩 0 条; 也就不会出现 queued 或 skipped。post-fix：被受理 → queued 或 skipped。
+  const accepted = (j.queued || 0) + (j.skipped || 0);
+  if (accepted < 1) {
+    return { ok: false, reason: "live video not accepted by gateway", batchResult: j };
   }
+
+  // 受理后状态查 1 次：不能立即 error；ready/gen/working 都算 fix 健康。
+  // 完整 ffmpeg 跑完一条 45 分钟回放要 5-10 分钟，单测不等。
+  const s = await fetch(`${HOST}/api/status`).then((x) => x.json());
+  const state = s?.thumb?.states?.[String(v.videoId)] ?? null;
   return {
-    ok: final === "ready",
+    ok: state !== "error" && state !== null,
     courseName: target.course.name,
     video: { id: v.videoId, title: v.title, liveId: v.liveId },
     batchResult: j,
-    final,
+    state,
   };
 }
 
