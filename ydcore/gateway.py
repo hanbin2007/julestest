@@ -228,10 +228,24 @@ class Gateway:
         # 自动预缓存：以"播放头"为中心向前后双向补未缓存分片。
         self.pf_lock = threading.Lock()
         self.pf_active = {"vid": None}
-        self.pf_done = set()     # 本会话预缓存到「整集已满」的 vid（供设置页「已完成」显示看过的讲）
+        self.pf_done = set()     # 预缓存到「整集已满」的 vid（供设置页「已完成」+任务历史用)
         self.pf_threads = {}     # vid -> (thread, stop_event)
         self.pf_segidx = {}      # vid -> {seg_url: index}
         self.playhead = {}       # vid -> 最近一次直播请求到的分片下标
+        # pf_done.json: 跨会话保留预缓存完成的讲, 让任务历史里 prefetch:done 不会丢。
+        self.pf_done_path = (
+            os.path.join(self.seg_cache.dir, "pf_done.json")
+            if self.seg_cache.persist else None
+        )
+        if self.pf_done_path and os.path.isfile(self.pf_done_path):
+            try:
+                with open(self.pf_done_path, "r", encoding="utf-8") as f:
+                    loaded = json.load(f) or []
+                if isinstance(loaded, list):
+                    for vid in loaded:
+                        self.pf_done.add(str(vid))
+            except Exception:  # noqa: BLE001
+                _log.warning("pf_done 索引损坏,忽略", exc_info=True)
 
         for _ in range(max(1, THUMB_WORKERS)):
             threading.Thread(target=self._thumb_worker, daemon=True).start()
@@ -279,6 +293,12 @@ class Gateway:
         if not self.video_meta_path:
             return
         self._atomic_write_json(self.video_meta_path, dict(self.video_meta))
+
+    def _save_pf_done(self):
+        """落盘 pf_done. 调用方持 pf_lock 或确保不冲突。"""
+        if not self.pf_done_path:
+            return
+        self._atomic_write_json(self.pf_done_path, sorted(self.pf_done))
 
     def _remember_video(self, video, m3u8):
         """从一次 thumb/buffer/warm/play 调用记下该 vid 的元数据。
@@ -687,10 +707,11 @@ class Gateway:
                 if recenter:
                     continue
                 if not fetched:
-                    # 整集都在缓存里 = 这讲预缓存完成：记进本会话完成集（供设置页「已完成」显示），
-                    # 然后退出本线程（不再空转 sleep）。再次 /api/play 会经 start_prefetch 重建线程续巡。
+                    # 整集都在缓存里 = 这讲预缓存完成：记进 pf_done(供"已完成"+任务历史显示),
+                    # 落盘 pf_done.json 跨重启保留, 然后退出本线程。
                     with self.pf_lock:
                         self.pf_done.add(vid)
+                    self._save_pf_done()
                     return
         finally:
             with self.pf_lock:

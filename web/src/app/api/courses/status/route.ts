@@ -401,15 +401,67 @@ async function mirror(gw: GwStatus) {
   }
 }
 
-// 内存:进程级缓存"上次写入的状态",避免每次都查 DB 比对。同 (vid, kind, state) 只写一次。
-// 进程重启后会重写一次每条状态(无大碍,因为 createAt 会自然时间排序)。
+// 内存:进程级缓存"上次写入的状态",避免每次都查 DB 比对。同 (kind, videoId) 状态不变不重复写。
+// 首次启动:从 TaskHistory 读历史最新态填进来,网关重启不会让旧任务被重复 append 成"新事件"。
 const lastTaskState = new Map<string, string>();
+let lastTaskStateInited = false;
+
+function mkHistRow(kind: string, videoId: number, state: string, reason?: string | null) {
+  return {
+    id: `${kind}-${videoId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    kind,
+    videoId,
+    state,
+    reason: reason ?? null,
+  };
+}
+
+async function initLastTaskStateOnce() {
+  if (lastTaskStateInited) return;
+  lastTaskStateInited = true;
+  // 取每个 (kind, videoId) 在 TaskHistory 里的最新状态填进 Map。
+  // 取最近 2000 行(覆盖 ~500 个唯一任务足够), Set 跟踪已见 (kind,videoId) 跳重。
+  try {
+    const recent = await prisma.taskHistory.findMany({
+      orderBy: { at: "desc" },
+      take: 2000,
+    });
+    const seen = new Set<string>();
+    for (const r of recent) {
+      const key = `${r.kind}:${r.videoId}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      lastTaskState.set(key, r.state);
+    }
+  } catch { /* 表不存在或查询失败,Map 保持空 */ }
+
+  // 跨会话回填: CacheStatus 里 state='full' (=cached=total 整集已缓存好) 的 vid
+  // 在 TaskHistory 里如果没记录过 "done", 一次性补上 kind='buffer' state='done'。
+  // 这覆盖了用户在 buf_state.json 持久化之前(老版本)做过的 buffer/prefetch 完成,
+  // 让"全部"标签显示的不只是 thumb,而是所有曾整集缓存好的讲。
+  try {
+    const fullCached = await prisma.cacheStatus.findMany({
+      where: { state: "full" },
+      select: { videoId: true },
+    });
+    const backfill = fullCached
+      .map((c) => c.videoId)
+      .filter((vid) => !lastTaskState.has(`buffer:${vid}`));
+    if (backfill.length > 0) {
+      const data = backfill.map((vid) => mkHistRow("buffer", vid, "done"));
+      await prisma.taskHistory.createMany({ data });
+      backfill.forEach((vid) => lastTaskState.set(`buffer:${vid}`, "done"));
+    }
+  } catch { /* 回填失败不致命 */ }
+}
 
 async function appendTaskHistory(gw: GwStatus) {
+  await initLastTaskStateOnce();
+
   type Row = { kind: "buffer" | "thumb" | "prefetch"; videoId: number; state: string; reason?: string | null };
   const rows: Row[] = [];
 
-  // buffer: gw.buffer.states 含全部曾经设过状态的 vid(network 重启会清,但本进程内累计)
+  // buffer: gw.buffer.states 含全部曾经设过状态的 vid(本进程持续累计;buf_state.json 跨重启回载)
   const bufStates = gw.buffer.states ?? {};
   for (const [vid, st] of Object.entries(bufStates)) {
     const videoId = Number(vid);
@@ -417,20 +469,20 @@ async function appendTaskHistory(gw: GwStatus) {
     rows.push({ kind: "buffer", videoId, state: st });
   }
   // thumb: gw.thumb.states {vid: "ready"|"gen"|"error"|"cancelled"}
+  // 启动时回载的 ready 状态借助 lastTaskState 去重不会重复 append;真正的转换才会进。
   for (const [vid, st] of Object.entries(gw.thumb.states ?? {})) {
     const videoId = Number(vid);
     if (!videoId || !st) continue;
-    // 把 thumb 的 "ready" 归一化成 "done", 让前端展示统一
     rows.push({ kind: "thumb", videoId, state: st === "ready" ? "done" : st });
   }
-  // prefetch: gw.live.done = 本会话预缓存满的讲
+  // prefetch: gw.live.done = 本会话预缓存满的讲(若网关持久化 pf_done 后跨会话也保留)
   for (const vid of gw.live?.done ?? []) {
     const videoId = Number(vid);
     if (!videoId) continue;
     rows.push({ kind: "prefetch", videoId, state: "done" });
   }
 
-  // 去重 + 仅写"上次不同的"
+  // 去重: 只写"上次不同的"
   const fresh: Row[] = [];
   for (const r of rows) {
     const key = `${r.kind}:${r.videoId}`;
@@ -441,13 +493,7 @@ async function appendTaskHistory(gw: GwStatus) {
   if (fresh.length === 0) return;
 
   await prisma.taskHistory.createMany({
-    data: fresh.map((r) => ({
-      id: `${r.kind}-${r.videoId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      kind: r.kind,
-      videoId: r.videoId,
-      state: r.state,
-      reason: r.reason ?? null,
-    })),
+    data: fresh.map((r) => mkHistRow(r.kind, r.videoId, r.state, r.reason)),
   }).catch(() => { /* 镜像失败不影响主返回 */ });
 }
 
