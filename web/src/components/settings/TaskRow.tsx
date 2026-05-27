@@ -99,7 +99,10 @@ function TaskRow({
       <k.Icon sx={{ fontSize: 16, color: `${k.color}.main`, flexShrink: 0 }} />
       {/* 标题 + 课程名 + 进度条 */}
       <Box sx={{ minWidth: 0, flex: 1 }}>
-        <Typography variant="body2" noWrap title={task.title}>
+        <Typography variant="body2" noWrap title={`${k.label}: ${task.title}`}>
+          {/* 历史标签里同 vid 多种 kind 都会出现(缓冲/缩略图/预缓存各一行),
+             标题前加 kind 前缀区分,避免用户视觉以为"重复"。 */}
+          {isHistory ? <Box component="span" sx={{ color: `${k.color}.main`, mr: 0.5 }}>[{k.label}]</Box> : null}
           {task.title}
         </Typography>
         <Typography variant="caption" color="text.secondary" noWrap title={task.courseName}>
