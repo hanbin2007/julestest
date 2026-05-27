@@ -214,8 +214,10 @@ async function build(): Promise<CoursesStatus> {
 
   if (!gw) return fallback(courses, byVid, watched);
 
-  // 镜像进 DB（含 bytes，供网关挂掉时回退）
-  void mirror(gw);
+  // 镜像进 DB(含 bytes,供网关挂掉时回退) + 同步等任务历史落库:
+  // 必须 await,否则 fire-and-forget 下面 findMany allTasks 读不到刚 append 的行,
+  // 用户首次访问要等下次轮询才看到回填的历史。整次镜像 < 50ms,值得 await。
+  await mirror(gw);
 
   const perVidGw = gw.buffer.perVid;
   // 网关重启后若 seg_urls.json 缺失（首次升级或被删），perVid 会有大批 cached>0 但 total=null。
