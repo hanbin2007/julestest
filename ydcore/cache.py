@@ -38,12 +38,21 @@ class DiskLRU:
             if self.ok:
                 self._load_index()
                 threading.Thread(target=self._flush_loop, daemon=True).start()
-                atexit.register(self._save_index)
+                # 不在这里注册 atexit: 第二个实例端口冲突启动失败时,Python 退出前会跑
+                # atexit 把"刚读到的内存快照"写回去,可能覆盖第一个实例的新数据。
+                # 改由 start_proxy() server bind 成功后调用 arm_atexit() 注册,
+                # 保证只有"真正在跑的"那个实例才落盘。
         else:
             self.dir = tempfile.mkdtemp(prefix="ydcourse_cache_")
             self.index_path = None
             self.ok = True
             atexit.register(self.cleanup)
+
+    def arm_atexit(self):
+        """server bind 成功后调用: 注册 atexit 落盘 hook。
+        第二个端口冲突的实例到不了这一步, 因此不会触发误覆盖。"""
+        if self.persist and self.ok:
+            atexit.register(self._save_index)
 
     # ---- 持久化：index.json 记录 key->(ctype,size,fname) 与 LRU 顺序 ----
     def _load_index(self):
@@ -55,7 +64,14 @@ class DiskLRU:
         except FileNotFoundError:
             items = []   # 首次运行：尚无索引，正常
         except Exception:  # noqa: BLE001
-            _log.warning("缓存索引损坏，按空缓存启动：%s", self.index_path, exc_info=True)
+            # 损坏文件先备份到 .corrupt-<ts> 再继续, 否则下次 _save_index 覆盖原文件 →
+            # 用户的索引永远丢失(13GB 缓存全成孤儿,LRU 也无法识别)。
+            try:
+                bak = "%s.corrupt-%d" % (self.index_path, int(time.time()))
+                os.replace(self.index_path, bak)
+                _log.warning("缓存索引损坏, 已隔离到 %s; 按空缓存启动", bak)
+            except OSError:
+                _log.warning("缓存索引损坏且无法隔离: %s", self.index_path, exc_info=True)
             items = []
             index_loaded_ok = False  # 索引不可信，跳过孤儿清理
         size = 0

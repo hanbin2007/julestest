@@ -97,6 +97,19 @@ THUMB_WORKERS = 3
 class Gateway:
     """一台网关实例的全部状态 + 后台编排（缩略图 / 整集缓冲 / 预缓存）。"""
 
+    @staticmethod
+    def _quarantine_corrupt(path, label):
+        """JSON 损坏时把原文件搬到 .corrupt-<ts>, 而非直接让后续 _save 覆盖丢失。
+        损坏可能是磁盘故障/硬重启半截写入, 保留原始字节供事后人工恢复。"""
+        if not path or not os.path.exists(path):
+            return
+        try:
+            bak = "%s.corrupt-%d" % (path, int(time.time()))
+            os.replace(path, bak)
+            _log.warning("%s 索引损坏, 已隔离到 %s; 内存重置, 后续将重建", label, bak)
+        except OSError:
+            _log.warning("%s 索引损坏且无法隔离: %s", label, path, exc_info=True)
+
     def __init__(self, base_headers, session=None, auto=None, prefetch=True,
                  cache_bytes=SEG_CACHE_BYTES, port=8808, cache_dir=None):
         self.base_headers = base_headers
@@ -143,7 +156,7 @@ class Gateway:
         except FileNotFoundError:
             pass   # 首次运行：尚无缩略图索引，正常
         except Exception:  # noqa: BLE001
-            _log.warning("缩略图索引损坏，忽略：%s", self.thumb_index_path, exc_info=True)
+            self._quarantine_corrupt(self.thumb_index_path, "缩略图")
         # thumb_jobs.json: 重试上下文 (vid → [video_dict, m3u8, duration, tier])
         if os.path.isfile(self.thumb_jobs_path):
             try:
@@ -156,13 +169,14 @@ class Gateway:
                         if isinstance(v, dict) and isinstance(m, str) and m:
                             self.thumb_jobs[str(vid)] = (v, m, int(dur or 0), int(tier or 2))
             except Exception:  # noqa: BLE001
-                _log.warning("thumb_jobs 索引损坏,忽略", exc_info=True)
+                self._quarantine_corrupt(self.thumb_jobs_path, "thumb_jobs")
 
         # 整集缓冲（把整节课分片下到服务端磁盘缓存）：批量预缓冲 + 状态
         self.seg_total = {}      # vid -> 总分片数（已知时）
         self.seg_urls = {}       # vid -> 按播放顺序的分片绝对地址列表
         self.buf_state = {}      # vid -> "queued"/"working"/"paused"/"done"/"error"/"cancelled"
         self.buf_jobs = {}       # vid -> (video, m3u8)，供继续/重试重新入队
+        self._last_buf_error = {}  # vid -> str: 最近一次 buffer 失败原因(分片失败/AES key/m3u8)
         self.buf_lock = threading.Lock()
         self.buf_q = queue.Queue()
 
@@ -182,7 +196,9 @@ class Gateway:
                         self.seg_urls[str(vid)] = list(urls)
                         self.seg_total[str(vid)] = len(urls)
             except Exception:  # noqa: BLE001
-                _log.warning("seg_urls 索引损坏，忽略：%s", self.seg_urls_path, exc_info=True)
+                self._quarantine_corrupt(self.seg_urls_path, "seg_urls")
+                self.seg_urls = {}
+                self.seg_total = {}
 
         # buf_state.json / buf_jobs.json：缓冲任务状态 + 重试上下文落盘,
         # 重启后用户排好队的整集缓冲、暂停态、失败状态都还在,可以 resume/retry。
@@ -210,7 +226,7 @@ class Gateway:
                 with open(self.video_meta_path, "r", encoding="utf-8") as f:
                     self.video_meta = json.load(f) or {}
             except Exception:  # noqa: BLE001
-                _log.warning("video_metadata 索引损坏,忽略", exc_info=True)
+                self._quarantine_corrupt(self.video_meta_path, "video_metadata")
                 self.video_meta = {}
         # 重建 video_headers: video_headers 本身不持久化(含 session 字段 Cookie/UA,跨重启
         # 由 req.txt 重新加载),但 per-vid 部分(Url/Videoid/Cardpackageid/Liveid)能从
@@ -236,7 +252,8 @@ class Gateway:
                         if isinstance(v, dict) and isinstance(m, str) and m:
                             self.buf_jobs[str(vid)] = (v, m)
             except Exception:  # noqa: BLE001
-                _log.warning("buf_jobs 索引损坏,忽略", exc_info=True)
+                self._quarantine_corrupt(self.buf_jobs_path, "buf_jobs")
+                self.buf_jobs = {}
         if self.buf_state_path and os.path.isfile(self.buf_state_path):
             try:
                 with open(self.buf_state_path, "r", encoding="utf-8") as f:
@@ -261,7 +278,8 @@ class Gateway:
                                 # 实际是僵尸,用户 retry 时如果 web 重新提交 batch 会被 start_buffer 接住。
                                 pass
             except Exception:  # noqa: BLE001
-                _log.warning("buf_state 索引损坏,忽略", exc_info=True)
+                self._quarantine_corrupt(self.buf_state_path, "buf_state")
+                self.buf_state = {}
 
         # 自动预缓存：以"播放头"为中心向前后双向补未缓存分片。
         self.pf_lock = threading.Lock()
@@ -283,7 +301,8 @@ class Gateway:
                     for vid in loaded:
                         self.pf_done.add(str(vid))
             except Exception:  # noqa: BLE001
-                _log.warning("pf_done 索引损坏,忽略", exc_info=True)
+                self._quarantine_corrupt(self.pf_done_path, "pf_done")
+                self.pf_done = set()
 
         # playhead.json: 预缓存中心点持久化。直播分片每秒触发,如果每次都落盘 IO 太多;
         # 用 _playhead_dirty 标志 + 后台 _playhead_flush 线程 5s 一刷,丢的最大值 = 5 秒位置漂移,
@@ -309,7 +328,8 @@ class Gateway:
                 if isinstance(pv, str) and pv:
                     self.seg_cache.set_protect_vid(pv)
             except Exception:  # noqa: BLE001
-                _log.warning("playhead 索引损坏,忽略", exc_info=True)
+                self._quarantine_corrupt(self.playhead_path, "playhead")
+                self.playhead = {}
 
         for _ in range(max(1, THUMB_WORKERS)):
             threading.Thread(target=self._thumb_worker, daemon=True).start()
@@ -609,16 +629,20 @@ class Gateway:
         self.seg_total[vid] = len(segs)
         self.seg_urls[vid] = list(segs)  # 供逐片缓存 bitmap 查询
         self._save_seg_urls()  # 持久化,重启后总数/buckets 立刻能复原
-        urls = list(segs)
+        # key 单独跟踪: 缺 key 会让 ffmpeg 解密失败/播放黑屏, 必须算 error 而非 done。
+        key_urls = []
         for ln in text.splitlines():
             if ln.startswith("#EXT-X-KEY") and 'URI="' in ln:
                 _km = re.search(r'URI="([^"]+)"', ln)
                 if _km:
-                    urls.insert(0, urllib.parse.urljoin(m3u8, _km.group(1)))
+                    key_urls.append(urllib.parse.urljoin(m3u8, _km.group(1)))
+        urls = key_urls + list(segs)  # key 优先下
 
         # 逐片顺序下载（并发本就收紧到 1：手动缓存最低优先，抢占时在途下载越少观看越稳）。
         # 每片前复查 buf_state：被暂停/取消则即时收手并返回该终态——已下分片留在缓存里，
         # 继续时重新入队会被 seg_cache.has 跳过，等价于断点续传。
+        key_failed = 0  # AES key 拉取失败数(任何 ≥1 都得 error,否则播放解密失败)
+        seg_failed = []  # 分片拉取失败 URL 列表(超过阈值不再算 done)
         for u in urls:
             with self.buf_lock:
                 st = self.buf_state.get(vid)
@@ -626,11 +650,28 @@ class Gateway:
                 return st
             if self.seg_cache.has((u, vid)):
                 continue
+            is_key = u in key_urls
             try:
                 d, c, _ = self.pri_fetch(2, th, u)
                 self.seg_cache.put((u, vid), (c or "video/mp2t", d))  # 每片下完即可被命中
-            except Exception:  # noqa: BLE001
-                _log.debug("整集缓冲分片失败 vid=%s：%s", vid, u, exc_info=True)
+            except Exception as e:  # noqa: BLE001
+                _log.warning("整集缓冲分片失败 vid=%s%s: %s", vid,
+                             " (KEY)" if is_key else "", str(e)[:120])
+                if is_key:
+                    key_failed += 1
+                    self._last_buf_error[vid] = "AES key 拉取失败: %s" % (str(e)[:120])
+                else:
+                    seg_failed.append(u)
+                    self._last_buf_error[vid] = "分片下载失败 %d 个: %s" % (
+                        len(seg_failed), str(e)[:80])
+        # 严判完成: 任何 key 失败 → error;否则按分片成功比例
+        if key_failed > 0:
+            return "error"
+        if seg_failed:
+            # 分片有失败但 key OK: 算"部分完成"(用户能播但可能跳片)
+            # 实际架构没有 "partial" 终态, 折中: 失败超 5% 算 error, 否则 done(降级允许)
+            if len(seg_failed) > max(1, len(segs) * 0.05):
+                return "error"
         return "done"
 
     def _buffer_worker(self):
@@ -645,9 +686,10 @@ class Gateway:
                 self.buf_state[vid] = "working"
                 self._save_buf_state()
             try:
-                result = self._buffer_one(video, m3u8)  # "done"/"paused"/"cancelled"
-            except Exception:  # noqa: BLE001
+                result = self._buffer_one(video, m3u8)  # "done"/"paused"/"cancelled"/"error"
+            except Exception as e:  # noqa: BLE001
                 _log.warning("整集缓冲失败 vid=%s", vid, exc_info=True)
+                self._last_buf_error[vid] = "m3u8 拉取/解析失败: %s" % (str(e)[:150])
                 result = "error"
             with self.buf_lock:
                 # 仅当仍是 working 才落地结果；执行途中被 action 改成 paused/cancelled 则遵从之。
@@ -1177,10 +1219,16 @@ def make_handler(gateway):
                 r = real.get(vid) or {}
                 cached = r.get("segments", 0)
                 total = gw.seg_total.get(vid)
-                buffer[vid] = {"cached": cached, "total": total,
-                               "state": _state(vid, cached, total),
-                               "bytes": r.get("bytes", 0),
-                               "thumbBytes": (thumbb.get(vid) or {}).get("bytes", 0)}
+                d = {"cached": cached, "total": total,
+                     "state": _state(vid, cached, total),
+                     "bytes": r.get("bytes", 0),
+                     "thumbBytes": (thumbb.get(vid) or {}).get("bytes", 0)}
+                # error 状态附 reason(用户看到失败知道原因);其它状态没必要带
+                if d["state"] == "error":
+                    reason = gw._last_buf_error.get(vid)
+                    if reason:
+                        d["reason"] = reason
+                buffer[vid] = d
             tready = sum(1 for s in tstates.values() if s == "ready")
             tgen = [k for k, s in tstates.items() if s == "gen"]
             terr = sum(1 for s in tstates.values() if s == "error")
@@ -1237,7 +1285,10 @@ def make_handler(gateway):
                 return
             with self.gw.thumb_lock:
                 st = self.gw.thumb_meta.get(vid)
-            if st and st.get("state") in ("ready", "gen", "error"):
+            # ready/gen 短路;error/cancelled 是终态,应允许重新触发(单 GET 通常是播放器
+            # 自动调用,返回老 error 不会让用户重试。让 ArtPlayer 第二次访问时不要永远
+            # 见 error,而是 fall through 到 start_thumbs 重启)。
+            if st and st.get("state") in ("ready", "gen"):
                 self._send_json(st)
                 return
             parsed = {k: (v[0] if v else None) for k, v in qs.items()}
@@ -1245,6 +1296,10 @@ def make_handler(gateway):
             if not tv:
                 self._send_json({"state": "error", "reason": "need ids+src"}, 400)
                 return
+            # error/cancelled 状态需先 pop 让 start_thumbs 不被早 return 挡住
+            if st and st.get("state") in ("error", "cancelled"):
+                with self.gw.thumb_lock:
+                    self.gw.thumb_meta.pop(vid, None)
             self._send_json(self.gw.start_thumbs(*tv, tier=1))  # 播放时自动触发 → AUTO
 
         def _api_thumbs_batch(self):
@@ -1267,8 +1322,16 @@ def make_handler(gateway):
                         m3u8,
                     )
                 with self.gw.thumb_lock:
-                    st = self.gw.thumb_meta.get(str(d.get("videoId")))
-                if st and st.get("state") in ("ready", "gen"):
+                    vid_key = str(d.get("videoId"))
+                    st = self.gw.thumb_meta.get(vid_key)
+                    cur_state = (st or {}).get("state")
+                    # ready/gen 已经在做 → skip 让前端等
+                    # error/cancelled 是终态 → 用户点重新生成应该真重启,不再 skip;
+                    #   清掉旧的 thumb_meta 让 start_thumbs 不被早 return 挡住
+                    if cur_state in ("error", "cancelled"):
+                        self.gw.thumb_meta.pop(vid_key, None)
+                        cur_state = None
+                if cur_state in ("ready", "gen"):
                     skipped += 1
                     continue
                 if tv:
@@ -1484,7 +1547,11 @@ def start_proxy(headers, port, default_url="", session=None, auto=None,
                 prefetch=True, cache_bytes=SEG_CACHE_BYTES, cache_dir=None):
     gateway = Gateway(headers, session=session, auto=auto, prefetch=prefetch,
                       cache_bytes=cache_bytes, port=port, cache_dir=cache_dir)
+    # 注意: server bind 可能抛 OSError(EADDRINUSE), 抛错后 Python 退出 → atexit hooks
+    # 跑。所以 atexit 落盘必须 *在* bind 成功 *之后* 注册, 否则第二个端口冲突实例的
+    # atexit 也会跑,可能用刚读到的内存快照覆盖第一个真在跑实例的新数据。
     server = _QuietServer(("127.0.0.1", port), make_handler(gateway))
+    gateway.seg_cache.arm_atexit()
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     return server
