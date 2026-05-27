@@ -26,7 +26,9 @@ class DiskLRU:
         self.lock = threading.Lock()
         self._io_lock = threading.Lock()   # 串行化 index 落盘
         self._dirty = False
-        self.protect_vid = None    # 当前在看那集；淘汰时优先丢别的，最后才动它
+        # 当前在看那集 + 额外保护 vid (例: 正在缓冲中的多集); 淘汰时优先丢别的, 最后才动它
+        self._live_vid = None      # 单值: 当前 /api/play 那集 (LIVE 最高优先)
+        self._extra_protect = set()  # 集合: 当前 _buffer_one / _prefetch_worker 跑中的 vid
         self.persist = bool(persist_dir)
         if self.persist:
             # 固定目录 + index.json：重启不清缓存。目录由调用方（resolve_cache_dir）按
@@ -111,6 +113,10 @@ class DiskLRU:
     def _save_index(self):
         if not self.persist:
             return
+        # 掉盘后不再尝试写盘,避免一直 OSError 刷屏 + 防止用空 meta 覆盖有效索引。
+        # dir_ok() 实时探测目录是否仍可写;失败一次就长期标记 ok=False。
+        if not self.ok or not self.dir_ok():
+            return
         with self.lock:
             if not self._dirty:
                 return
@@ -122,8 +128,10 @@ class DiskLRU:
                 with open(tmp, "w", encoding="utf-8") as f:
                     json.dump(items, f)
                 os.replace(tmp, self.index_path)   # 原子替换，避免半截 index
-            except Exception:  # noqa: BLE001
+            except Exception as e:  # noqa: BLE001
                 _log.warning("缓存索引落盘失败：%s", self.index_path, exc_info=True)
+                if isinstance(e, OSError):
+                    self.ok = False  # 掉盘 → 标记不可用
                 # IO 失败：恢复 dirty，下次 flush 继续重试
                 with self.lock:
                     self._dirty = True
@@ -134,18 +142,37 @@ class DiskLRU:
             self._save_index()
 
     def set_protect_vid(self, vid):
+        """设当前观看 vid (LIVE 优先级最高), 兼容老调用; 内部塞进 _live_vid 槽。"""
         with self.lock:
-            self.protect_vid = vid
+            self._live_vid = vid
+
+    def add_protect_vid(self, vid):
+        """加额外保护 vid (例: 正在 buffer 中, 不希望被自身淘汰)。可同时存多个。"""
+        with self.lock:
+            self._extra_protect.add(vid)
+
+    def remove_protect_vid(self, vid):
+        """缓冲完成后移除保护。"""
+        with self.lock:
+            self._extra_protect.discard(vid)
 
     def _pick_victim(self):
-        # 持锁调用。meta 头部=最久未用。优先丢最久未用的“非保护集”分片；
-        # 没有非保护项时（全是保护集）才丢最旧的保护集分片。key 形如 (url, vid)。
-        pv = self.protect_vid
-        if pv is not None:
+        # 持锁调用。meta 头部=最久未用。优先丢最久未用的"非保护集"分片;
+        # 没有非保护项时(全是保护集)才丢最旧的保护集分片。key 形如 (url, vid)。
+        # 保护集 = LIVE 看那一集 ∪ 当前正在缓冲的所有 vid。
+        protected = set(self._extra_protect)
+        if self._live_vid is not None:
+            protected.add(self._live_vid)
+        if protected:
             for key in self.meta:
-                if key[1] != pv:
+                if key[1] not in protected:
                     return key
         return next(iter(self.meta))
+
+    # 兼容老 read: 旧代码读 self.protect_vid 拿"当前 LIVE 那集"
+    @property
+    def protect_vid(self):
+        return self._live_vid
 
     @staticmethod
     def _fname(key):
@@ -175,16 +202,28 @@ class DiskLRU:
         fn = self._fname(key)
         path = os.path.join(self.dir, fn)
         # 先写临时文件，再原子替换到目标路径，避免写一半时进程崩溃留下截断文件
-        tmp_fd, tmp_path = tempfile.mkstemp(dir=self.dir, suffix=".tmp")
+        try:
+            tmp_fd, tmp_path = tempfile.mkstemp(dir=self.dir, suffix=".tmp")
+        except OSError as e:
+            # 外置盘掉线 / 权限丢失 → mkstemp 都失败。标 ok=False 让上层感知。
+            if self.ok:
+                _log.warning("缓存目录写入失败,可能掉盘/无权限,标记 cache 暂不可用: %s", e)
+            self.ok = False
+            return
         try:
             with os.fdopen(tmp_fd, "wb") as f:
                 f.write(data)
             os.replace(tmp_path, path)   # 原子落盘
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
             try:
                 os.remove(tmp_path)
             except OSError:
                 pass
+            # 持久化失败也算缓存不可用,后续 _save_index 看到 ok=False 会跳过
+            if isinstance(e, OSError):
+                if self.ok:
+                    _log.warning("缓存分片落盘失败,标记 cache 暂不可用: %s", e)
+                self.ok = False
             return
         with self.lock:
             if key in self.meta:

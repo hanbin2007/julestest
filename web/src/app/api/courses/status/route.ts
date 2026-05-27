@@ -443,6 +443,13 @@ async function initLastTaskStateOnce() {
     }
   } catch { /* 表不存在或查询失败,Map 保持空 */ }
 
+  // 启动一次清理: TaskHistory 表 append-only, 半年后膨胀至几 M 行 → 查询慢。
+  // 保留最近 90 天足够"全部"标签展示, 旧记录无价值删掉。
+  try {
+    const cutoff = new Date(Date.now() - 90 * 86400 * 1000);
+    await prisma.taskHistory.deleteMany({ where: { at: { lt: cutoff } } });
+  } catch { /* 清理失败不致命 */ }
+
   // 跨会话回填: CacheStatus 里 state='full' (=cached=total 整集已缓存好) 的 vid
   // 在 TaskHistory 里如果没记录过 "done", 一次性补上 kind='buffer' state='done'。
   // 这覆盖了用户在 buf_state.json 持久化之前(老版本)做过的 buffer/prefetch 完成,

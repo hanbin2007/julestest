@@ -139,15 +139,27 @@ class Gateway:
         self.thumb_q = queue.Queue()
         self.have_ffmpeg = which("ffmpeg") is not None
         # 回载 thumb_index.json: 现在存全部状态(ready/gen/error/cancelled),
-        # ready 仍然校验 .jpg 文件,其它状态无文件依赖直接保留。
+        # ready 校验 .jpg 文件存在 + 有效(开头 magic bytes 是 JPEG SOI 0xFFD8 + 非 0 字节),
+        # 网关被砍中 ffmpeg 时 .jpg 可能半截,仅 exists 会误认 ready, 前端展示 broken image。
+        def _jpeg_ok(path):
+            try:
+                if os.path.getsize(path) < 16:
+                    return False
+                with open(path, "rb") as fh:
+                    head = fh.read(3)
+                return head[:2] == b"\xff\xd8"  # SOI marker
+            except OSError:
+                return False
         # 启动时若是 gen 状态(网关被砍时正在生成的) → 回退成 error,等用户手动重试。
         try:
             with open(self.thumb_index_path, "r", encoding="utf-8") as f:
                 for vid, m in (json.load(f) or {}).items():
                     st = (m or {}).get("state")
                     if st == "ready":
-                        if os.path.exists(os.path.join(self.thumb_dir, "%s.jpg" % vid)):
+                        jpg = os.path.join(self.thumb_dir, "%s.jpg" % vid)
+                        if _jpeg_ok(jpg):
                             self.thumb_meta[vid] = m
+                        # .jpg 缺失/损坏 → 不进 thumb_meta, 重新触发 thumb 会真重启
                     elif st == "gen":
                         # 进程被砍时正在跑的 ffmpeg → 算失败,等重试
                         self.thumb_meta[vid] = {"state": "error", "reason": "interrupted"}
@@ -342,16 +354,21 @@ class Gateway:
         return self.gate.fetch(t, hdrs, url, range_header)
 
     def _atomic_write_json(self, path, data):
-        """tmp + os.replace 原子落盘 JSON。失败只 warn,不抛。"""
+        """tmp + os.replace 原子落盘 JSON。失败只 warn,不抛。
+        掉盘时 self.seg_cache.ok=False, 跳过避免无限错误日志风暴。"""
         if not path:
             return
+        if not self.seg_cache.ok:
+            return  # 掉盘后不再尝试写盘(避免 OSError 刷屏 + 防止用空快照覆盖有效数据)
         try:
             tmp = path + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False)
             os.replace(tmp, path)
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
             _log.warning("索引落盘失败:%s", path, exc_info=True)
+            if isinstance(e, OSError):
+                self.seg_cache.ok = False  # 掉盘连锁标记
 
     def _save_buf_state(self):
         """落盘 buf_state. 调用方必须已经持有 buf_lock(或本就在锁外的 init 阶段)。"""
@@ -620,6 +637,9 @@ class Gateway:
         # 合并到同一集，二者须用同一清晰度——目前前端 pickM3u8/MK_BUF 与播放都取最高清，
         # key 同为 (seg_url, vid) 故天然合并；若改播放器清晰度选择，需同步前端取值。
         vid = str(video["videoId"])
+        # 缓冲过程加 LRU 保护: 边缓冲边播别集时, 不希望本 vid 早分片被淘汰自身的新分片。
+        # 多 vid 同时缓冲也都受保护(set 而非单 vid)。finally 里移除。
+        self.seg_cache.add_protect_vid(vid)
         th = play_headers(self.session, video, m3u8)
         with self.vh_lock:
             self.video_headers[vid] = th
@@ -650,6 +670,12 @@ class Gateway:
                 return st
             if self.seg_cache.has((u, vid)):
                 continue
+            # 主动让 LIVE: 若现在有用户在看视频(LIVE 档活跃), MANUAL 暂停一下,
+            # 让 LIVE 把当前突发分片下完再继续。priority_gate.acquire 内部会等,
+            # 但已经 in-flight 的 HTTP 不可中断 — 这里主动检测降低发起新请求的频率,
+            # 配合 grace 机制让 LIVE 的实际带宽占用更稳定。
+            if self.gate.n[0] > 0:
+                time.sleep(0.3)
             is_key = u in key_urls
             try:
                 d, c, _ = self.pri_fetch(2, th, u)
@@ -691,6 +717,9 @@ class Gateway:
                 _log.warning("整集缓冲失败 vid=%s", vid, exc_info=True)
                 self._last_buf_error[vid] = "m3u8 拉取/解析失败: %s" % (str(e)[:150])
                 result = "error"
+            finally:
+                # 缓冲终态(任何结局): 摘掉 LRU 保护, 让别的缓冲/淘汰能动这一集的分片
+                self.seg_cache.remove_protect_vid(vid)
             with self.buf_lock:
                 # 仅当仍是 working 才落地结果；执行途中被 action 改成 paused/cancelled 则遵从之。
                 # pop 也必须在该守卫内：否则"刚下完就被暂停"会误删重试上下文，导致继续无门。
