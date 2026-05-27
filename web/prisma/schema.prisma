@@ -134,3 +134,18 @@ model SyncMeta {
   value String?
   at    DateTime @updatedAt
 }
+
+// 任务历史:每次 (vid,kind) 状态转换 append 一条;网关重启 buf_state 清空也不丢历史。
+// 设置页"全部"标签从这里倒序读;cap 后端 500 条够看。
+model TaskHistory {
+  id      String   @id
+  kind    String // "buffer" | "thumb" | "prefetch"
+  videoId Int
+  state   String // "queued"|"working"|"paused"|"done"|"error"|"cancelled"
+  reason  String? // error 时填失败原因(最多 200 字)
+  at      DateTime @default(now())
+
+  @@index([at])
+  @@index([videoId, kind, at])
+}
+

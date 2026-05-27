@@ -16,12 +16,13 @@ export const KIND = {
   prefetch: { label: "预缓存", Icon: BoltRoundedIcon, color: "info" as const },
 };
 
-// 三个标签的标题与空态文案：面板与全屏弹窗共用，避免两处各写一份。
-// 顺序对应 [tasks, completedTasks, failedTasks]。
+// 四个标签的标题与空态文案：面板与全屏弹窗共用，避免两处各写一份。
+// 顺序对应 [tasks, completedTasks, failedTasks, allTasks]。
 export const TASK_TABS = [
   { label: "进行中", empty: "暂无进行中的任务" },
   { label: "已完成", empty: "暂无已完成的任务" },
   { label: "失败", empty: "暂无失败的任务" },
+  { label: "全部", empty: "暂无任务历史" },
 ] as const;
 
 // 任务稳定标识：React key 与 busy 集合键统一走它，TaskItem 形状变了只改这一处。
@@ -65,10 +66,14 @@ function TaskRow({
   task,
   onAction,
   busy,
+  isHistory = false,
 }: {
   task: TaskItem;
   onAction?: (verb: TaskVerb) => void;
   busy?: boolean;
+  // 历史只读视图: 隐藏"暂停/继续/取消/重试"按钮(那些动作只对当前态有效;
+  // 历史里的 done/cancelled/error 是冻结快照)。
+  isHistory?: boolean;
 }) {
   const k = KIND[task.kind];
   const st = task.state;
@@ -76,7 +81,7 @@ function TaskRow({
   const pct = task.cached != null && task.total ? Math.min(100, (task.cached / task.total) * 100) : null;
   const chip = CHIP[st];
   const chipColor: ChipColor = working ? k.color : chip.color;
-  const verbs = onAction ? availableVerbs(task.kind, st) : [];
+  const verbs = onAction && !isHistory ? availableVerbs(task.kind, st) : [];
   const dotColor =
     st === "paused" ? "warning.main" : st === "error" ? "error.main" : st === "done" ? "success.main" : "text.disabled";
 

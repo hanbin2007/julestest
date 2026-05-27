@@ -241,6 +241,7 @@ export default function SettingsView() {
               tasks={data?.tasks ?? []}
               completedTasks={data?.completedTasks ?? []}
               failedTasks={data?.failedTasks ?? []}
+              allTasks={data?.allTasks ?? []}
               bps={bps.bps}
               series={bps.series}
               queue={data?.activity.queue ?? { thumb: 0, buffer: 0 }}

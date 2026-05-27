@@ -159,6 +159,72 @@ class Gateway:
             except Exception:  # noqa: BLE001
                 _log.warning("seg_urls 索引损坏，忽略：%s", self.seg_urls_path, exc_info=True)
 
+        # buf_state.json / buf_jobs.json：缓冲任务状态 + 重试上下文落盘,
+        # 重启后用户排好队的整集缓冲、暂停态、失败状态都还在,可以 resume/retry。
+        # working → 启动时回退成 queued 重新入队(没法续上一片,反正都是 seg_cache 走断点)。
+        self.buf_state_path = (
+            os.path.join(self.seg_cache.dir, "buf_state.json")
+            if self.seg_cache.persist else None
+        )
+        self.buf_jobs_path = (
+            os.path.join(self.seg_cache.dir, "buf_jobs.json")
+            if self.seg_cache.persist else None
+        )
+        # video_metadata.json：vid → {productId, contentId, cardPackageId, src, liveId, duration}
+        # 反向镜像。warm / thumb_batch / buffer_batch / play 任何一处接到完整 video dict 都
+        # 落盘一份, 让网关后续即使 web 离线也知道每个 vid 的 src/headers, 启动后能自愈。
+        self.video_meta = {}
+        self.video_meta_path = (
+            os.path.join(self.seg_cache.dir, "video_metadata.json")
+            if self.seg_cache.persist else None
+        )
+        # 启动时回载 3 张表(先 video_meta, 再 buf_jobs, 再 buf_state):
+        # buf_state 引用 buf_jobs 的 (video, m3u8), 顺序错会 resume/retry 跑空。
+        if self.video_meta_path and os.path.isfile(self.video_meta_path):
+            try:
+                with open(self.video_meta_path, "r", encoding="utf-8") as f:
+                    self.video_meta = json.load(f) or {}
+            except Exception:  # noqa: BLE001
+                _log.warning("video_metadata 索引损坏,忽略", exc_info=True)
+                self.video_meta = {}
+        if self.buf_jobs_path and os.path.isfile(self.buf_jobs_path):
+            try:
+                with open(self.buf_jobs_path, "r", encoding="utf-8") as f:
+                    raw = json.load(f) or {}
+                # 文件存的是 {vid: [video_dict, m3u8]}, 还原成 (video, m3u8) tuple
+                for vid, payload in raw.items():
+                    if isinstance(payload, list) and len(payload) == 2:
+                        v, m = payload
+                        if isinstance(v, dict) and isinstance(m, str) and m:
+                            self.buf_jobs[str(vid)] = (v, m)
+            except Exception:  # noqa: BLE001
+                _log.warning("buf_jobs 索引损坏,忽略", exc_info=True)
+        if self.buf_state_path and os.path.isfile(self.buf_state_path):
+            try:
+                with open(self.buf_state_path, "r", encoding="utf-8") as f:
+                    loaded = json.load(f) or {}
+                # working → queued: 网关被砍时正在跑的任务, 重启后无法续片中位置,
+                # 但 seg_cache 是断点续传的, 重新入队等价于继续。
+                # done/cancelled 保留(供任务列表"已完成/已取消"显示历史),不重新入队。
+                # paused/queued/error 保留, 用户能 resume/retry。
+                for vid, st in loaded.items():
+                    if isinstance(st, str) and st in (
+                        "queued", "working", "paused", "done", "error", "cancelled"
+                    ):
+                        actual = "queued" if st == "working" else st
+                        self.buf_state[str(vid)] = actual
+                        # queued 状态的任务自动重入队(需要 buf_jobs 中有重试上下文)
+                        if actual == "queued":
+                            job = self.buf_jobs.get(str(vid))
+                            if job:
+                                self.buf_q.put(job)
+                            else:
+                                # 没上下文, 状态保留但下游 _buffer_worker 出队时会 skip。
+                                # 实际是僵尸,用户 retry 时如果 web 重新提交 batch 会被 start_buffer 接住。
+                                pass
+            except Exception:  # noqa: BLE001
+                _log.warning("buf_state 索引损坏,忽略", exc_info=True)
+
         # 自动预缓存：以"播放头"为中心向前后双向补未缓存分片。
         self.pf_lock = threading.Lock()
         self.pf_active = {"vid": None}
@@ -174,6 +240,76 @@ class Gateway:
     def pri_fetch(self, t, hdrs, url, range_header=None):
         """按优先级档位回源（委托给闸门）。"""
         return self.gate.fetch(t, hdrs, url, range_header)
+
+    def _atomic_write_json(self, path, data):
+        """tmp + os.replace 原子落盘 JSON。失败只 warn,不抛。"""
+        if not path:
+            return
+        try:
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False)
+            os.replace(tmp, path)
+        except Exception:  # noqa: BLE001
+            _log.warning("索引落盘失败:%s", path, exc_info=True)
+
+    def _save_buf_state(self):
+        """落盘 buf_state. 调用方必须已经持有 buf_lock(或本就在锁外的 init 阶段)。"""
+        if not self.buf_state_path:
+            return
+        self._atomic_write_json(self.buf_state_path, dict(self.buf_state))
+
+    def _save_buf_jobs(self):
+        """落盘 buf_jobs. 同上,调用方持有 buf_lock。
+        (video, m3u8) tuple 序列化成 [video_dict, m3u8] 二元组。"""
+        if not self.buf_jobs_path:
+            return
+        out = {}
+        for vid, payload in self.buf_jobs.items():
+            try:
+                v, m = payload
+                if isinstance(v, dict) and isinstance(m, str):
+                    out[str(vid)] = [v, m]
+            except Exception:  # noqa: BLE001
+                continue
+        self._atomic_write_json(self.buf_jobs_path, out)
+
+    def _save_video_meta(self):
+        """落盘 video_metadata. 调用方持 vh_lock 或 init 阶段。"""
+        if not self.video_meta_path:
+            return
+        self._atomic_write_json(self.video_meta_path, dict(self.video_meta))
+
+    def _remember_video(self, video, m3u8):
+        """从一次 thumb/buffer/warm/play 调用记下该 vid 的元数据。
+        video 至少要有 videoId/contentId/cardPackageId/productId, 可选 liveId。
+        idempotent: 同 vid 反复调用只会保持最新一组。"""
+        try:
+            vid = str(int(video["videoId"]))
+        except (KeyError, ValueError, TypeError):
+            return
+        rec = {
+            "videoId": int(video["videoId"]),
+            "contentId": int(video.get("contentId") or 0) or None,
+            "cardPackageId": int(video.get("cardPackageId") or 0) or None,
+            "productId": int(video.get("productId") or 0) or None,
+            "m3u8": m3u8 if isinstance(m3u8, str) else None,
+        }
+        if video.get("liveId"):
+            try:
+                rec["liveId"] = int(video["liveId"])
+            except (ValueError, TypeError):
+                rec["liveId"] = str(video["liveId"])
+        if video.get("duration"):
+            try:
+                rec["duration"] = int(float(video["duration"]))
+            except (ValueError, TypeError):
+                pass
+        old = self.video_meta.get(vid)
+        if old == rec:
+            return  # 无变化,不重复 IO
+        self.video_meta[vid] = rec
+        self._save_video_meta()
 
     def _save_seg_urls(self):
         """落盘 seg_urls 给重启回载用。set 现场调用，开销很小（每个 vid 一次）。
@@ -378,6 +514,7 @@ class Gateway:
                     self.buf_q.task_done()
                     continue
                 self.buf_state[vid] = "working"
+                self._save_buf_state()
             try:
                 result = self._buffer_one(video, m3u8)  # "done"/"paused"/"cancelled"
             except Exception:  # noqa: BLE001
@@ -390,6 +527,8 @@ class Gateway:
                     self.buf_state[vid] = result
                     if result == "done":
                         self.buf_jobs.pop(vid, None)  # 成功完成后释放重试上下文
+                        self._save_buf_jobs()
+                self._save_buf_state()
             self.buf_q.task_done()
 
     def start_buffer(self, video, m3u8):
@@ -400,6 +539,9 @@ class Gateway:
                 return False
             self.buf_state[vid] = "queued"
             self.buf_jobs[vid] = (video, m3u8)  # 供继续/重试重新入队
+            self._save_buf_state()
+            self._save_buf_jobs()
+        self._remember_video(video, m3u8)
         self.buf_q.put((video, m3u8))
         return True
 
@@ -435,6 +577,10 @@ class Gateway:
             else:
                 return {"ok": False, "vid": vid, "kind": "buffer", "state": st, "reason": "bad verb"}
             new_state = self.buf_state.get(vid)
+            if ok:
+                # 任何状态转换后都落盘 state + jobs(cancel 删了 jobs, 其它没动 jobs 也一样落盘)
+                self._save_buf_state()
+                self._save_buf_jobs()
         if requeue is not None:
             self.buf_q.put(requeue)  # 队列自带锁，放在 buf_lock 外入队（与 start_buffer 一致）
         reason = None if ok else "状态 %s 下不能执行 %s" % (st, verb)
@@ -695,6 +841,11 @@ def make_handler(gateway):
                 # 已有 seg_urls: 检查它和磁盘是否有交集。0 交集 = clarity 漂移(旧 seg_urls 是低清,
                 # 盘上分片是高清,或反之),要重新拉新 src 的 m3u8。否则保持 skip。
                 existing = self.gw.seg_urls.get(vid)
+                # 任何 warm 调用都反向镜像 video metadata (即便 skip 了 seg_urls 这一步,
+                # 重启后网关也知道这个 vid 的 src/ids,未来可以独立自愈)。
+                # 带上原始 d 里的 duration/liveId(_thumb_video 不返回 duration 字段)。
+                self.gw._remember_video({**video, "duration": d.get("duration"),
+                                         "liveId": d.get("liveId")}, m3u8)
                 if existing:
                     disk_urls = disk_by_vid.get(vid) or set()
                     if disk_urls and not any(u in disk_urls for u in existing):
@@ -970,12 +1121,19 @@ def make_handler(gateway):
                 return  # _read_json 已回 413
             queued = skipped = 0
             for d in payload.get("videos") or []:
+                tv = self._thumb_video(d)
+                if tv:
+                    # 拿到完整 video dict + src 就反向镜像;不管 skipped 还是 queued 都镜像。
+                    video, m3u8, _ = tv
+                    self.gw._remember_video(
+                        {**video, "duration": d.get("duration"), "liveId": d.get("liveId")},
+                        m3u8,
+                    )
                 with self.gw.thumb_lock:
                     st = self.gw.thumb_meta.get(str(d.get("videoId")))
                 if st and st.get("state") in ("ready", "gen"):
                     skipped += 1
                     continue
-                tv = self._thumb_video(d)
                 if tv:
                     self.gw.start_thumbs(*tv, tier=2)  # 手动批量 → MANUAL
                     queued += 1
@@ -1072,6 +1230,8 @@ def make_handler(gateway):
             hdrs = play_headers(self.gw.session, video, m3u8)
             with self.gw.vh_lock:
                 self.gw.video_headers[vid] = hdrs
+            # 镜像该 vid 的元数据(脱离 web 自愈 + buf_jobs resume 时 video_headers 可重建)。
+            self.gw._remember_video(video, m3u8)
             # 当前在看的这集设为缓存"保护集"：顶到上限淘汰时最后才动它（防被挤出）。
             self.gw.seg_cache.set_protect_vid(vid)
             if self.gw.prefetch:

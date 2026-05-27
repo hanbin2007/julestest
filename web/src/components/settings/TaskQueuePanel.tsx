@@ -14,6 +14,7 @@ function TaskQueuePanel({
   tasks,
   completedTasks,
   failedTasks,
+  allTasks,
   bps,
   series,
   queue,
@@ -22,6 +23,8 @@ function TaskQueuePanel({
   tasks: TaskItem[];
   completedTasks: TaskItem[];
   failedTasks: TaskItem[];
+  // DB-backed 全部历史(最近 500 条倒序),网关重启不丢。
+  allTasks: TaskItem[];
   bps: number;
   series: number[];
   queue: { thumb: number; buffer: number };
@@ -49,10 +52,11 @@ function TaskQueuePanel({
     [onAction],
   );
 
-  const lists = [tasks, completedTasks, failedTasks];
+  const lists = [tasks, completedTasks, failedTasks, allTasks];
   const current = lists[tab] ?? [];
   const shown = current.slice(0, PANEL_CAP);
   const working = tasks.filter((t) => t.state === "working").length;
+  const isHistoryTab = tab === 3;
 
   return (
     <Box sx={{ display: "flex", flexDirection: "column", minHeight: 0, height: "100%" }}>
@@ -115,8 +119,14 @@ function TaskQueuePanel({
           </Box>
         ) : (
           <>
-            {shown.map((t) => (
-              <TaskRow key={taskKey(t)} task={t} busy={busy.has(taskKey(t))} onAction={(verb) => run(t, verb)} />
+            {shown.map((t, i) => (
+              <TaskRow
+                key={isHistoryTab ? `${taskKey(t)}-${i}` : taskKey(t)}
+                task={t}
+                busy={busy.has(taskKey(t))}
+                onAction={(verb) => run(t, verb)}
+                isHistory={isHistoryTab}
+              />
             ))}
             {current.length > shown.length && (
               <Box sx={{ py: 0.5, textAlign: "center" }}>
@@ -141,6 +151,7 @@ function TaskQueuePanel({
         tasks={tasks}
         completedTasks={completedTasks}
         failedTasks={failedTasks}
+        allTasks={allTasks}
         busy={busy}
         onAction={run}
       />

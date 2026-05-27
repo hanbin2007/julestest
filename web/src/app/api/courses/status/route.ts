@@ -314,6 +314,29 @@ async function build(): Promise<CoursesStatus> {
     .filter(([vid, b]) => b.cached > 0 && !byVid.has(Number(vid)))
     .map(([vid, b]) => ({ vid: Number(vid), segments: b.cached, bytes: b.bytes || 0 }));
 
+  // 全部历史:从 TaskHistory 倒序取 500 条,转 TaskItem 形状供前端展示
+  let allTasks: TaskItem[] = [];
+  try {
+    const history = await prisma.taskHistory.findMany({
+      orderBy: { at: "desc" },
+      take: 500,
+    });
+    allTasks = history.map((h) => {
+      const m = byVid.get(h.videoId);
+      const b = perVidGw[String(h.videoId)];
+      return {
+        vid: h.videoId,
+        title: m?.title ?? `视频 ${h.videoId}`,
+        courseName: m?.courseName ?? "未知课程",
+        courseId: m?.courseId ?? 0,
+        kind: h.kind as TaskItem["kind"],
+        state: h.state as TaskItem["state"],
+        cached: b?.cached,
+        total: b?.total ?? null,
+      };
+    });
+  } catch { /* 查询失败返回空数组 */ }
+
   const downloadingVid = bufWorking[0] ?? activePrefetch ?? thWorking[0] ?? null;
   const dlMeta = downloadingVid ? byVid.get(Number(downloadingVid)) : null;
 
@@ -341,6 +364,7 @@ async function build(): Promise<CoursesStatus> {
     tasks,
     completedTasks,
     failedTasks,
+    allTasks,
     health: {
       gatewayOnline: true,
       stale: false,
@@ -370,9 +394,61 @@ async function mirror(gw: GwStatus) {
       ops.push(prisma.thumbStatus.upsert({ where: { videoId }, create: { videoId, state: st }, update: { state: st } }));
     }
     if (ops.length) await prisma.$transaction(ops);
+    // 任务历史:每次状态变化 append 一条;同 (vid, kind) 重复 state 自动去重(用 SQL 上次记录比对)。
+    await appendTaskHistory(gw);
   } catch {
     /* 镜像失败不影响主返回 */
   }
+}
+
+// 内存:进程级缓存"上次写入的状态",避免每次都查 DB 比对。同 (vid, kind, state) 只写一次。
+// 进程重启后会重写一次每条状态(无大碍,因为 createAt 会自然时间排序)。
+const lastTaskState = new Map<string, string>();
+
+async function appendTaskHistory(gw: GwStatus) {
+  type Row = { kind: "buffer" | "thumb" | "prefetch"; videoId: number; state: string; reason?: string | null };
+  const rows: Row[] = [];
+
+  // buffer: gw.buffer.states 含全部曾经设过状态的 vid(network 重启会清,但本进程内累计)
+  const bufStates = gw.buffer.states ?? {};
+  for (const [vid, st] of Object.entries(bufStates)) {
+    const videoId = Number(vid);
+    if (!videoId || !st) continue;
+    rows.push({ kind: "buffer", videoId, state: st });
+  }
+  // thumb: gw.thumb.states {vid: "ready"|"gen"|"error"|"cancelled"}
+  for (const [vid, st] of Object.entries(gw.thumb.states ?? {})) {
+    const videoId = Number(vid);
+    if (!videoId || !st) continue;
+    // 把 thumb 的 "ready" 归一化成 "done", 让前端展示统一
+    rows.push({ kind: "thumb", videoId, state: st === "ready" ? "done" : st });
+  }
+  // prefetch: gw.live.done = 本会话预缓存满的讲
+  for (const vid of gw.live?.done ?? []) {
+    const videoId = Number(vid);
+    if (!videoId) continue;
+    rows.push({ kind: "prefetch", videoId, state: "done" });
+  }
+
+  // 去重 + 仅写"上次不同的"
+  const fresh: Row[] = [];
+  for (const r of rows) {
+    const key = `${r.kind}:${r.videoId}`;
+    if (lastTaskState.get(key) === r.state) continue;
+    lastTaskState.set(key, r.state);
+    fresh.push(r);
+  }
+  if (fresh.length === 0) return;
+
+  await prisma.taskHistory.createMany({
+    data: fresh.map((r) => ({
+      id: `${r.kind}-${r.videoId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      kind: r.kind,
+      videoId: r.videoId,
+      state: r.state,
+      reason: r.reason ?? null,
+    })),
+  }).catch(() => { /* 镜像失败不影响主返回 */ });
 }
 
 async function fallback(
@@ -417,6 +493,7 @@ async function fallback(
     tasks: [],
     completedTasks: [], // 网关离线时无任务运行态可查（DB 镜像只有缓存进度，不含任务历史）
     failedTasks: [],
+    allTasks: [], // 网关离线时跳过 TaskHistory 查询;保持响应轻量
     // 网关离线时无法得知缓存目录状态：cacheDirOk 保持 true，避免与“网关离线”重复报警。
     health: {
       gatewayOnline: false,

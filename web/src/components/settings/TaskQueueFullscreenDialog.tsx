@@ -5,13 +5,14 @@ import CloseRoundedIcon from "@mui/icons-material/CloseRounded";
 import type { TaskItem, TaskVerb } from "@/types/api";
 import TaskRow, { TASK_TABS, taskKey } from "./TaskRow";
 
-// 全屏任务视图：面板每标签只显示前 20 条，这里展开同样的三标签但不截断，复用 TaskRow。
+// 全屏任务视图：面板每标签只显示前 20 条，这里展开同样的四标签但不截断，复用 TaskRow。
 export default function TaskQueueFullscreenDialog({
   open,
   onClose,
   tasks,
   completedTasks,
   failedTasks,
+  allTasks,
   busy,
   onAction,
 }: {
@@ -20,12 +21,15 @@ export default function TaskQueueFullscreenDialog({
   tasks: TaskItem[];
   completedTasks: TaskItem[];
   failedTasks: TaskItem[];
+  // "全部"标签:DB-backed 任务历史(最近 500 条),只读。
+  allTasks: TaskItem[];
   busy: Set<string>;
   onAction: (task: TaskItem, verb: TaskVerb) => void;
 }) {
   const [tab, setTab] = React.useState(0);
-  const lists = [tasks, completedTasks, failedTasks];
+  const lists = [tasks, completedTasks, failedTasks, allTasks];
   const current = lists[tab] ?? [];
+  const isHistoryTab = tab === 3;
 
   return (
     <Dialog open={open} onClose={onClose} fullScreen>
@@ -52,8 +56,14 @@ export default function TaskQueueFullscreenDialog({
             </Typography>
           </Box>
         ) : (
-          current.map((t) => (
-            <TaskRow key={taskKey(t)} task={t} busy={busy.has(taskKey(t))} onAction={(verb) => onAction(t, verb)} />
+          current.map((t, i) => (
+            <TaskRow
+              key={isHistoryTab ? `${taskKey(t)}-${i}` : taskKey(t)}
+              task={t}
+              busy={busy.has(taskKey(t))}
+              onAction={(verb) => onAction(t, verb)}
+              isHistory={isHistoryTab}
+            />
           ))
         )}
       </Box>

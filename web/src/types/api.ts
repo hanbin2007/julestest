@@ -198,6 +198,7 @@ export interface CoursesStatus {
   tasks: TaskItem[]; // 进行中：working / queued / paused
   completedTasks: TaskItem[]; // 已完成：done / cancelled（仅本会话任务）
   failedTasks: TaskItem[]; // 失败：error（可重试）
+  allTasks: TaskItem[]; // 全部历史：DB-backed,网关重启不丢;倒序最近 500 条
   health: {
     gatewayOnline: boolean;
     stale: boolean;
