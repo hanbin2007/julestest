@@ -76,13 +76,19 @@ class DiskLRU:
             return
         keep = {m[2] for m in self.meta.values()}
         keep.add("index.json")
+        # 同目录可能放着 gateway 的其它持久化 JSON(seg_urls.json/buf_state.json/
+        # video_metadata.json 等);它们以 .json 结尾, 不是分片缓存的 fname(sha1 无后缀),
+        # 一刀切扩展名白名单即可,避免 cache.py 知道 gateway 写了哪些文件。
         try:
             for fn in os.listdir(self.dir):
-                if fn not in keep:
-                    try:
-                        os.remove(os.path.join(self.dir, fn))
-                    except OSError:
-                        pass
+                if fn in keep:
+                    continue
+                if fn.endswith(".json") or fn.endswith(".json.tmp"):
+                    continue
+                try:
+                    os.remove(os.path.join(self.dir, fn))
+                except OSError:
+                    pass
         except OSError:
             pass
 
