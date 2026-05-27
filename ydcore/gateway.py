@@ -683,6 +683,8 @@ def make_handler(gateway):
             warmed = 0
             skipped = 0
             errors = []
+            # 一次性快照所有 vid 的磁盘 URL 集合,后面 stale 检测复用,避免每条都加锁。
+            disk_by_vid = self.gw.seg_cache.cached_segs_by_vid()
             for d in payload.get("videos") or []:
                 tv = self._thumb_video(d)  # 复用 (video, src, duration) 解析；duration 忽略
                 if not tv:
@@ -690,9 +692,16 @@ def make_handler(gateway):
                     continue
                 video, m3u8, _ = tv
                 vid = str(video["videoId"])
-                if self.gw.seg_urls.get(vid):
-                    skipped += 1
-                    continue
+                # 已有 seg_urls: 检查它和磁盘是否有交集。0 交集 = clarity 漂移(旧 seg_urls 是低清,
+                # 盘上分片是高清,或反之),要重新拉新 src 的 m3u8。否则保持 skip。
+                existing = self.gw.seg_urls.get(vid)
+                if existing:
+                    disk_urls = disk_by_vid.get(vid) or set()
+                    if disk_urls and not any(u in disk_urls for u in existing):
+                        _log.info("seg_urls vid=%s 与磁盘 0 交集, 推断 clarity 漂移, 重新 warm", vid)
+                    else:
+                        skipped += 1
+                        continue
                 try:
                     th = play_headers(self.gw.session, video, m3u8)
                     with self.gw.vh_lock:
@@ -784,7 +793,6 @@ def make_handler(gateway):
                     n = len(urls)
                     cset = snap.get(vid) or set()
                     flags = [1 if u in cset else 0 for u in urls]
-                    cached = sum(flags)
                     b = min(nb, n)
                     cells = []
                     for i in range(b):
@@ -793,6 +801,12 @@ def make_handler(gateway):
                         cells.append(round(sum(seg) / len(seg), 3) if seg else 0)
                     ph = self.gw.playhead.get(vid)
                     pos = (ph / n) if (ph is not None and n) else None
+                    # cached 用磁盘真相(disk count), 不用 sum(flags)：当 seg_urls 是某清晰度的
+                    # URL 但磁盘上是另一清晰度时(用户看时存的高清 vs warm 拉的低清),
+                    # sum(flags) 算出来是 0,但实际"这集"在盘上有 N 片。buckets 仍走 URL 匹配
+                    # (可视化"哪一段"被缓存),数字算磁盘真相。disk ≥ sum(flags) 时取 disk,
+                    # 反之取 sum(flags)(异常情况兜底)。
+                    cached = max(sum(flags), disk)
                     out[vid] = {"total": n, "cached": cached, "buckets": cells, "playhead": pos}
                 else:
                     # 无有序列表：只能给磁盘计数与已知总数，buckets=null

@@ -118,26 +118,30 @@ function buildCourseStatus(
 let last: { at: number; data: CoursesStatus } | null = null;
 let pending: Promise<CoursesStatus> | null = null;
 
-// 已 fire 给网关 /api/warm 的 vid：同一会话不重复触发。
-// 用途：网关重启后某些已缓存讲 seg_urls 还没回载完，会显示 total=null；
-// 我们从 DB 取这些 vid 的 src/ids 让网关只取 m3u8 学到 total（不下分片）。
-const warmTried = new Set<number>();
-const warmInflight = new Set<number>();
+// 触发网关 /api/warm 的限频:每 5s 至多一次。
+// 网关侧 idempotent:已知 seg_urls && 与磁盘有交集 → skip;清晰度漂移 → 重新拉。
+// 重复 fire 不会真重做活,所以不用 warmTried"一会话一次"那么严;每 5s 是为了让用户在
+// 设置页停留时也能持续地把新出现的"待 warm"vid 拉齐(比如刚开过新课、新缓存的讲)。
+let lastWarmAt = 0;
 
 async function triggerWarmIfNeeded(
   perVidGw: Record<string, { cached: number; total: number | null }>,
   byVid: Map<number, VidMeta>,
 ) {
+  if (Date.now() - lastWarmAt < 5000) return;
+  // 给所有"磁盘有缓存"的 vid 都发一遍 warm。网关 idempotent:
+  //   - 没有 seg_urls → 真 warm
+  //   - 有 seg_urls 且与磁盘有 URL 交集 → skip(常态)
+  //   - 有 seg_urls 但与磁盘 0 交集(清晰度漂移) → 重新 warm 修复 bucket bar
+  // 重复发 cheap(单网关 round-trip + 18 vid 各 0.5s m3u8 拉,大头是 skip 路径)。
   const needed: number[] = [];
   for (const [vid, b] of Object.entries(perVidGw)) {
     const id = Number(vid);
     if (!id) continue;
-    if (b.cached > 0 && b.total === null && byVid.has(id) && !warmInflight.has(id) && !warmTried.has(id)) {
-      needed.push(id);
-    }
+    if (b.cached > 0 && byVid.has(id)) needed.push(id);
   }
   if (needed.length === 0) return;
-  needed.forEach((v) => warmInflight.add(v));
+  lastWarmAt = Date.now();
 
   try {
     const rows = await prisma.video.findMany({
@@ -147,8 +151,13 @@ async function triggerWarmIfNeeded(
     const videos = rows.map((r) => {
       let raw: Record<string, unknown> = {};
       try { raw = JSON.parse(r.raw) as Record<string, unknown>; } catch { /* ignore */ }
-      const clarity = Array.isArray(raw.clarity) ? raw.clarity as Array<{ url?: string }> : [];
-      const src = (raw.downloadUrl as string) || clarity[0]?.url || "";
+      // 必须与播放路径 pickM3u8 完全一致(最高清晰度优先):
+      // 播放时 ArtPlayer 缓存的是高清分片,如果 warm 拉低清 m3u8,seg_urls 里 URL 就和
+      // 磁盘上分片对不上,导致设置页"缓冲条"按 URL 匹配算出 cached=0(明明盘上有片)。
+      const clarity = (Array.isArray(raw.clarity) ? raw.clarity as Array<{ url?: string; type?: number }> : [])
+        .filter((c) => c?.url)
+        .sort((a, b) => (b.type || 0) - (a.type || 0));
+      const src = clarity[0]?.url || (raw.downloadUrl as string) || "";
       return {
         videoId: r.videoId,
         contentId: raw.contentId as number,
@@ -160,21 +169,10 @@ async function triggerWarmIfNeeded(
       };
     }).filter((v) => v.src && v.contentId && v.cardPackageId);
 
-    if (videos.length === 0) {
-      needed.forEach((v) => { warmInflight.delete(v); warmTried.add(v); });
-      return;
-    }
-
-    // fire-and-forget: 网关侧逐个串行取 m3u8，耗时可能数秒；下一次 polling 就能看到 total。
-    void gatewayPost("/api/warm", { videos })
-      .catch(() => { /* 失败下次轮询会再试，warmTried 不加 */ })
-      .finally(() => {
-        videos.forEach((v) => warmInflight.delete(v.videoId));
-        videos.forEach((v) => warmTried.add(v.videoId));
-      });
-  } catch {
-    needed.forEach((v) => warmInflight.delete(v));
-  }
+    if (videos.length === 0) return;
+    // fire-and-forget: 网关侧逐个串行取 m3u8,耗时可能数秒;下一次 polling 就能看到 total。
+    void gatewayPost("/api/warm", { videos }).catch(() => { /* 失败 5s 后会再试 */ });
+  } catch { /* DB 查询失败,5s 后再试 */ }
 }
 
 export async function GET() {
