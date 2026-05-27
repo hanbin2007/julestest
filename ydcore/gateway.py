@@ -115,6 +115,8 @@ class Gateway:
         self.thumb_dir = THUMB_DIR
         os.makedirs(self.thumb_dir, exist_ok=True)
         self.thumb_index_path = os.path.join(self.thumb_dir, "index.json")
+        # thumb_jobs.json 跟 thumb_index.json 一个目录, 跨重启保留失败/取消任务的重试上下文。
+        self.thumb_jobs_path = os.path.join(self.thumb_dir, "thumb_jobs.json")
         self.thumb_meta = {}     # vid -> {"state": "gen"/"ready"/"error"/"cancelled", ...}
         self.thumb_active = set()  # 真正在 ffmpeg 生成中的 vid（区分"生成中"与"排队中"）
         self.thumb_jobs = {}     # vid -> (video, m3u8, duration, tier)，供重试重新入队
@@ -123,15 +125,38 @@ class Gateway:
         self.thumb_lock = threading.Lock()
         self.thumb_q = queue.Queue()
         self.have_ffmpeg = which("ffmpeg") is not None
+        # 回载 thumb_index.json: 现在存全部状态(ready/gen/error/cancelled),
+        # ready 仍然校验 .jpg 文件,其它状态无文件依赖直接保留。
+        # 启动时若是 gen 状态(网关被砍时正在生成的) → 回退成 error,等用户手动重试。
         try:
             with open(self.thumb_index_path, "r", encoding="utf-8") as f:
                 for vid, m in (json.load(f) or {}).items():
-                    if os.path.exists(os.path.join(self.thumb_dir, "%s.jpg" % vid)):
+                    st = (m or {}).get("state")
+                    if st == "ready":
+                        if os.path.exists(os.path.join(self.thumb_dir, "%s.jpg" % vid)):
+                            self.thumb_meta[vid] = m
+                    elif st == "gen":
+                        # 进程被砍时正在跑的 ffmpeg → 算失败,等重试
+                        self.thumb_meta[vid] = {"state": "error", "reason": "interrupted"}
+                    elif st in ("error", "cancelled"):
                         self.thumb_meta[vid] = m
         except FileNotFoundError:
             pass   # 首次运行：尚无缩略图索引，正常
         except Exception:  # noqa: BLE001
             _log.warning("缩略图索引损坏，忽略：%s", self.thumb_index_path, exc_info=True)
+        # thumb_jobs.json: 重试上下文 (vid → [video_dict, m3u8, duration, tier])
+        if os.path.isfile(self.thumb_jobs_path):
+            try:
+                with open(self.thumb_jobs_path, "r", encoding="utf-8") as f:
+                    raw = json.load(f) or {}
+                for vid, payload in raw.items():
+                    # 兼容 [v, m, dur, tier] 4-tuple
+                    if isinstance(payload, list) and len(payload) == 4:
+                        v, m, dur, tier = payload
+                        if isinstance(v, dict) and isinstance(m, str) and m:
+                            self.thumb_jobs[str(vid)] = (v, m, int(dur or 0), int(tier or 2))
+            except Exception:  # noqa: BLE001
+                _log.warning("thumb_jobs 索引损坏,忽略", exc_info=True)
 
         # 整集缓冲（把整节课分片下到服务端磁盘缓存）：批量预缓冲 + 状态
         self.seg_total = {}      # vid -> 总分片数（已知时）
@@ -187,6 +212,19 @@ class Gateway:
             except Exception:  # noqa: BLE001
                 _log.warning("video_metadata 索引损坏,忽略", exc_info=True)
                 self.video_meta = {}
+        # 重建 video_headers: video_headers 本身不持久化(含 session 字段 Cookie/UA,跨重启
+        # 由 req.txt 重新加载),但 per-vid 部分(Url/Videoid/Cardpackageid/Liveid)能从
+        # video_meta 派生。启动时 play_headers(self.session, meta, m3u8) 重建一遍, 这样
+        # 网关脱离 web 启动后,所有曾见过的 vid 立刻能直接观看(不必先打 /api/play)。
+        # tvid="t_"+vid (缩略图源,低清流)等到自动 thumb 时再按当时的低清 m3u8 重建。
+        for vid, meta in self.video_meta.items():
+            m3u8 = meta.get("m3u8")
+            if not m3u8:
+                continue
+            try:
+                self.video_headers[str(vid)] = play_headers(self.session, meta, m3u8)
+            except Exception:  # noqa: BLE001
+                _log.debug("启动重建 video_headers 失败 vid=%s", vid, exc_info=True)
         if self.buf_jobs_path and os.path.isfile(self.buf_jobs_path):
             try:
                 with open(self.buf_jobs_path, "r", encoding="utf-8") as f:
@@ -247,9 +285,37 @@ class Gateway:
             except Exception:  # noqa: BLE001
                 _log.warning("pf_done 索引损坏,忽略", exc_info=True)
 
+        # playhead.json: 预缓存中心点持久化。直播分片每秒触发,如果每次都落盘 IO 太多;
+        # 用 _playhead_dirty 标志 + 后台 _playhead_flush 线程 5s 一刷,丢的最大值 = 5 秒位置漂移,
+        # 网关重启后预缓存从 5 秒前的位置继续,完全可接受。
+        # 同时含 _protect_vid 字段(嵌入同一文件): cache LRU "保护集"。
+        self.playhead_path = (
+            os.path.join(self.seg_cache.dir, "playhead.json")
+            if self.seg_cache.persist else None
+        )
+        self._playhead_dirty = False
+        if self.playhead_path and os.path.isfile(self.playhead_path):
+            try:
+                with open(self.playhead_path, "r", encoding="utf-8") as f:
+                    loaded = json.load(f) or {}
+                ph = loaded.get("playhead") or {}
+                if isinstance(ph, dict):
+                    for vid, idx in ph.items():
+                        try:
+                            self.playhead[str(vid)] = int(idx)
+                        except (ValueError, TypeError):
+                            continue
+                pv = loaded.get("protect_vid")
+                if isinstance(pv, str) and pv:
+                    self.seg_cache.set_protect_vid(pv)
+            except Exception:  # noqa: BLE001
+                _log.warning("playhead 索引损坏,忽略", exc_info=True)
+
         for _ in range(max(1, THUMB_WORKERS)):
             threading.Thread(target=self._thumb_worker, daemon=True).start()
         threading.Thread(target=self._buffer_worker, daemon=True).start()
+        # 后台 flush 线程: playhead 节流落盘(5s/次),只在 dirty 时写。
+        threading.Thread(target=self._playhead_flush_loop, daemon=True).start()
 
     def pri_fetch(self, t, hdrs, url, range_header=None):
         """按优先级档位回源（委托给闸门）。"""
@@ -299,6 +365,29 @@ class Gateway:
         if not self.pf_done_path:
             return
         self._atomic_write_json(self.pf_done_path, sorted(self.pf_done))
+
+    def _save_playhead(self):
+        """落盘 playhead + protect_vid. 由 _playhead_flush_loop 节流调用,不直接在
+        /p 处理线程里调(每秒可能多次写盘,无价值)。"""
+        if not self.playhead_path:
+            return
+        data = {
+            "playhead": dict(self.playhead),
+            "protect_vid": self.seg_cache.protect_vid,
+        }
+        self._atomic_write_json(self.playhead_path, data)
+        self._playhead_dirty = False
+
+    def _playhead_flush_loop(self):
+        """每 5s 检查 playhead/protect_vid 是否 dirty, 是就落盘。
+        网关被砍最多丢 5s 内的播放位置漂移, 预缓存中心从 5s 前的位置继续,无感。"""
+        while True:
+            time.sleep(5)
+            if self._playhead_dirty:
+                try:
+                    self._save_playhead()
+                except Exception:  # noqa: BLE001
+                    _log.debug("playhead 节流落盘失败", exc_info=True)
 
     def _remember_video(self, video, m3u8):
         """从一次 thumb/buffer/warm/play 调用记下该 vid 的元数据。
@@ -363,13 +452,29 @@ class Gateway:
 
     # ---- 缩略图 ----------------------------------------------------------
     def _save_thumb_index(self):
+        # 落盘全部状态(ready/gen/error/cancelled),不再只存 ready。回载时 gen 会被
+        # 当成 error("interrupted"),让用户看到"上次跑到一半,可点重试"。
         with self.thumb_lock:
-            snap = {k: v for k, v in self.thumb_meta.items() if v.get("state") == "ready"}
+            snap = {k: dict(v) for k, v in self.thumb_meta.items() if v.get("state")}
         try:
             with open(self.thumb_index_path, "w", encoding="utf-8") as f:
                 json.dump(snap, f)
         except Exception:  # noqa: BLE001
             _log.warning("缩略图索引落盘失败：%s", self.thumb_index_path, exc_info=True)
+
+    def _save_thumb_jobs(self):
+        """落盘 thumb_jobs (重试上下文). 调用方持有 thumb_lock 或确保不冲突。"""
+        if not hasattr(self, "thumb_jobs_path") or not self.thumb_jobs_path:
+            return
+        out = {}
+        for vid, payload in self.thumb_jobs.items():
+            try:
+                v, m, dur, tier = payload
+                if isinstance(v, dict) and isinstance(m, str):
+                    out[str(vid)] = [v, m, int(dur or 0), int(tier or 2)]
+            except Exception:  # noqa: BLE001
+                continue
+        self._atomic_write_json(self.thumb_jobs_path, out)
 
     def _thumb_worker(self):
         while True:
@@ -450,20 +555,21 @@ class Gateway:
             self.thumb_procs[vid] = proc
         rc = proc.wait()
         # 取消复查与终态落地必须在同一把锁内：否则二者之间有窗口，刚好取消进来会被 ready/error 覆盖。
-        # _save_thumb_index 自身要拿 thumb_lock（不可重入），故用 save_idx 标记、出锁后再存。
+        # _save_thumb_index 自身要拿 thumb_lock（不可重入），故用标记、出锁后再存。
         save_idx = False
         with self.thumb_lock:
             self.thumb_procs.pop(vid, None)
             # 生成途中被取消（terminate）：保持 cancelled 终态，别落成 ready/error
             if (self.thumb_meta.get(vid) or {}).get("state") == "cancelled":
-                return
-            if rc == 0 and os.path.exists(out):
+                save_idx = True  # cancelled 也要落盘(全态持久化)
+            elif rc == 0 and os.path.exists(out):
                 self.thumb_meta[vid] = {"state": "ready", "url": "/thumbs/%s.jpg" % vid,
                                         "number": number, "column": THUMB_COLS,
                                         "width": THUMB_W, "height": THUMB_H}
                 save_idx = True
             else:
                 self.thumb_meta[vid] = {"state": "error", "reason": "ffmpeg rc=%d" % rc}
+                save_idx = True  # error 也落盘,重启后用户看到可重试
         if save_idx:
             self._save_thumb_index()
 
@@ -480,6 +586,9 @@ class Gateway:
             self.thumb_meta[vid] = {"state": "gen"}
             self.thumb_jobs[vid] = (video, m3u8, duration, tier)  # 供重试重新入队
             self.thumb_session.add(vid)                            # 标记为本会话任务
+        # 出锁后落 thumb_jobs / thumb_index, 给重启重试上下文。
+        self._save_thumb_jobs()
+        self._save_thumb_index()
         with self.vh_lock:
             self.video_headers["t_" + vid] = play_headers(self.session, video, m3u8)
         self.thumb_q.put((vid, m3u8, duration, tier))
@@ -627,6 +736,13 @@ class Gateway:
             else:
                 return {"ok": False, "vid": vid, "kind": "thumb", "state": st, "reason": "bad verb"}
             new_state = (self.thumb_meta.get(vid) or {}).get("state")
+            if ok:
+                # 状态变了就落盘 thumb_index(cancelled/gen 都会跨重启可见)
+                save_idx_after = True
+            else:
+                save_idx_after = False
+        if save_idx_after:
+            self._save_thumb_index()
         if proc_to_kill is not None:
             try:
                 proc_to_kill.terminate()
@@ -1255,6 +1371,7 @@ def make_handler(gateway):
             self.gw._remember_video(video, m3u8)
             # 当前在看的这集设为缓存"保护集"：顶到上限淘汰时最后才动它（防被挤出）。
             self.gw.seg_cache.set_protect_vid(vid)
+            self.gw._playhead_dirty = True  # 触发 5s 后落盘新 protect_vid
             if self.gw.prefetch:
                 self.gw.start_prefetch(vid, m3u8)  # 后台整集预缓存；切走会自动暂停
             self._send_json({"url": proxify(m3u8, video["videoId"]), "m3u8": m3u8})
@@ -1285,6 +1402,7 @@ def make_handler(gateway):
                 pos = si.get(target)
                 if pos is not None:
                     self.gw.playhead[vid] = pos
+                    self.gw._playhead_dirty = True  # 5s 后由 flush loop 落盘
 
             # m3u8 播放列表：不缓存，取来改写
             if looks_like_m3u8(target, ""):
