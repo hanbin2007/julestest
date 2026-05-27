@@ -396,11 +396,10 @@ async function mirror(gw: GwStatus) {
       ops.push(prisma.thumbStatus.upsert({ where: { videoId }, create: { videoId, state: st }, update: { state: st } }));
     }
     if (ops.length) await prisma.$transaction(ops);
-    // 任务历史:每次状态变化 append 一条;同 (vid, kind) 重复 state 自动去重(用 SQL 上次记录比对)。
+    // 任务历史:每次状态变化 append 一条;同 (vid, kind) 重复 state 自动去重。
     await appendTaskHistory(gw);
-  } catch (e) {
-    // 临时:打到 stderr 排查"为什么 backfill 没生效"
-    console.error("[mirror] failed:", (e as Error).message);
+  } catch {
+    /* 镜像失败不影响主返回 */
   }
 }
 
@@ -454,11 +453,8 @@ async function initLastTaskStateOnce() {
       const data = backfill.map((vid) => mkHistRow("buffer", vid, "done"));
       await prisma.taskHistory.createMany({ data });
       backfill.forEach((vid) => lastTaskState.set(`buffer:${vid}`, "done"));
-      console.error(`[backfill] inserted ${backfill.length} buffer:done from CacheStatus`);
-    } else {
-      console.error("[backfill] no buffer:done needed (fullCached:", fullCached.length, ")");
     }
-  } catch (e) { console.error("[backfill] failed:", (e as Error).message); }
+  } catch { /* 回填失败不致命 */ }
 }
 
 async function appendTaskHistory(gw: GwStatus) {
