@@ -247,6 +247,10 @@ async function build(): Promise<CoursesStatus> {
   const mk = (vid: string, kind: TaskItem["kind"], state: TaskItem["state"]): TaskItem => {
     const m = byVid.get(Number(vid));
     const b = perVidGw[vid];
+    // "段"是 buffer/prefetch 的概念(分片下载进度);thumb(ffmpeg 单次原子调用)没有段数。
+    // 给 thumb 任务附段数会让"thumb done + cached<total"看起来像"任务完成但只下了一半",
+    // 实际只是缩略图生成完毕、缓冲恰好还没下完。仅 buffer/prefetch 附段数。
+    const showSegs = kind !== "thumb";
     return {
       vid: Number(vid),
       title: m?.title ?? `视频 ${vid}`,
@@ -254,8 +258,8 @@ async function build(): Promise<CoursesStatus> {
       courseId: m?.courseId ?? 0,
       kind,
       state,
-      cached: b?.cached,
-      total: b?.total ?? null,
+      cached: showSegs ? b?.cached : undefined,
+      total: showSegs ? (b?.total ?? null) : null,
     };
   };
   // 字段全部兜底默认值：兼容尚未升级到本版本的网关（避免 for...of undefined 崩溃）。
@@ -326,6 +330,8 @@ async function build(): Promise<CoursesStatus> {
     allTasks = history.map((h) => {
       const m = byVid.get(h.videoId);
       const b = perVidGw[String(h.videoId)];
+      // 同 mk():仅 buffer/prefetch 附段数,避免 thumb 任务误显示 "完成 19/243 段"。
+      const showSegs = h.kind !== "thumb";
       return {
         vid: h.videoId,
         title: m?.title ?? `视频 ${h.videoId}`,
@@ -333,8 +339,8 @@ async function build(): Promise<CoursesStatus> {
         courseId: m?.courseId ?? 0,
         kind: h.kind as TaskItem["kind"],
         state: h.state as TaskItem["state"],
-        cached: b?.cached,
-        total: b?.total ?? null,
+        cached: showSegs ? b?.cached : undefined,
+        total: showSegs ? (b?.total ?? null) : null,
       };
     });
   } catch { /* 查询失败返回空数组 */ }
