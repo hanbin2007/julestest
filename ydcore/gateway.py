@@ -7,9 +7,9 @@ Gateway 持有一台网关实例的全部可变状态（原先散在 make_handle
 并发不变量（刻意不加锁的共享 dict，单写者 + GIL 原子，依赖如下约定）：
   · playhead[vid]   仅由 /p 处理线程在该 vid 的直播分片请求里写；预缓存 worker 只读，
                     读到旧值会在下一轮主动 re-center，stale 读无害。
-  · seg_urls[vid]   由 /p、整集缓冲、预缓存写入"该 vid 的有序分片列表"，三者写的是同一
-                    内容（同清晰度），互相覆盖等价；读方只做存在性/长度判断。
-  · seg_total[vid]  同上，写的是分片总数（同一值）。
+  · seg_urls[vid]   由 /p、整集缓冲、预缓存、warm 经 _learn_segments 写入"该 vid 的有序
+                    分片列表"；总数真相恒为 len(seg_urls[vid])（不再有冗余 seg_total）。
+                    读方只做存在性/长度判断。
   · pf_active["vid"]  仅在 pf_lock 内写；多处无锁读，读到旧值最多让 worker 多跑一轮即退出。
 有锁保护的状态：video_headers(vh_lock)、
 thumb_meta/thumb_active/thumb_jobs/thumb_procs/thumb_session(thumb_lock)、
@@ -184,7 +184,7 @@ class Gateway:
                 self._quarantine_corrupt(self.thumb_jobs_path, "thumb_jobs")
 
         # 整集缓冲（把整节课分片下到服务端磁盘缓存）：批量预缓冲 + 状态
-        self.seg_total = {}      # vid -> 总分片数（已知时）
+        # 总数真相恒为 len(seg_urls[vid])；不再维护冗余 seg_total（旧版会与 seg_urls 漂移）。
         self.seg_urls = {}       # vid -> 按播放顺序的分片绝对地址列表
         self.buf_state = {}      # vid -> "queued"/"working"/"paused"/"done"/"error"/"cancelled"
         self.buf_jobs = {}       # vid -> (video, m3u8)，供继续/重试重新入队
@@ -206,11 +206,9 @@ class Gateway:
                 for vid, urls in loaded.items():
                     if isinstance(urls, list) and urls:
                         self.seg_urls[str(vid)] = list(urls)
-                        self.seg_total[str(vid)] = len(urls)
             except Exception:  # noqa: BLE001
                 self._quarantine_corrupt(self.seg_urls_path, "seg_urls")
                 self.seg_urls = {}
-                self.seg_total = {}
 
         # buf_state.json / buf_jobs.json：缓冲任务状态 + 重试上下文落盘,
         # 重启后用户排好队的整集缓冲、暂停态、失败状态都还在,可以 resume/retry。
@@ -684,9 +682,7 @@ class Gateway:
         pl, _, _ = self.pri_fetch(2, th, m3u8)
         text = pl.decode("utf-8", "replace")
         segs = parse_segments(text, m3u8)
-        self.seg_total[vid] = len(segs)
-        self.seg_urls[vid] = list(segs)  # 供逐片缓存 bitmap 查询
-        self._save_seg_urls()  # 持久化,重启后总数/buckets 立刻能复原
+        self._learn_segments(vid, segs)  # 设 seg_urls + 落盘 (供逐片 bitmap / 总数)
         # key 单独跟踪: 缺 key 会让 ffmpeg 解密失败/播放黑屏, 必须算 error 而非 done。
         key_urls = []
         for ln in text.splitlines():
@@ -889,9 +885,7 @@ class Gateway:
                         _log.debug("预缓存取密钥失败 vid=%s：%s", vid, kabs, exc_info=True)
         segs = parse_segments(text, m3u8)
         n = len(segs)
-        self.seg_total[vid] = n
-        self.seg_urls[vid] = list(segs)  # 供逐片缓存 bitmap 查询
-        self._save_seg_urls()  # 持久化,重启后总数/buckets 立刻能复原
+        self._learn_segments(vid, segs)  # 设 seg_urls + 落盘 (供逐片 bitmap / 总数)
         if n == 0:
             return
         self.pf_segidx[vid] = {u: i for i, u in enumerate(segs)}
@@ -1109,9 +1103,7 @@ def make_handler(gateway):
                     if not segs:
                         errors.append({"videoId": video["videoId"], "reason": "no segments"})
                         continue
-                    self.gw.seg_urls[vid] = list(segs)
-                    self.gw.seg_total[vid] = len(segs)
-                    self.gw._save_seg_urls()
+                    self.gw._learn_segments(vid, segs)  # 设 seg_urls + 落盘
                     warmed += 1
                 except Exception as e:  # noqa: BLE001
                     _log.debug("warm 失败 vid=%s", vid, exc_info=True)
@@ -1547,9 +1539,7 @@ def make_handler(gateway):
                 if vid and "#EXTINF" in text:
                     segs = parse_segments(text, target)
                     if segs:
-                        self.gw.seg_urls[vid] = segs
-                        self.gw.seg_total[vid] = len(segs)
-                        self.gw._save_seg_urls()  # 持久化,重启后总数/buckets 立刻能复原
+                        self.gw._learn_segments(vid, segs)  # 设 seg_urls + 落盘
                 rewritten = rewrite_m3u8(text, target, vid)
                 self._send_bytes(200, rewritten.encode("utf-8"),
                                  "application/vnd.apple.mpegurl")
