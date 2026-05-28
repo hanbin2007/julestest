@@ -225,6 +225,7 @@ class Gateway:
         # 反向镜像。warm / thumb_batch / buffer_batch / play 任何一处接到完整 video dict 都
         # 落盘一份, 让网关后续即使 web 离线也知道每个 vid 的 src/headers, 启动后能自愈。
         self.video_meta = {}
+        self.meta_lock = threading.Lock()  # 保护 video_meta + seg_urls 的读-改-写(_remember_video/_learn_segments)
         self.video_meta_path = (
             os.path.join(self.seg_cache.dir, "video_metadata.json")
             if self.seg_cache.persist else None
@@ -449,11 +450,12 @@ class Gateway:
                 rec["duration"] = int(float(video["duration"]))
             except (ValueError, TypeError):
                 pass
-        old = self.video_meta.get(vid)
-        if old == rec:
-            return  # 无变化,不重复 IO
-        self.video_meta[vid] = rec
-        self._save_video_meta()
+        with self.meta_lock:
+            old = self.video_meta.get(vid)
+            if old == rec:
+                return  # 无变化,不重复 IO
+            self.video_meta[vid] = rec
+            self._save_video_meta()
 
     def _learn_segments(self, vid, segs):
         """记下该 vid 的有序分片列表 (m3u8 解析出的绝对 URL 序) 并落盘。
@@ -465,8 +467,9 @@ class Gateway:
         segs = list(segs or [])
         if not segs:
             return 0
-        self.seg_urls[vid] = segs
-        self._save_seg_urls()  # 持久化, 重启后总数/buckets 立刻能复原
+        with self.meta_lock:
+            self.seg_urls[vid] = segs
+            self._save_seg_urls()  # 持久化, 重启后总数/buckets 立刻能复原
         return len(segs)
 
     def _vid_counts(self, vid, disk_real, disk_snap):
