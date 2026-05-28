@@ -48,17 +48,16 @@ export async function GET(req: NextRequest) {
     return Response.json({ state: "error", reason });
   }
 
-  // 镜像状态进 DB（失败不影响返回）
+  // 镜像状态进 DB（失败不影响返回）。全部状态都写: ready/gen/error/cancelled。
+  // 之前只写 ready/gen → error/cancelled 被吞, DB 回退里该讲永远显示 "gen"(假进行中)。
   try {
     if (r.state === "ready") {
       const data = { state: "ready", url: r.url, number: r.number, column: r.column, width: r.width, height: r.height };
       await prisma.thumbStatus.upsert({ where: { videoId }, create: { videoId, ...data }, update: data });
-    } else if (r.state === "gen") {
-      await prisma.thumbStatus.upsert({
-        where: { videoId },
-        create: { videoId, state: "gen" },
-        update: { state: "gen" },
-      });
+    } else {
+      // gen/error/cancelled: 写状态本身; 非 ready 清掉旧 sprite 几何, 避免残留误用。
+      const data = { state: r.state, url: null, number: null, column: null, width: null, height: null };
+      await prisma.thumbStatus.upsert({ where: { videoId }, create: { videoId, ...data }, update: data });
     }
   } catch {
     /* mirror best-effort */
