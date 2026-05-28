@@ -81,11 +81,13 @@ function TaskRow({
   // 历史里的 done/cancelled/error 是冻结快照)。
   isHistory?: boolean;
 }) {
-  const k = KIND[task.kind];
+  // 防御性兜底：历史里可能混入不在 TaskState/KIND 枚举内的网关瞬态(如缩略图 gen),
+  // 直接 CHIP[st]/KIND[kind] 取到 undefined 再读 .color 会抛错把整页 unmount(白屏)。
+  const k = KIND[task.kind] ?? { label: task.kind, Icon: DownloadRoundedIcon, color: "primary" as const };
   const st = task.state;
   const working = st === "working";
   const pct = task.cached != null && task.total ? Math.min(100, (task.cached / task.total) * 100) : null;
-  const chip = CHIP[st];
+  const chip = CHIP[st] ?? { label: String(st), color: "default" as ChipColor };
   const chipColor: ChipColor = working ? k.color : chip.color;
   const verbs = onAction && !isHistory ? availableVerbs(task.kind, st) : [];
   const isPrefetch = task.kind === "prefetch";

@@ -108,6 +108,8 @@ export interface BatchBufferVideo {
   cardPackageId: number;
   productId: number;
   src: string;
+  // 直播回放：网关侧拼 Liveid 头取 AES key；点播置 null
+  liveId?: number | null;
 }
 
 // 课程树中带出的归属信息（设置页/命令面板用）

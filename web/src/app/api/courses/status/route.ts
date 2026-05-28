@@ -465,6 +465,9 @@ async function appendTaskHistory(gw: GwStatus) {
   for (const [vid, st] of Object.entries(gw.thumb.states ?? {})) {
     const videoId = Number(vid);
     if (!videoId || !st) continue;
+    // gen 是"生成中"瞬态,不是历史事件:写进历史会冻结一条无意义的"生成中",且 gen 不在
+    // TaskState 枚举内,渲染取色会崩(白屏)。只把终态写入历史(ready→done / error / cancelled)。
+    if (st !== "ready" && st !== "error" && st !== "cancelled") continue;
     rows.push({ kind: "thumb", videoId, state: st === "ready" ? "done" : st });
   }
   // prefetch: gw.live.done = 本会话预缓存满的讲(若网关持久化 pf_done 后跨会话也保留)

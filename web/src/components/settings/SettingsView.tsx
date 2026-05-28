@@ -41,6 +41,7 @@ const MK_THUMB = (v: Video) => ({
 const MK_BUF = (v: Video) => ({
   videoId: v.videoId, contentId: v.contentId, cardPackageId: v.cardPackageId,
   productId: v.productId, src: pickM3u8(v) ?? "",
+  liveId: v.liveId ?? null,
 });
 
 export default function SettingsView() {
