@@ -18,6 +18,7 @@ buf_state/buf_jobs(buf_lock)、pf_threads/pf_done(pf_lock)、seg_cache(自带锁
 import concurrent.futures
 import json
 import logging
+import math
 import os
 import queue
 import re
@@ -400,21 +401,23 @@ class Gateway:
         return self.gate.fetch(t, hdrs, url, range_header)
 
     def _atomic_write_json(self, path, data):
-        """tmp + os.replace 原子落盘 JSON。失败只 warn,不抛。
+        """tmp + os.replace 原子落盘 JSON。返回是否真的写成功(掉盘/跳过/异常都 False)。
         掉盘时 self.seg_cache.ok=False, 跳过避免无限错误日志风暴。"""
         if not path:
-            return
+            return False
         if not self.seg_cache.ok:
-            return  # 掉盘后不再尝试写盘(避免 OSError 刷屏 + 防止用空快照覆盖有效数据)
+            return False  # 掉盘后不再尝试写盘(避免 OSError 刷屏 + 防止用空快照覆盖有效数据)
         try:
             tmp = path + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False)
             os.replace(tmp, path)
+            return True
         except Exception as e:  # noqa: BLE001
             _log.warning("索引落盘失败:%s", path, exc_info=True)
             if isinstance(e, OSError):
                 self.seg_cache.ok = False  # 掉盘连锁标记
+            return False
 
     def _save_buf_state(self):
         """落盘 buf_state. 调用方必须已经持有 buf_lock(或本就在锁外的 init 阶段)。"""
@@ -466,8 +469,10 @@ class Gateway:
             "protect_vid": self.seg_cache.protect_vid,
             "extra_protect": self.seg_cache.extra_protect_vids(),
         }
-        self._atomic_write_json(self.playhead_path, data)
-        self._playhead_dirty = False
+        # 只有真写成功才清 dirty: _atomic_write_json 掉盘时静默跳过(返回 False),
+        # 此时若清了 dirty, 失败的 flush 不会重试, 位置/保护集可能再也补不上。
+        if self._atomic_write_json(self.playhead_path, data):
+            self._playhead_dirty = False
 
     def _playhead_flush_loop(self):
         """每 5s 检查 playhead/protect_vid 是否 dirty, 是就落盘。
@@ -780,8 +785,10 @@ class Gateway:
             return "error"
         if seg_failed:
             # 分片有失败但 key OK: 算"部分完成"(用户能播但可能跳片)
-            # 实际架构没有 "partial" 终态, 折中: 失败超 5% 算 error, 否则 done(降级允许)
-            if len(seg_failed) > max(1, len(segs) * 0.05):
+            # 实际架构没有 "partial" 终态, 折中: 失败 >5% 算 error, 否则 done(降级允许)。
+            # 用整数阈值避免 int/float 混比: ceil(5%) 至少 1。19 片时阈值=1, 失败 1 即 error。
+            threshold = max(1, math.ceil(len(segs) * 0.05))
+            if len(seg_failed) >= threshold:
                 return "error"
         return "done"
 
