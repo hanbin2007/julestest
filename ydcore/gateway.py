@@ -999,6 +999,12 @@ class Gateway:
     def start_prefetch(self, vid, m3u8):
         with self.pf_lock:
             self.pf_active["vid"] = vid
+            # 清掉已死线程(老 vid 的 worker 跑完早退): 否则 pf_threads 随会话无限膨胀。
+            # 只删非当前 vid 且线程已不 alive 的; 当前 vid 下面单独判活/复用。
+            dead = [ov for ov, (t, _ev) in self.pf_threads.items()
+                    if ov != vid and not t.is_alive()]
+            for ov in dead:
+                self.pf_threads.pop(ov, None)
             for ovid, (_, ev) in self.pf_threads.items():
                 if ovid != vid:
                     ev.set()  # 暂停其它正在下的
