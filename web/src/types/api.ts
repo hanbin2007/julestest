@@ -61,6 +61,7 @@ export interface GwStatus {
     queued: number;
     errors: number;
     session?: string[];
+    bytes?: number;
   };
   buffer: {
     perVid: Record<

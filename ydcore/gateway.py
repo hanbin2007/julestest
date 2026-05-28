@@ -1130,8 +1130,6 @@ def make_handler(gateway):
                 self._api_play(qs)
             elif path == "/api/thumb":
                 self._api_thumb(qs)
-            elif path == "/api/thumbs/status":
-                self._api_thumbs_status()
             elif path == "/api/status":
                 self._api_status(qs)
             elif path == "/api/buffer/segments":
@@ -1451,7 +1449,9 @@ def make_handler(gateway):
                           "queued_vids": tqueued,
                           # 由 queued_vids 推数：thumb_q.qsize() 会把已取消/在途的也算进去而高报。
                           "queued": len(tqueued), "errors": terr,
-                          "session": tsession},
+                          "session": tsession,
+                          # 缩略图源段在磁盘的总字节(thumb 桶汇总): 取代已删的 /api/thumbs/status。
+                          "bytes": sum((d.get("bytes", 0) for d in thumbb.values()), 0)},
                 "buffer": {"perVid": buffer, "bytes": gw.seg_cache.size, "limit": gw.seg_cache.max,
                            "queued": gw.buf_q.qsize(),
                            "working": [k for k, s in bstates.items() if s == "working"],
@@ -1551,26 +1551,6 @@ def make_handler(gateway):
                 else:
                     skipped += 1
             self._send_json({"queued": queued, "skipped": skipped})
-
-        def _api_thumbs_status(self):
-            with self.gw.thumb_lock:
-                states = {k: v.get("state") for k, v in self.gw.thumb_meta.items()}
-            ready = [k for k, s in states.items() if s == "ready"]
-            generating = [k for k, s in states.items() if s == "gen"]
-            errored = [k for k, s in states.items() if s == "error"]
-            nbytes = 0
-            try:
-                for n in os.listdir(self.gw.thumb_dir):
-                    if n.endswith(".jpg"):
-                        nbytes += os.path.getsize(os.path.join(self.gw.thumb_dir, n))
-            except OSError:
-                pass
-            self._send_json({
-                "states": states, "readyCount": len(ready),
-                "generating": generating, "queued": self.gw.thumb_q.qsize(),
-                "errorCount": len(errored), "ffmpeg": self.gw.have_ffmpeg,
-                "dir": self.gw.thumb_dir, "bytes": nbytes,
-            })
 
         def _serve_thumb(self, path):
             name = os.path.basename(path)

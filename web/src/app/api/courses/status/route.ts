@@ -7,9 +7,6 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 // GwStatus（网关 /api/status 的规范形状）现集中定义在 @/types/api，此处仅 import。
-interface GwThumbsStatus {
-  bytes: number;
-}
 
 type RollupCourses = Awaited<ReturnType<typeof getCatalogRollup>>["courses"];
 // 单讲的归一化缓存视图：网关实时态与 DB 回退态收敛到同一形状，喂给 buildCourseStatus。
@@ -185,17 +182,14 @@ async function build(): Promise<CoursesStatus> {
   const watched = new Set(progress.filter((p) => p.d > 0 && p.t / p.d >= 0.9).map((p) => `${p.productId}:${p.videoId}`));
 
   let gw: GwStatus | null = null;
-  let thumbBytes = 0;
   try {
-    [gw, thumbBytes] = await Promise.all([
-      gatewayGet<GwStatus>("/api/status"),
-      gatewayGet<GwThumbsStatus>("/api/thumbs/status").then((t) => t.bytes).catch(() => 0),
-    ]);
+    gw = await gatewayGet<GwStatus>("/api/status");
   } catch {
     gw = null;
   }
 
   if (!gw) return fallback(courses, byVid, watched);
+  const thumbBytes = gw.thumb.bytes ?? 0;
 
   // 镜像进 DB(含 bytes,供网关挂掉时回退) + 同步等任务历史落库:
   // 必须 await,否则 fire-and-forget 下面 findMany allTasks 读不到刚 append 的行,
