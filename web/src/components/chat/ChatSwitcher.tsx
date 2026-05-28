@@ -4,13 +4,9 @@ import { useRouter } from "next/navigation";
 import {
   Box,
   Button,
-  Chip,
   Divider,
   IconButton,
   LinearProgress,
-  ListItemText,
-  Menu,
-  MenuItem,
   Popover,
   Stack,
   TextField,
@@ -21,7 +17,6 @@ import KeyboardArrowDownRoundedIcon from "@mui/icons-material/KeyboardArrowDownR
 import AddRoundedIcon from "@mui/icons-material/AddRounded";
 import StopRoundedIcon from "@mui/icons-material/StopRounded";
 import CheckRoundedIcon from "@mui/icons-material/CheckRounded";
-import MoreVertRoundedIcon from "@mui/icons-material/MoreVertRounded";
 import OpenInNewRoundedIcon from "@mui/icons-material/OpenInNewRounded";
 import EditRoundedIcon from "@mui/icons-material/EditRounded";
 import DeleteOutlineRoundedIcon from "@mui/icons-material/DeleteOutlineRounded";
@@ -30,7 +25,7 @@ import { useLessonChats } from "@/hooks/useLessonChats";
 import { useChatStream } from "@/hooks/useChatStream";
 import * as chatStreams from "@/lib/chatStreams";
 import * as api from "@/lib/api";
-import type { ChatMeta, EnrichedChat } from "@/lib/store";
+import type { EnrichedChat } from "@/lib/store";
 
 // 「已 12s · 142 字」label。秒数靠 useNow tick;字数靠 useChatStream 订阅。
 function useNowTick(active: boolean): number {
@@ -59,7 +54,6 @@ function ChatRow({
 }) {
   const stream = useChatStream(chat.id);
   const now = useNowTick(stream.phase === "streaming");
-  const [menuAnchor, setMenuAnchor] = React.useState<null | HTMLElement>(null);
   const [editing, setEditing] = React.useState(false);
   const [draft, setDraft] = React.useState(chat.title ?? "");
   const streaming = stream.phase === "streaming";
@@ -154,6 +148,8 @@ function ChatRow({
             </Typography>
           </Box>
         )}
+        {/* 行内动作:不用嵌套 Menu(MUI 嵌套 Popover→Menu 关闭时会把焦点抢回锚点,
+            导致刚弹出的重命名输入框立刻 blur→commit→关掉,看起来「打不开」)。直接行内按钮最稳。 */}
         {streaming && !editing && (
           <Tooltip title="停止">
             <IconButton
@@ -168,45 +164,38 @@ function ChatRow({
           </Tooltip>
         )}
         {!editing && (
-          <IconButton
-            size="small"
-            onClick={(e) => {
-              e.stopPropagation();
-              setMenuAnchor(e.currentTarget);
-            }}
-            aria-label="chat actions"
-          >
-            <MoreVertRoundedIcon fontSize="small" />
-          </IconButton>
+          <>
+            <Tooltip title="重命名">
+              <IconButton
+                size="small"
+                aria-label="rename chat"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setDraft(chat.title ?? "");
+                  setEditing(true);
+                }}
+              >
+                <EditRoundedIcon fontSize="small" />
+              </IconButton>
+            </Tooltip>
+            <Tooltip title="删除">
+              <IconButton
+                size="small"
+                aria-label="delete chat"
+                sx={{ color: "text.disabled", "&:hover": { color: "error.main" } }}
+                onClick={async (e) => {
+                  e.stopPropagation();
+                  await api.deleteChat(chat.id);
+                  chatStreams.forget(chat.id);
+                  onRemoved();
+                }}
+              >
+                <DeleteOutlineRoundedIcon fontSize="small" />
+              </IconButton>
+            </Tooltip>
+          </>
         )}
       </Stack>
-      <Menu
-        anchorEl={menuAnchor}
-        open={!!menuAnchor}
-        onClose={() => setMenuAnchor(null)}
-        onClick={(e) => e.stopPropagation()}
-      >
-        <MenuItem
-          onClick={() => {
-            setMenuAnchor(null);
-            setEditing(true);
-            setDraft(chat.title ?? "");
-          }}
-        >
-          <EditRoundedIcon fontSize="small" sx={{ mr: 1 }} /> 重命名
-        </MenuItem>
-        <MenuItem
-          onClick={async () => {
-            setMenuAnchor(null);
-            await api.deleteChat(chat.id);
-            chatStreams.forget(chat.id);
-            onRemoved();
-          }}
-          sx={{ color: "error.main" }}
-        >
-          <DeleteOutlineRoundedIcon fontSize="small" sx={{ mr: 1 }} /> 删除
-        </MenuItem>
-      </Menu>
     </Box>
   );
 }
@@ -270,6 +259,7 @@ export default function ChatSwitcher({
     <>
       <Button
         size="small"
+        aria-label="切换对话"
         endIcon={<KeyboardArrowDownRoundedIcon />}
         onClick={(e) => setAnchor(e.currentTarget)}
         sx={{
