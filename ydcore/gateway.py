@@ -1164,7 +1164,9 @@ def make_handler(gateway):
         def _api_buffer_segments(self, qs):
             """逐片缓存 bitmap（"已缓存的地方"）。可传多个 vid；用 buckets 把分片压成
             定长格子(每格=该区间已缓存占比 0..1)，无论分片多少都给定长、可上色的一条。
-            没有有序分片列表(如重启后只看过一次还没复看)时 buckets=null，前端回退到比例条。"""
+            cached/total 由 _vid_counts 统一计算 (与 /api/status 同源, 结构上不可能分歧)。
+            没有有序分片列表时 buckets=null，前端回退到比例条；clarity 漂移时 buckets 给
+            整条 disk/total 比例填(flat)，避免按 URL 匹配算出 0 而误显示"未缓存"。"""
             vids = qs.get("vid") or qs.get("videoId") or []
             try:
                 nb = int((qs.get("buckets") or ["60"])[0])
@@ -1172,14 +1174,25 @@ def make_handler(gateway):
                 nb = 60
             nb = max(1, min(nb, 400))
             snap = self.gw.seg_cache.cached_segs_by_vid()  # 一次持锁快照，避免逐 url 加锁
-            stats = self.gw.seg_cache.vid_stats()["real"]
+            disk_real = self.gw.seg_cache.vid_stats()["real"]
             out = {}
             for vid in vids:
                 vid = str(vid)
+                cached, total, basis = self.gw._vid_counts(vid, disk_real, snap)
                 urls = self.gw.seg_urls.get(vid)
-                disk = (stats.get(vid) or {}).get("segments", 0)
-                if urls:
-                    n = len(urls)
+                ph = self.gw.playhead.get(vid)
+                pos = (ph / total) if (ph is not None and total) else None
+                if basis == "none" or not urls:
+                    out[vid] = {"total": total, "cached": cached,
+                                "buckets": None, "playhead": None}
+                    continue
+                n = len(urls)
+                if basis == "flat":
+                    # clarity 漂移: 不能按 URL 上色, 整条按已缓存比例平铺。
+                    frac = round(cached / n, 3) if n else 0
+                    b = min(nb, n)
+                    cells = [frac for _ in range(b)]
+                else:  # "urls": 正常逐片上色
                     cset = snap.get(vid) or set()
                     flags = [1 if u in cset else 0 for u in urls]
                     b = min(nb, n)
@@ -1188,19 +1201,7 @@ def make_handler(gateway):
                         lo, hi = i * n // b, (i + 1) * n // b
                         seg = flags[lo:hi]
                         cells.append(round(sum(seg) / len(seg), 3) if seg else 0)
-                    ph = self.gw.playhead.get(vid)
-                    pos = (ph / n) if (ph is not None and n) else None
-                    # cached 用磁盘真相(disk count), 不用 sum(flags)：当 seg_urls 是某清晰度的
-                    # URL 但磁盘上是另一清晰度时(用户看时存的高清 vs warm 拉的低清),
-                    # sum(flags) 算出来是 0,但实际"这集"在盘上有 N 片。buckets 仍走 URL 匹配
-                    # (可视化"哪一段"被缓存),数字算磁盘真相。disk ≥ sum(flags) 时取 disk,
-                    # 反之取 sum(flags)(异常情况兜底)。
-                    cached = max(sum(flags), disk)
-                    out[vid] = {"total": n, "cached": cached, "buckets": cells, "playhead": pos}
-                else:
-                    # 无有序列表：只能给磁盘计数与已知总数，buckets=null
-                    out[vid] = {"total": self.gw.seg_total.get(vid), "cached": disk,
-                                "buckets": None, "playhead": None}
+                out[vid] = {"total": total, "cached": cached, "buckets": cells, "playhead": pos}
             self._send_json({"segments": out})
 
         def _api_set_cache_dir(self):
@@ -1255,10 +1256,11 @@ def make_handler(gateway):
                 pf_done = sorted(gw.pf_done)  # 本会话预缓存满的讲（供「已完成」）
             stats = gw.seg_cache.vid_stats()  # 一次遍历拿到磁盘真相
             real, thumbb = stats["real"], stats["thumb"]
+            snap = gw.seg_cache.cached_segs_by_vid()  # _vid_counts 用 (clarity 漂移判定)
             vids = qs.get("videoId") or []  # 可选：只查这些 vid 的缓冲明细
-            # 关键：枚举范围 = 磁盘已缓存 ∪ 本会话已知总数 ∪ 缓冲状态。覆盖"任何来源的缓存"。
+            # 枚举范围 = 磁盘已缓存 ∪ 已学到分片列表(seg_urls) ∪ 缓冲状态。覆盖"任何来源的缓存"。
             target = ([str(v) for v in vids] if vids
-                      else list(set(list(real.keys()) + list(gw.seg_total.keys()) + list(bstates.keys()))))
+                      else list(set(list(real.keys()) + list(gw.seg_urls.keys()) + list(bstates.keys()))))
 
             def _state(vid, cached, total):
                 s = bstates.get(vid)
@@ -1270,14 +1272,13 @@ def make_handler(gateway):
                     return "full"
                 if total:
                     return "partial"
-                return "cached"  # 磁盘有片但总数未知（如重启后/观看顺带缓存）
+                return "cached"  # 磁盘有片但总数未知（如重启后只看过一次还没复看）
 
             buffer = {}
             for vid in target:
                 vid = str(vid)
                 r = real.get(vid) or {}
-                cached = r.get("segments", 0)
-                total = gw.seg_total.get(vid)
+                cached, total, _basis = gw._vid_counts(vid, real, snap)
                 d = {"cached": cached, "total": total,
                      "state": _state(vid, cached, total),
                      "bytes": r.get("bytes", 0),
