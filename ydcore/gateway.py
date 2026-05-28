@@ -1643,8 +1643,11 @@ def make_handler(gateway):
         def _fetch_upstream(self, target, vid, range_header=None):
             with self.gw.vh_lock:
                 hdrs = self.gw.video_headers.get(vid, self.gw.base_headers) if vid else self.gw.base_headers
-            # 观看路径的回源 = 最高档 LIVE(0)：压过一切后台缓存。
-            return self.gw.pri_fetch(0, hdrs, target, range_header)
+            # 观看路径的回源 = 最高档 LIVE(0)：压过一切后台缓存。但缩略图生成时 ffmpeg 会
+            # loopback 到 /p?vid=t_<vid>; 那是后台缩略图, 绝不能抢观看带宽。命中 t_ 前缀 →
+            # 降到 MANUAL(2): 只在观看/自动缓存空闲时用带宽。
+            tier = 2 if (isinstance(vid, str) and vid.startswith("t_")) else 0
+            return self.gw.pri_fetch(tier, hdrs, target, range_header)
 
         def _proxy(self, qs):
             if "u" not in qs:
