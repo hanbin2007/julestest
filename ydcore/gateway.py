@@ -517,8 +517,7 @@ class Gateway:
                         self._save_buf_state()
                         self._save_buf_jobs()
                         self._save_buf_errors()
-                    with self.thumb_lock:
-                        self._save_thumb_jobs()
+                    self._save_thumb_jobs()  # 自持 thumb_lock 快照, 调用方不得持锁
                     self.seg_cache._dirty = True  # 让 cache 的 _flush_loop 也重写 index.json
                 except Exception:  # noqa: BLE001
                     _log.warning("掉盘恢复重刷失败", exc_info=True)
@@ -630,11 +629,13 @@ class Gateway:
         self._atomic_write_json(self.thumb_index_path, snap)
 
     def _save_thumb_jobs(self):
-        """落盘 thumb_jobs (重试上下文). 调用方持有 thumb_lock 或确保不冲突。"""
-        if not hasattr(self, "thumb_jobs_path") or not self.thumb_jobs_path:
+        """落盘 thumb_jobs (重试上下文)。自身在 thumb_lock 下快照, 调用方必须 *不* 持锁。"""
+        if not self.thumb_jobs_path:
             return
+        with self.thumb_lock:
+            items = list(self.thumb_jobs.items())
         out = {}
-        for vid, payload in self.thumb_jobs.items():
+        for vid, payload in items:
             try:
                 v, m, dur, tier = payload
                 if isinstance(v, dict) and isinstance(m, str):
@@ -1486,23 +1487,22 @@ def make_handler(gateway):
             if not vid:
                 self._send_json({"state": "error", "reason": "no videoId"}, 400)
                 return
-            with self.gw.thumb_lock:
-                st = self.gw.thumb_meta.get(vid)
-            # ready/gen 短路;error/cancelled 是终态,应允许重新触发(单 GET 通常是播放器
-            # 自动调用,返回老 error 不会让用户重试。让 ArtPlayer 第二次访问时不要永远
-            # 见 error,而是 fall through 到 start_thumbs 重启)。
-            if st and st.get("state") in ("ready", "gen"):
-                self._send_json(st)
-                return
             parsed = {k: (v[0] if v else None) for k, v in qs.items()}
             tv = self._thumb_video(parsed)
+            # 单把锁内完成"读状态 + 终态 pop"决策, 杜绝读后/pop 前的并发重插被误 pop(TOCTOU)。
+            with self.gw.thumb_lock:
+                st = self.gw.thumb_meta.get(vid)
+                cur = (st or {}).get("state")
+                # ready/gen 短路;error/cancelled 是终态 → pop 让 start_thumbs 不被早 return 挡住。
+                if cur in ("error", "cancelled"):
+                    self.gw.thumb_meta.pop(vid, None)
+                    cur = None
+            if cur in ("ready", "gen"):
+                self._send_json(st)
+                return
             if not tv:
                 self._send_json({"state": "error", "reason": "need ids+src"}, 400)
                 return
-            # error/cancelled 状态需先 pop 让 start_thumbs 不被早 return 挡住
-            if st and st.get("state") in ("error", "cancelled"):
-                with self.gw.thumb_lock:
-                    self.gw.thumb_meta.pop(vid, None)
             self._send_json(self.gw.start_thumbs(*tv, tier=1))  # 播放时自动触发 → AUTO
 
         def _api_thumbs_batch(self):
