@@ -457,6 +457,44 @@ class Gateway:
         self.video_meta[vid] = rec
         self._save_video_meta()
 
+    def _learn_segments(self, vid, segs):
+        """记下该 vid 的有序分片列表 (m3u8 解析出的绝对 URL 序) 并落盘。
+        4 处来源 (整集缓冲/预缓存/warm/观看代理) 统一走这一条路, 避免逻辑漂移。
+        total 真相 = len(seg_urls[vid]); seg_total 旧字典已删, 总数恒由此派生。
+        Plan 2 会在调用方用一把锁包住本方法 (本体只做 set + save, 锁可干净包裹)。
+        返回写入的分片数 (供调用方按需用)。"""
+        vid = str(vid)
+        segs = list(segs or [])
+        if not segs:
+            return 0
+        self.seg_urls[vid] = segs
+        self._save_seg_urls()  # 持久化, 重启后总数/buckets 立刻能复原
+        return len(segs)
+
+    def _vid_counts(self, vid, disk_real, disk_snap):
+        """单一真相源: 返回 (cached, total, buckets_basis)。
+        cached = 磁盘真相 (该 vid 真实在盘的 .ts/.m4s 段数), 永不塌成 0。
+        total  = len(seg_urls[vid]) (m3u8 学到的分片总数), 未知则 None。
+        disk_real = vid_stats()['real'] (一次性快照), disk_snap = cached_segs_by_vid()。
+        /api/status 与 /api/buffer/segments 都调本方法, 二者结构上不可能再分歧。
+        buckets_basis ∈ {'urls','flat','none'}:
+          'urls' = seg_urls 与磁盘有交集, 按 URL 逐片上色 (正常);
+          'flat' = seg_urls 与磁盘 0 交集但磁盘有片 (clarity 漂移) → 整条按 disk/total 比例填;
+          'none' = 没有 seg_urls (重启后只看过一次) → 前端回退比例条。"""
+        vid = str(vid)
+        disk = (disk_real.get(vid) or {}).get("segments", 0)
+        urls = self.seg_urls.get(vid)
+        total = len(urls) if urls else None
+        if not urls:
+            return disk, total, "none"
+        cset = disk_snap.get(vid) or set()
+        hit = sum(1 for u in urls if u in cset)
+        if hit == 0 and disk > 0:
+            # clarity 漂移: seg_urls 是某清晰度的 URL, 盘上是另一清晰度。
+            # 不能按 URL 算 (会得 0), 改为整条按 disk/total 比例填 (flat)。
+            return disk, total, "flat"
+        return disk, total, "urls"
+
     def _save_seg_urls(self):
         """落盘 seg_urls 给重启回载用。set 现场调用，开销很小（每个 vid 一次）。
         seg_urls 按 "单写者-per-key + GIL 原子" 不上锁,这里通过 keys 先快照再逐 key 读取,
