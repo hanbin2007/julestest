@@ -149,15 +149,8 @@ class Gateway:
         # 回载 thumb_index.json: 现在存全部状态(ready/gen/error/cancelled),
         # ready 校验 .jpg 文件存在 + 有效(开头 magic bytes 是 JPEG SOI 0xFFD8 + 非 0 字节),
         # 网关被砍中 ffmpeg 时 .jpg 可能半截,仅 exists 会误认 ready, 前端展示 broken image。
-        def _jpeg_ok(path):
-            try:
-                if os.path.getsize(path) < 16:
-                    return False
-                with open(path, "rb") as fh:
-                    head = fh.read(3)
-                return head[:2] == b"\xff\xd8"  # SOI marker
-            except OSError:
-                return False
+        # 启动回载用同一个 SOI 校验(已提为实例方法 _jpeg_ok)。
+        _jpeg_ok = self._jpeg_ok
         # 启动时若是 gen 状态(网关被砍时正在生成的) → 回退成 error,等用户手动重试。
         try:
             with open(self.thumb_index_path, "r", encoding="utf-8") as f:
@@ -618,6 +611,19 @@ class Gateway:
         self._atomic_write_json(self.seg_urls_path, snap)
 
     # ---- 缩略图 ----------------------------------------------------------
+    @staticmethod
+    def _jpeg_ok(path):
+        """JPEG 文件存在且头是 SOI(0xFFD8): 网关被砍中 ffmpeg 时 .jpg 可能半截,
+        仅 exists 会误认 ready 让前端展示 broken image。生成时与启动回载共用此校验。"""
+        try:
+            if os.path.getsize(path) < 16:
+                return False
+            with open(path, "rb") as fh:
+                head = fh.read(3)
+            return head[:2] == b"\xff\xd8"  # SOI marker
+        except OSError:
+            return False
+
     def _save_thumb_index(self):
         # 落盘全部状态(ready/gen/error/cancelled),不再只存 ready。回载时 gen 会被
         # 当成 error("interrupted"),让用户看到"上次跑到一半,可点重试"。
@@ -739,13 +745,15 @@ class Gateway:
             # 生成途中被取消（terminate）：保持 cancelled 终态，别落成 ready/error
             if (self.thumb_meta.get(vid) or {}).get("state") == "cancelled":
                 save_idx = True  # cancelled 也要落盘(全态持久化)
-            elif rc == 0 and os.path.exists(out):
+            elif rc == 0 and self._jpeg_ok(out):
                 self.thumb_meta[vid] = {"state": "ready", "url": "/thumbs/%s.jpg" % vid,
                                         "number": number, "column": THUMB_COLS,
                                         "width": THUMB_W, "height": THUMB_H}
                 save_idx = True
             else:
-                self.thumb_meta[vid] = {"state": "error", "reason": "ffmpeg rc=%d" % rc}
+                # rc==0 但文件损坏(半截/非 JPEG) 也算 error: 与启动校验同口径。
+                reason = "ffmpeg rc=%d" % rc if rc != 0 else "bad jpeg"
+                self.thumb_meta[vid] = {"state": "error", "reason": reason}
                 save_idx = True  # error 也落盘,重启后用户看到可重试
         if save_idx:
             self._save_thumb_index()
