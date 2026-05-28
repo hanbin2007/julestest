@@ -48,39 +48,42 @@ export interface ThumbReady {
 }
 export type ThumbResponse = ThumbReady | { state: "gen" | "error"; reason?: string };
 
-export type ThumbState = "gen" | "ready" | "error";
-
-export interface BufferInfo {
-  cached: number;
-  total: number | null;
-  state: "queued" | "working" | "done" | "error" | null;
-}
-
-export interface StatusResponse {
+// 网关 /api/status 的（增强后）形状。仅服务端 /api/courses/status 消费，浏览器不读。
+// 单一规范定义：以前 /api/status 与 /api/courses/status 各有一份且已漂移，现收口于此。
+// cached = 磁盘真相，total = len(seg_urls)（网关 _vid_counts 单一真相源算出，二字段不会分歧）。
+export interface GwStatus {
   thumb: {
-    states: Record<string, ThumbState>;
+    states: Record<string, string>;
     ready: number;
     generating: string[];
+    working: string[];
+    queued_vids: string[];
     queued: number;
     errors: number;
+    session?: string[];
   };
   buffer: {
-    perVid: Record<string, BufferInfo>;
+    perVid: Record<
+      string,
+      { cached: number; total: number | null; state: string | null; bytes: number; thumbBytes: number }
+    >;
     bytes: number;
     limit: number;
     queued: number;
     working: string[];
+    queued_vids: string[];
+    states?: Record<string, string>;
+  };
+  live?: {
+    active: string | null;
+    playhead: Record<string, number | null>;
+    done?: string[];
+    inFlight: { live: number; auto: number; manual: number };
   };
   ffmpeg: boolean;
   thumbDir: string;
-}
-
-export interface ThumbsStatus {
-  bytes: number;
-  dir: string;
-  ffmpeg: boolean;
-  readyCount: number;
-  queued: number;
+  cacheDir?: string;
+  cacheDirOk?: boolean;
 }
 
 export interface BatchResult {

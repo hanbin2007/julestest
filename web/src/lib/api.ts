@@ -8,11 +8,9 @@ import type {
   CoursesStatus,
   PlayResponse,
   SegmentsResponse,
-  StatusResponse,
   TaskActionResult,
   TaskVerb,
   ThumbResponse,
-  ThumbsStatus,
   Video,
 } from "@/types/api";
 import type {
@@ -57,8 +55,6 @@ export function getThumb(v: Video, src: string): Promise<ThumbResponse> {
   return fetcher<ThumbResponse>(`/api/thumb?${q}`);
 }
 
-export const getStatus = () => fetcher<StatusResponse>("/api/status");
-export const getThumbsStatus = () => fetcher<ThumbsStatus>("/api/thumbs/status");
 // 设置页：每门课实时状态汇总（网关 per-vid + 目录 + 进度 的服务端聚合）
 export const getCoursesStatus = () => fetcher<CoursesStatus>("/api/courses/status");
 // 单讲逐片缓存 bitmap（可批量）：缓存条用。经兜底代理透传给网关 /api/buffer/segments。

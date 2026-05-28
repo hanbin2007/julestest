@@ -9,7 +9,15 @@ export const dynamic = "force-dynamic";
 
 const GATEWAY = process.env.GATEWAY_ORIGIN ?? "http://127.0.0.1:8808";
 
+// 已下线的网关镜像路由：曾由 web 单独 route 处理(/api/status 旧版会做第二份不完整 DB 镜像)。
+// 现已删除 + 状态镜像唯一收口于 /api/courses/status。这里显式 404，防止落到兜底代理后
+// 又被透传到网关 /api/status（网关该端点仍存在，供 /api/courses/status 服务端调用）。
+const BLOCKED = new Set(["status"]);
+
 async function proxy(req: NextRequest, path: string[]) {
+  if (path.length === 1 && BLOCKED.has(path[0])) {
+    return Response.json({ error: "not found" }, { status: 404 });
+  }
   const search = new URL(req.url).search;
   const target = `${GATEWAY}/api/${path.join("/")}${search}`;
   const init: RequestInit = {

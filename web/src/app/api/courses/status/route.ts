@@ -1,29 +1,12 @@
 import { prisma } from "@/lib/db";
 import { gatewayGet, gatewayPost } from "@/lib/gateway";
 import { getCatalogRollup, type VidMeta } from "@/lib/catalogRollup";
-import type { CoursesStatus, CourseStatus, TaskItem, VidStatusDetail } from "@/types/api";
+import type { CoursesStatus, CourseStatus, GwStatus, TaskItem, VidStatusDetail } from "@/types/api";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-// 网关 /api/status 的(增强后)形状
-interface GwStatus {
-  thumb: { states: Record<string, string>; ready: number; generating: string[]; working: string[]; queued_vids: string[]; queued: number; errors: number; session?: string[] };
-  buffer: {
-    perVid: Record<string, { cached: number; total: number | null; state: string | null; bytes: number; thumbBytes: number }>;
-    bytes: number;
-    limit: number;
-    queued: number;
-    working: string[];
-    queued_vids: string[];
-    states?: Record<string, string>;
-  };
-  live?: { active: string | null; playhead: Record<string, number | null>; done?: string[]; inFlight: { live: number; auto: number; manual: number } };
-  ffmpeg: boolean;
-  thumbDir: string;
-  cacheDir?: string;
-  cacheDirOk?: boolean;
-}
+// GwStatus（网关 /api/status 的规范形状）现集中定义在 @/types/api，此处仅 import。
 interface GwThumbsStatus {
   bytes: number;
 }
