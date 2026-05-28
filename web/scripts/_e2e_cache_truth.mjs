@@ -106,12 +106,16 @@ async function t5_seg_urls_json_present() {
   return { ok, path: `${CACHE_DIR}/seg_urls.json` };
 }
 
+// T3 (kill -9 网关) 会让 run.sh 的 while 循环退出 → EXIT trap 连带杀掉 next(web :3000)，
+// 之后 T3 只重新拉起独立网关、web 仍是下线状态。所以把非破坏性的 web/磁盘断言 (T1/T2/T4/T5)
+// 全部排在 T3 之前跑 (此时 web 还活着，T4 才能拿到真正的 404)，破坏性的 T3 放最后。
+// 这只是执行顺序调整，五条断言原文不变、强度不减，且让本脚本可重复跑到全绿。
 const tests = [
   ["T1 三端计数一致 (status/segments/disk) + total 非空", t1_three_numbers_agree],
   ["T2 clarity 漂移 cached 不塌 0 / total 不为 null", t2_clarity_drift_no_collapse],
-  ["T3 跨 kill -9 重启计数保留", t3_survives_restart],
   ["T4 web /api/status 死路由 404", t4_dead_status_route_404],
   ["T5 seg_urls.json 持久化存在", t5_seg_urls_json_present],
+  ["T3 跨 kill -9 重启计数保留 (破坏性, 放最后)", t3_survives_restart],
 ];
 const results = [];
 for (const [name, fn] of tests) {
