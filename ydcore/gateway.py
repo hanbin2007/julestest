@@ -1186,14 +1186,16 @@ def make_handler(gateway):
                 return None
             return json.loads(self.rfile.read(length).decode("utf-8"))
 
-        def _buffer_video(self, d):
-            """缓冲用：高清地址 src。返回 (video, m3u8) 或 None。"""
+        def _parse_video(self, d):
+            """从请求 dict 解析缩略图/缓冲共用的视频参数，返回 (video, src, duration) 或 None。
+            video: {videoId,contentId,cardPackageId,productId,[liveId]}; src 经 _ALLOWED_HOSTS 白名单校验。
+            缓冲方忽略 duration; 缩略图方需要它算帧数。"""
             try:
                 video = {"videoId": int(d["videoId"]), "contentId": int(d["contentId"]),
                          "cardPackageId": int(d["cardPackageId"]), "productId": int(d["productId"])}
             except (KeyError, ValueError, TypeError):
                 return None
-            # 直播回放：play_headers 据此挂 Liveid 头去取 AES key
+            # 直播回放：play_headers 据此挂 Liveid 头去取 AES key；点播缺省即可。
             live_id = d.get("liveId")
             if live_id:
                 video["liveId"] = str(live_id)
@@ -1203,7 +1205,16 @@ def make_handler(gateway):
             p = urllib.parse.urlparse(src)
             if p.scheme not in ("http", "https") or (p.hostname or "").lower() not in _ALLOWED_HOSTS:
                 return None
-            return video, src
+            try:
+                duration = int(float(d.get("duration") or 0))
+            except (ValueError, TypeError):
+                duration = 0
+            return video, src, duration
+
+        def _buffer_video(self, d):
+            """缓冲用：高清地址 src。返回 (video, m3u8) 或 None（丢弃 duration）。"""
+            tv = self._parse_video(d)
+            return (tv[0], tv[1]) if tv else None
 
         def _api_warm(self):
             """轻量回填:给一批 (vid, src, ids, liveId?), 只取 m3u8 学到分片顺序+总数,
@@ -1469,26 +1480,7 @@ def make_handler(gateway):
 
         def _thumb_video(self, d):
             """从 dict 取出生成缩略图需要的字段，返回 (video, m3u8_low, duration) 或 None。"""
-            try:
-                video = {"videoId": int(d["videoId"]), "contentId": int(d["contentId"]),
-                         "cardPackageId": int(d["cardPackageId"]), "productId": int(d["productId"])}
-            except (KeyError, ValueError, TypeError):
-                return None
-            # 直播回放：play_headers 据此挂 Liveid 头去取 AES key；点播缺省即可。
-            live_id = d.get("liveId")
-            if live_id:
-                video["liveId"] = str(live_id)
-            src = d.get("src") or ""
-            if not isinstance(src, str):
-                return None
-            p = urllib.parse.urlparse(src)
-            if p.scheme not in ("http", "https") or (p.hostname or "").lower() not in _ALLOWED_HOSTS:
-                return None
-            try:
-                duration = int(float(d.get("duration") or 0))
-            except (ValueError, TypeError):
-                duration = 0
-            return video, src, duration
+            return self._parse_video(d)
 
         def _api_thumb(self, qs):
             vid = (qs.get("videoId") or [None])[0]
