@@ -15,7 +15,6 @@ Gateway 持有一台网关实例的全部可变状态（原先散在 make_handle
 thumb_meta/thumb_active/thumb_jobs/thumb_procs/thumb_session(thumb_lock)、
 buf_state/buf_jobs(buf_lock)、pf_threads/pf_done(pf_lock)、seg_cache(自带锁)。
 """
-import concurrent.futures
 import json
 import logging
 import math
@@ -703,17 +702,14 @@ class Gateway:
                     if _km:
                         urls.insert(0, urllib.parse.urljoin(m3u8, _km.group(1)))
 
-            def _grab(u):
+            for u in urls:
                 if self.seg_cache.has((u, tvid)):
-                    return
+                    continue
                 try:
                     d, c, _ = self.pri_fetch(tier, th, u)
                     self.seg_cache.put((u, tvid), (c or "video/mp2t", d))
                 except Exception:  # noqa: BLE001
                     _log.debug("缩略图源分片预取失败：%s", u, exc_info=True)
-            # 并发收紧到 1：受限下行下，高档抢占时不可取消的在途下载越少越好。
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-                list(ex.map(_grab, urls))
         except Exception:  # noqa: BLE001
             _log.debug("缩略图源 m3u8 预取失败 vid=%s（仍尝试 ffmpeg 直读）", vid, exc_info=True)
         proxied = "http://127.0.0.1:%d/p?u=%s&vid=%s" % (
