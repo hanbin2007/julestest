@@ -156,6 +156,17 @@ class DiskLRU:
         with self.lock:
             self._extra_protect.discard(vid)
 
+    def extra_protect_vids(self):
+        """当前额外保护集的快照(供 gateway 落盘 playhead.json)。"""
+        with self.lock:
+            return sorted(self._extra_protect)
+
+    def set_extra_protect(self, vids):
+        """启动时从 playhead.json 还原额外保护集。整体替换(不并集),
+        因为这是重启回载、内存里此前为空。"""
+        with self.lock:
+            self._extra_protect = set(str(v) for v in vids if v)
+
     def _pick_victim(self):
         # 持锁调用。meta 头部=最久未用。优先丢最久未用的"非保护集"分片;
         # 没有非保护项时(全是保护集)才丢最旧的保护集分片。key 形如 (url, vid)。

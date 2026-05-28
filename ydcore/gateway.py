@@ -356,6 +356,9 @@ class Gateway:
                 pv = loaded.get("protect_vid")
                 if isinstance(pv, str) and pv:
                     self.seg_cache.set_protect_vid(pv)
+                ep = loaded.get("extra_protect")
+                if isinstance(ep, list):
+                    self.seg_cache.set_extra_protect(ep)
             except Exception:  # noqa: BLE001
                 self._quarantine_corrupt(self.playhead_path, "playhead")
                 self.playhead = {}
@@ -435,6 +438,7 @@ class Gateway:
         data = {
             "playhead": dict(self.playhead),
             "protect_vid": self.seg_cache.protect_vid,
+            "extra_protect": self.seg_cache.extra_protect_vids(),
         }
         self._atomic_write_json(self.playhead_path, data)
         self._playhead_dirty = False
@@ -696,6 +700,7 @@ class Gateway:
         # 缓冲过程加 LRU 保护: 边缓冲边播别集时, 不希望本 vid 早分片被淘汰自身的新分片。
         # 多 vid 同时缓冲也都受保护(set 而非单 vid)。finally 里移除。
         self.seg_cache.add_protect_vid(vid)
+        self._playhead_dirty = True  # 新增保护集, 触发 playhead.json 落盘(<=5s)
         th = play_headers(self.session, video, m3u8)
         with self.vh_lock:
             self.video_headers[vid] = th
@@ -774,6 +779,7 @@ class Gateway:
             finally:
                 # 缓冲终态(任何结局): 摘掉 LRU 保护, 让别的缓冲/淘汰能动这一集的分片
                 self.seg_cache.remove_protect_vid(vid)
+                self._playhead_dirty = True  # 保护集变了, 触发 playhead.json 重刷
             with self.buf_lock:
                 # 仅当仍是 working 才落地结果；执行途中被 action 改成 paused/cancelled 则遵从之。
                 # pop 也必须在该守卫内：否则"刚下完就被暂停"会误删重试上下文，导致继续无门。
