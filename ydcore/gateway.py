@@ -960,15 +960,12 @@ class Gateway:
                 ok = st in ("error", "cancelled") and job is not None
                 if ok:
                     self.thumb_meta[vid] = {"state": "gen"}
+                    self.thumb_session.add(vid)  # 重试也是"本会话任务",否则 UI 会把它从本会话列表丢掉
                     requeue = job
             else:
                 return {"ok": False, "vid": vid, "kind": "thumb", "state": st, "reason": "bad verb"}
             new_state = (self.thumb_meta.get(vid) or {}).get("state")
-            if ok:
-                # 状态变了就落盘 thumb_index(cancelled/gen 都会跨重启可见)
-                save_idx_after = True
-            else:
-                save_idx_after = False
+            save_idx_after = ok  # 状态变了就落盘 thumb_index(cancelled/gen 都会跨重启可见)
         if save_idx_after:
             self._save_thumb_index()
         if proc_to_kill is not None:
@@ -977,7 +974,14 @@ class Gateway:
             except Exception:  # noqa: BLE001
                 _log.debug("终止缩略图 ffmpeg 失败 vid=%s", vid, exc_info=True)
         if requeue is not None:
-            _, m3u8, duration, tier = requeue
+            video, m3u8, duration, tier = requeue
+            # 关键修复: 重试(尤其重启后)必须重建 t_<vid> 头, 否则 _gen_thumbs 拿到空头 → "no headers"。
+            # 启动只重建普通 vid 头(video_meta), 不含缩略图低清流头; 这里从持久化的 job 元组重建。
+            try:
+                with self.vh_lock:
+                    self.video_headers["t_" + vid] = play_headers(self.session, video, m3u8)
+            except Exception:  # noqa: BLE001
+                _log.warning("重试时重建缩略图头失败 vid=%s", vid, exc_info=True)
             self.thumb_q.put((vid, m3u8, duration, tier))
         reason = None if ok else "状态 %s 下不能执行 %s" % (st, verb)
         return {"ok": ok, "vid": vid, "kind": "thumb", "state": new_state, "reason": reason}
