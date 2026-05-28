@@ -221,6 +221,10 @@ class Gateway:
             os.path.join(self.seg_cache.dir, "buf_jobs.json")
             if self.seg_cache.persist else None
         )
+        self.buf_errors_path = (
+            os.path.join(self.seg_cache.dir, "buf_errors.json")
+            if self.seg_cache.persist else None
+        )
         # video_metadata.json：vid → {productId, contentId, cardPackageId, src, liveId, duration}
         # 反向镜像。warm / thumb_batch / buffer_batch / play 任何一处接到完整 video dict 都
         # 落盘一份, 让网关后续即使 web 离线也知道每个 vid 的 src/headers, 启动后能自愈。
@@ -291,6 +295,20 @@ class Gateway:
             except Exception:  # noqa: BLE001
                 self._quarantine_corrupt(self.buf_state_path, "buf_state")
                 self.buf_state = {}
+
+        # buf_errors.json: 失败原因文本跨重启保留。只保留仍处 error 态的 vid 的原因,
+        # 其它(done/cancelled/被 retry 成功的)清掉,避免无限累积旧错误。
+        if self.buf_errors_path and os.path.isfile(self.buf_errors_path):
+            try:
+                with open(self.buf_errors_path, "r", encoding="utf-8") as f:
+                    loaded = json.load(f) or {}
+                for vid, reason in loaded.items():
+                    if (isinstance(reason, str) and reason
+                            and self.buf_state.get(str(vid)) == "error"):
+                        self._last_buf_error[str(vid)] = reason
+            except Exception:  # noqa: BLE001
+                self._quarantine_corrupt(self.buf_errors_path, "buf_errors")
+                self._last_buf_error = {}
 
         # 自动预缓存：以"播放头"为中心向前后双向补未缓存分片。
         self.pf_lock = threading.Lock()
@@ -374,6 +392,13 @@ class Gateway:
         if not self.buf_state_path:
             return
         self._atomic_write_json(self.buf_state_path, dict(self.buf_state))
+
+    def _save_buf_errors(self):
+        """落盘 _last_buf_error (vid -> 失败原因文本)。调用方持有 buf_lock。
+        和 buf_state.json 配套: error 状态跨重启可见,reason 也跟着回来。"""
+        if not self.buf_errors_path:
+            return
+        self._atomic_write_json(self.buf_errors_path, dict(self._last_buf_error))
 
     def _save_buf_jobs(self):
         """落盘 buf_jobs. 同上,调用方持有 buf_lock。
@@ -757,6 +782,10 @@ class Gateway:
                     if result == "done":
                         self.buf_jobs.pop(vid, None)  # 成功完成后释放重试上下文
                         self._save_buf_jobs()
+                    # 终态非 error: 清掉旧失败原因(可能是上一次 retry 前的); error: 落盘原因。
+                    if result != "error":
+                        self._last_buf_error.pop(vid, None)
+                    self._save_buf_errors()
                 self._save_buf_state()
             self.buf_q.task_done()
 
@@ -792,6 +821,7 @@ class Gateway:
                 ok = st == "paused" and job is not None
                 if ok:
                     self.buf_state[vid] = "queued"
+                    self._last_buf_error.pop(vid, None)
                     requeue = job
             elif verb == "cancel":
                 ok = st in ("queued", "working", "paused")
@@ -802,6 +832,7 @@ class Gateway:
                 ok = st == "error" and job is not None
                 if ok:
                     self.buf_state[vid] = "queued"
+                    self._last_buf_error.pop(vid, None)
                     requeue = job
             else:
                 return {"ok": False, "vid": vid, "kind": "buffer", "state": st, "reason": "bad verb"}
@@ -810,6 +841,7 @@ class Gateway:
                 # 任何状态转换后都落盘 state + jobs(cancel 删了 jobs, 其它没动 jobs 也一样落盘)
                 self._save_buf_state()
                 self._save_buf_jobs()
+                self._save_buf_errors()  # retry/resume 清了 reason 也要落盘
         if requeue is not None:
             self.buf_q.put(requeue)  # 队列自带锁，放在 buf_lock 外入队（与 start_buffer 一致）
         reason = None if ok else "状态 %s 下不能执行 %s" % (st, verb)
