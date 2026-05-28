@@ -728,8 +728,10 @@ class Gateway:
                "-skip_frame", "nokey", "-i", proxied,
                "-an", "-vf", vf, "-frames:v", "1", "-q:v", "6", out, "-loglevel", "error"]
         # 用 Popen 而非 call：保留进程句柄，取消任务时可 terminate 掉正在跑的 ffmpeg。
+        # Popen 在锁外 fork/exec：fork 可能有延迟，不该让它阻塞其它 thumb_lock 持有者
+        # (状态读取/取消)。fork 完成后再进锁仅登记句柄。
+        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
         with self.thumb_lock:
-            proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
             self.thumb_procs[vid] = proc
         rc = proc.wait()
         # 取消复查与终态落地必须在同一把锁内：否则二者之间有窗口，刚好取消进来会被 ready/error 覆盖。
