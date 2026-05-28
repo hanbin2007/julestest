@@ -147,7 +147,7 @@ export default function LectureGrid({
     },
     {
       field: "buffer",
-      headerName: "缓冲",
+      headerName: "缓存状态",
       flex: 1,
       // 760px 抽屉内：缓冲列宽不能太大，否则前面列累加后把它推出右边。120 仍足够画 buckets/比例条。
       minWidth: 120,

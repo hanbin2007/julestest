@@ -39,7 +39,7 @@ function StorageStrip({
           rowGap: 0.5,
         }}
       >
-        <Typography variant="subtitle2">存储</Typography>
+        <Typography variant="subtitle2">存储占用</Typography>
         {/* ml: "auto" pushes the detail text right on wide containers;
             flexWrap lets it drop to a new line rather than overflow on narrow ones. */}
         <Typography
@@ -47,12 +47,12 @@ function StorageStrip({
           color="text.secondary"
           sx={{ ml: "auto", fontVariantNumeric: "tabular-nums" }}
         >
-          缓冲 {fmtBytes(bufferBytes)} / {fmtBytes(bufferLimit)}　·　缩略图 {fmtBytes(thumbBytes)}
+          缓存 {fmtBytes(bufferBytes)} / {fmtBytes(bufferLimit)}　·　缩略图 {fmtBytes(thumbBytes)}
         </Typography>
       </Box>
 
       {/* Row 2: progress bar with full tooltip */}
-      <Tooltip title={`缓冲缓存：${fmtBytes(bufferBytes)} / 上限 ${fmtBytes(bufferLimit)}（${usedPct.toFixed(1)}%）`}>
+      <Tooltip title={`缓存占用：${fmtBytes(bufferBytes)} / 上限 ${fmtBytes(bufferLimit)}（${usedPct.toFixed(1)}%）`}>
         <Box
           sx={{
             position: "relative",

@@ -21,6 +21,7 @@ import LectureGrid, { type GridRow } from "./LectureGrid";
 import StorageStrip from "./StorageStrip";
 import TaskQueuePanel from "./TaskQueuePanel";
 import SettingsStatusBar from "./SettingsStatusBar";
+import SectionHeader from "./SectionHeader";
 import CacheDirCard from "./CacheDirCard";
 import AssistantCard from "./AssistantCard";
 import CourseStatusGrid, { type CourseSort } from "./CourseStatusGrid";
@@ -220,6 +221,8 @@ export default function SettingsView() {
         </Typography>
       </Stack>
 
+      <SectionHeader title="系统状态" hint="网关连通性 · 下载速率 · 任务进度" />
+
       {/* 贴顶状态条：被动状态 + 速率 + 任务徽标（完整任务管理在下方区） */}
       <SettingsStatusBar
         health={data?.health}
@@ -228,16 +231,6 @@ export default function SettingsView() {
         working={(data?.tasks ?? []).filter((t) => t.state === "working").length}
         onOpenTasks={() => setTasksFsOpen(true)}
       />
-
-      {/* 缓存目录设置：查看 / 修改持久化目录，目录丢失时报错 */}
-      <CacheDirCard
-        cacheDir={data?.health.cacheDir ?? ""}
-        cacheDirOk={data?.health.cacheDirOk ?? true}
-        onSaved={refresh}
-      />
-
-      {/* AI 助教：系统提示词 + 默认思考等级 */}
-      <AssistantCard />
 
       {/* 工具栏 */}
       <Card sx={{ p: 2, mb: 2 }}>
@@ -314,6 +307,8 @@ export default function SettingsView() {
         </Stack>
       </Card>
 
+      <SectionHeader title="缓存管理" hint="存储占用 · 任务队列 · 逐课缓存状态" />
+
       {/* 缓存管理：存储占用 + 完整任务队列（移出贴顶卡，给主网格让出竖向空间） */}
       <Card sx={{ p: 2, mb: 2 }}>
         <StorageStrip
@@ -366,6 +361,17 @@ export default function SettingsView() {
         onRowBuf={rowBuf}
         onClose={() => setDrawer(null)}
       />
+
+      {/* 缓存目录：查看 / 修改持久化目录（移到缓存网格之后，不打断主扫读） */}
+      <CacheDirCard
+        cacheDir={data?.health.cacheDir ?? ""}
+        cacheDirOk={data?.health.cacheDirOk ?? true}
+        onSaved={refresh}
+      />
+
+      <SectionHeader title="其他设置" hint="与缓存无关的偏好" />
+      {/* AI 助教：系统提示词 + 默认思考等级（与缓存无关，移到最后避免打断缓存扫读） */}
+      <AssistantCard />
     </Box>
   );
 }
