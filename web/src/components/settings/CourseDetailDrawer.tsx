@@ -85,7 +85,10 @@ export default function CourseDetailDrawer({
           </Typography>
           {course && (
             <Typography variant="caption" color="text.secondary">
-              {course.lectures} 讲 · 点播 {course.vod} · 回放 {course.live} · 已缓存 {course.cachedLectures} · 已看 {course.watched}
+              {course.buffering > 0 || course.queued > 0
+                ? `缓冲进行中 ${course.buffering} 讲${course.queued ? ` · 排队 ${course.queued}` : ""} · `
+                : ""}
+              共 {course.lectures} 讲（点播 {course.vod} · 回放 {course.live}）
             </Typography>
           )}
         </Box>

@@ -28,7 +28,7 @@ export interface CacheBarProps {
 // 单讲缓存条："已缓存的地方"用绿色标出。三种保真度：
 //  1) 有 buckets → 逐片分布图（哪些位置缓存了一目了然，非连续也能看出）
 //  2) 无 buckets 但已知总数 → 比例填充条（从左填到 cached/total）
-//  3) 连总数都未知（如重启后只看过一次没复看）→ "N 段（总数未知）" 文字，不画条
+//  3) 范围未知但已缓存 → 静态淡填充 + "已缓存（部分）"；cached===0 → "未缓存"。绝不显示「总数未知」。
 function CacheBar({
   map,
   cached,
@@ -48,44 +48,29 @@ function CacheBar({
   const error = state === "error";
   const pct = eff.total ? Math.round((eff.cached / eff.total) * 100) : 0;
 
-  const label =
-    eff.total != null
-      ? `${eff.cached}/${eff.total} 段`
-      : eff.cached > 0
-        ? `${eff.cached} 段`
-        : "—";
+  // total 现由 Plan 1 收敛为可信值；只有真正没有有序分片列表(buckets 也无)时 total 才会缺失。
+  // 三态：已知总数 → "X/Y 段"；cached>0 但范围未知 → "已缓存（部分）"；cached===0 → "未缓存"。
+  const knownTotal = eff.total != null;
+  const partialUnknown = !knownTotal && eff.cached > 0;
+  const label = knownTotal
+    ? `${eff.cached}/${eff.total} 段`
+    : partialUnknown
+      ? "已缓存（部分）"
+      : "未缓存";
   const tip = error
     ? "缓冲失败"
-    : eff.total != null
+    : knownTotal
       ? `已缓存 ${eff.cached}/${eff.total} 段（${pct}%）${working ? " · 缓冲中" : ""}`
-      : eff.cached > 0
-        ? `已缓存 ${eff.cached} 段（总数未知）`
+      : partialUnknown
+        ? `已缓存 ${eff.cached} 段（范围未知，确切总数待补片时确认）`
         : "尚未缓存";
-
-  // 模式 3：总数未知且无 bitmap —— 不画误导性的条，只给文字。失败时仍画红条以保留信号。
-  const unknownTotal = !eff.buckets && eff.total == null && !error;
 
   const track = (t: import("@mui/material/styles").Theme) =>
     error ? alpha(t.palette.error.main, 0.18) : t.palette.action.hover;
   const fill = (t: import("@mui/material/styles").Theme) =>
     error ? t.palette.error.main : t.palette.success.main;
 
-  const bar = unknownTotal ? (
-    <Typography
-      variant="caption"
-      color="text.secondary"
-      sx={{
-        fontVariantNumeric: "tabular-nums",
-        // 窄容器(课程详情抽屉)里挤不下时截断；完整说明走 Tooltip。
-        display: "block",
-        whiteSpace: "nowrap",
-        overflow: "hidden",
-        textOverflow: "ellipsis",
-      }}
-    >
-      {eff.cached > 0 ? `${eff.cached} 段（总数未知）` : "—"}
-    </Typography>
-  ) : (
+  const bar = (
     <Box
       sx={{
         position: "relative",
@@ -111,13 +96,14 @@ function CacheBar({
           />
         ))
       ) : (
-        // 模式 2：比例填充。
+        // 模式 2：比例填充（已知总数）；范围未知但已缓存 → 静态 30% 淡填充（不误导为「全满」）。
         <Box
           sx={{
             position: "absolute",
             inset: 0,
-            width: `${pct}%`,
+            width: knownTotal ? `${pct}%` : partialUnknown ? "30%" : "0%",
             bgcolor: fill,
+            opacity: knownTotal ? 1 : 0.5,
             borderRadius: height / 2,
             transition: "width .4s ease",
           }}
@@ -155,21 +141,20 @@ function CacheBar({
     </Box>
   );
 
-  const content =
-    showLabel && !unknownTotal ? (
-      <Box sx={{ display: "flex", alignItems: "center", gap: 1, width: "100%" }}>
-        <Box sx={{ flex: 1, minWidth: 0 }}>{bar}</Box>
-        <Typography
-          variant="caption"
-          color="text.secondary"
-          sx={{ flexShrink: 0, fontVariantNumeric: "tabular-nums" }}
-        >
-          {label}
-        </Typography>
-      </Box>
-    ) : (
-      bar
-    );
+  const content = showLabel ? (
+    <Box sx={{ display: "flex", alignItems: "center", gap: 1, width: "100%" }}>
+      <Box sx={{ flex: 1, minWidth: 0 }}>{bar}</Box>
+      <Typography
+        variant="caption"
+        color="text.secondary"
+        sx={{ flexShrink: 0, fontVariantNumeric: "tabular-nums" }}
+      >
+        {label}
+      </Typography>
+    </Box>
+  ) : (
+    bar
+  );
 
   return (
     <Tooltip title={tip} arrow>

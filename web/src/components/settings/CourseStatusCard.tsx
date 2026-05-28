@@ -30,36 +30,54 @@ function CacheDial({ course, color }: { course: CourseStatus; color: string }) {
   // Accessible summary for screen readers
   const ariaLabel = `缓存 ${course.cachedLectures}/${course.lectures} 讲，已看 ${course.watched}，占用 ${fmtBytes(course.cachedBytes)}`;
   return (
-    <Box
-      aria-label={ariaLabel}
-      role="img"
-      sx={{ position: "relative", width: size, height: size, flex: "0 0 auto" }}
+    <Tooltip
+      title={`外环=缓存 ${full}% 整集 / ${partial}% 部分 · 内环(虚线)=已看 ${watch}%`}
+      arrow
     >
-      {ring(100, "action.hover", size, 5)}
-      {ring(partial, `color-mix(in srgb, ${color} 38%, transparent)`, size, 5)}
-      {ring(full, color, size, 5)}
-      {ring(watch, "success.main", size - 16, 4)}
-      <Box sx={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
-        {done ? (
-          <CheckCircleRoundedIcon sx={{ color: "success.main", fontSize: 26 }} />
-        ) : course.allLocked ? (
-          <LockOutlinedIcon sx={{ color: "text.disabled", fontSize: 22 }} />
-        ) : (
-          // Slightly larger than caption to stay legible inside the inner ring clearance (~52px)
-          <Typography
-            component="span"
-            sx={{
-              fontSize: "0.7rem",
-              fontWeight: 800,
-              fontVariantNumeric: "tabular-nums",
-              lineHeight: 1,
-            }}
-          >
-            {course.cachedLectures}/{course.lectures}
-          </Typography>
-        )}
+      <Box
+        aria-label={ariaLabel}
+        role="img"
+        sx={{ position: "relative", width: size, height: size, flex: "0 0 auto" }}
+      >
+        {ring(100, "action.hover", size, 5)}
+        {ring(partial, `color-mix(in srgb, ${color} 38%, transparent)`, size, 5)}
+        {ring(full, color, size, 5)}
+        {/* 内环=已看：虚线描边，与外环缓存环明显区分（不靠数字也能辨认） */}
+        <CircularProgress
+          variant="determinate"
+          value={watch}
+          size={size - 16}
+          thickness={4}
+          sx={{
+            color: "success.main",
+            position: "absolute",
+            inset: 0,
+            m: "auto",
+            "& .MuiCircularProgress-circle": { strokeDasharray: "3 3" },
+          }}
+        />
+        <Box sx={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+          {done ? (
+            <CheckCircleRoundedIcon sx={{ color: "success.main", fontSize: 26 }} />
+          ) : course.allLocked ? (
+            <LockOutlinedIcon sx={{ color: "text.disabled", fontSize: 22 }} />
+          ) : (
+            // Slightly larger than caption to stay legible inside the inner ring clearance (~52px)
+            <Typography
+              component="span"
+              sx={{
+                fontSize: "0.7rem",
+                fontWeight: 800,
+                fontVariantNumeric: "tabular-nums",
+                lineHeight: 1,
+              }}
+            >
+              {course.cachedLectures}/{course.lectures}
+            </Typography>
+          )}
+        </Box>
       </Box>
-    </Box>
+    </Tooltip>
   );
 }
 
