@@ -1080,15 +1080,28 @@ def make_handler(gateway):
             elif path == "/p":
                 self._proxy(qs)
             elif path == "/api/_debug":
-                _real = self.gw.seg_cache.vid_stats()["real"]
-                self._send_json({"active": self.gw.pf_active["vid"],
-                                 "cacheItems": len(self.gw.seg_cache.meta),
-                                 "cacheBytes": self.gw.seg_cache.size,
-                                 # vid -> 磁盘真实分片数 (e2e 断言 cached 三端一致用)
-                                 "vidReal": {v: d.get("segments", 0)
-                                             for v, d in _real.items()},
-                                 # vid -> len(seg_urls) (e2e 断言 total 真相用)
-                                 "vidTotal": {v: len(u) for v, u in self.gw.seg_urls.items()}})
+                gw = self.gw
+                _real = gw.seg_cache.vid_stats()["real"]
+                with gw.pf_lock:
+                    pf_threads = sorted(gw.pf_threads.keys())
+                with gw.buf_lock:
+                    buf_states = dict(gw.buf_state)
+                    buf_errors = dict(gw._last_buf_error)
+                self._send_json({
+                    "active": gw.pf_active["vid"],
+                    "cacheItems": len(gw.seg_cache.meta),
+                    "cacheBytes": gw.seg_cache.size,
+                    # vid -> 磁盘真实分片数 (e2e 断言 cached 三端一致用)
+                    "vidReal": {v: d.get("segments", 0)
+                                for v, d in _real.items()},
+                    # vid -> len(seg_urls) (e2e 断言 total 真相用)
+                    "vidTotal": {v: len(u) for v, u in gw.seg_urls.items()},
+                    "extraProtect": gw.seg_cache.extra_protect_vids(),
+                    "liveVid": gw.seg_cache.protect_vid,
+                    "pfThreads": pf_threads,
+                    "bufStates": buf_states,
+                    "bufErrors": buf_errors,
+                })
             else:
                 self._send_bytes(404, b"not found", "text/plain")
 
