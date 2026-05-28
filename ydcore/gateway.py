@@ -1008,9 +1008,15 @@ def make_handler(gateway):
             elif path == "/p":
                 self._proxy(qs)
             elif path == "/api/_debug":
+                _real = self.gw.seg_cache.vid_stats()["real"]
                 self._send_json({"active": self.gw.pf_active["vid"],
                                  "cacheItems": len(self.gw.seg_cache.meta),
-                                 "cacheBytes": self.gw.seg_cache.size})
+                                 "cacheBytes": self.gw.seg_cache.size,
+                                 # vid -> 磁盘真实分片数 (e2e 断言 cached 三端一致用)
+                                 "vidReal": {v: d.get("segments", 0)
+                                             for v, d in _real.items()},
+                                 # vid -> len(seg_urls) (e2e 断言 total 真相用)
+                                 "vidTotal": {v: len(u) for v, u in self.gw.seg_urls.items()}})
             else:
                 self._send_bytes(404, b"not found", "text/plain")
 
