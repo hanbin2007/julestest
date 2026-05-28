@@ -496,44 +496,36 @@ class Gateway:
     def _save_seg_urls(self):
         """落盘 seg_urls 给重启回载用。set 现场调用，开销很小（每个 vid 一次）。
         seg_urls 按 "单写者-per-key + GIL 原子" 不上锁,这里通过 keys 先快照再逐 key 读取,
-        过程中即便有别的 vid 在写也不会让本次落盘的 dict 视图崩。原子写: tmp + os.replace。"""
-        path = self.seg_urls_path
-        if not path:
+        过程中即便有别的 vid 在写也不会让本次落盘的 dict 视图崩。
+        写盘统一走 _atomic_write_json: tmp + os.replace + seg_cache.ok 掉盘守卫。"""
+        if not self.seg_urls_path:
             return
-        try:
-            # keys 快照可能撞 RuntimeError(dict 改大小);重试几次即可,写事件本身很稀。
-            keys = None
-            for _ in range(5):
-                try:
-                    keys = list(self.seg_urls.keys())
-                    break
-                except RuntimeError:
-                    continue
-            if keys is None:
-                return
-            snap = {}
-            for k in keys:
-                v = self.seg_urls.get(k)
-                if v:
-                    snap[k] = list(v)
-            tmp = path + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(snap, f)
-            os.replace(tmp, path)
-        except Exception:  # noqa: BLE001
-            _log.warning("seg_urls 索引落盘失败：%s", path, exc_info=True)
+        # keys 快照可能撞 RuntimeError(dict 改大小);重试几次即可,写事件本身很稀。
+        keys = None
+        for _ in range(5):
+            try:
+                keys = list(self.seg_urls.keys())
+                break
+            except RuntimeError:
+                continue
+        if keys is None:
+            return
+        snap = {}
+        for k in keys:
+            v = self.seg_urls.get(k)
+            if v:
+                snap[k] = list(v)
+        self._atomic_write_json(self.seg_urls_path, snap)
 
     # ---- 缩略图 ----------------------------------------------------------
     def _save_thumb_index(self):
         # 落盘全部状态(ready/gen/error/cancelled),不再只存 ready。回载时 gen 会被
         # 当成 error("interrupted"),让用户看到"上次跑到一半,可点重试"。
+        # 写盘走 _atomic_write_json(tmp + os.replace + 掉盘守卫): kill -9 中途不再
+        # 留半截/零字节索引,否则会丢全部缩略图状态。Plan 3 依赖此原子性,勿重做。
         with self.thumb_lock:
             snap = {k: dict(v) for k, v in self.thumb_meta.items() if v.get("state")}
-        try:
-            with open(self.thumb_index_path, "w", encoding="utf-8") as f:
-                json.dump(snap, f)
-        except Exception:  # noqa: BLE001
-            _log.warning("缩略图索引落盘失败：%s", self.thumb_index_path, exc_info=True)
+        self._atomic_write_json(self.thumb_index_path, snap)
 
     def _save_thumb_jobs(self):
         """落盘 thumb_jobs (重试上下文). 调用方持有 thumb_lock 或确保不冲突。"""
