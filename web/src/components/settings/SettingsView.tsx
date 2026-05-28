@@ -18,9 +18,9 @@ import { useCourses, useAllCourseVideos, useCoursesStatus } from "@/hooks/data";
 import { usePrefs } from "@/hooks/persist";
 import { useToast } from "@/components/common/Toast";
 import LectureGrid, { type GridRow } from "./LectureGrid";
-import HealthBar from "./HealthBar";
 import StorageStrip from "./StorageStrip";
 import TaskQueuePanel from "./TaskQueuePanel";
+import SettingsStatusBar from "./SettingsStatusBar";
 import CacheDirCard from "./CacheDirCard";
 import AssistantCard from "./AssistantCard";
 import CourseStatusGrid, { type CourseSort } from "./CourseStatusGrid";
@@ -59,6 +59,7 @@ export default function SettingsView() {
   const [selected, setSelected] = React.useState<Set<string>>(new Set());
   const [busyIds, setBusyIds] = React.useState<Set<number>>(new Set());
   const [drawer, setDrawer] = React.useState<CourseStatus | null>(null);
+  const [tasksFsOpen, setTasksFsOpen] = React.useState(false);
 
   const flatActive = tab === 1;
   const { rows: allRows, loaded, total } = useAllCourseVideos(flatActive ? courses : []);
@@ -219,37 +220,14 @@ export default function SettingsView() {
         </Typography>
       </Stack>
 
-      {/* 顶部条：健康 + 存储 + 实时任务队列 */}
-      <Card sx={{ p: 2, mb: 2, position: { md: "sticky" }, top: 8, zIndex: 2 }}>
-        <Stack
-          direction={{ xs: "column", md: "row" }}
-          spacing={2}
-          divider={<Box sx={{ borderLeft: (t) => `1px solid ${t.palette.divider}` }} />}
-        >
-          <Box sx={{ flex: "0 0 auto", minWidth: 180 }}>
-            <HealthBar health={data?.health} />
-          </Box>
-          <Box sx={{ flex: 1, minWidth: 200 }}>
-            <StorageStrip
-              bufferBytes={data?.totals.bufferBytes ?? 0}
-              bufferLimit={data?.totals.bufferLimit ?? 0}
-              thumbBytes={data?.totals.thumbBytes ?? 0}
-            />
-          </Box>
-          <Box sx={{ flex: 1.3, minWidth: 240 }}>
-            <TaskQueuePanel
-              tasks={data?.tasks ?? []}
-              completedTasks={data?.completedTasks ?? []}
-              failedTasks={data?.failedTasks ?? []}
-              allTasks={data?.allTasks ?? []}
-              bps={bps.bps}
-              series={bps.series}
-              queue={data?.activity.queue ?? { thumb: 0, buffer: 0 }}
-              onAction={handleTaskAction}
-            />
-          </Box>
-        </Stack>
-      </Card>
+      {/* 贴顶状态条：被动状态 + 速率 + 任务徽标（完整任务管理在下方区） */}
+      <SettingsStatusBar
+        health={data?.health}
+        bps={bps.bps}
+        series={bps.series}
+        working={(data?.tasks ?? []).filter((t) => t.state === "working").length}
+        onOpenTasks={() => setTasksFsOpen(true)}
+      />
 
       {/* 缓存目录设置：查看 / 修改持久化目录，目录丢失时报错 */}
       <CacheDirCard
@@ -334,6 +312,26 @@ export default function SettingsView() {
               : `${filteredCourses.length} / ${courseStatus.length} 门课`}
           </Typography>
         </Stack>
+      </Card>
+
+      {/* 缓存管理：存储占用 + 完整任务队列（移出贴顶卡，给主网格让出竖向空间） */}
+      <Card sx={{ p: 2, mb: 2 }}>
+        <StorageStrip
+          bufferBytes={data?.totals.bufferBytes ?? 0}
+          bufferLimit={data?.totals.bufferLimit ?? 0}
+          thumbBytes={data?.totals.thumbBytes ?? 0}
+        />
+        <Box sx={{ mt: 2 }}>
+          <TaskQueuePanel
+            tasks={data?.tasks ?? []}
+            failedTasks={data?.failedTasks ?? []}
+            allTasks={data?.allTasks ?? []}
+            queue={data?.activity.queue ?? { thumb: 0, buffer: 0 }}
+            onAction={handleTaskAction}
+            fsOpen={tasksFsOpen}
+            onFsOpenChange={setTasksFsOpen}
+          />
+        </Box>
       </Card>
 
       {tab === 0 ? (

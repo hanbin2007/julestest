@@ -16,13 +16,11 @@ export const KIND = {
   prefetch: { label: "预缓存", Icon: BoltRoundedIcon, color: "info" as const },
 };
 
-// 四个标签的标题与空态文案：面板与全屏弹窗共用，避免两处各写一份。
-// 顺序对应 [tasks, completedTasks, failedTasks, allTasks]。
+// 两个标签：进行中(working/queued/paused) + 历史(DB-backed 全部任务,只读冻结快照)。
+// 失败不再单列标签——改用进行中区上方的内联警示横幅突出。顺序对应 [tasks, allTasks]。
 export const TASK_TABS = [
   { label: "进行中", empty: "暂无进行中的任务" },
-  { label: "已完成", empty: "暂无已完成的任务" },
-  { label: "失败", empty: "暂无失败的任务" },
-  { label: "全部", empty: "暂无任务历史" },
+  { label: "操作历史", empty: "暂无任务历史" },
 ] as const;
 
 // 任务稳定标识：React key 与 busy 集合键统一走它，TaskItem 形状变了只改这一处。

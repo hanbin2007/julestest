@@ -5,12 +5,11 @@ import CloseRoundedIcon from "@mui/icons-material/CloseRounded";
 import type { TaskItem, TaskVerb } from "@/types/api";
 import TaskRow, { TASK_TABS, taskKey } from "./TaskRow";
 
-// 全屏任务视图：面板每标签只显示前 20 条，这里展开同样的四标签但不截断，复用 TaskRow。
+// 全屏任务视图：进行中 / 操作历史(DB-backed,只读) / 失败(可重试)。复用 TaskRow。
 export default function TaskQueueFullscreenDialog({
   open,
   onClose,
   tasks,
-  completedTasks,
   failedTasks,
   allTasks,
   busy,
@@ -19,17 +18,19 @@ export default function TaskQueueFullscreenDialog({
   open: boolean;
   onClose: () => void;
   tasks: TaskItem[];
-  completedTasks: TaskItem[];
   failedTasks: TaskItem[];
-  // "全部"标签:DB-backed 任务历史(最近 500 条),只读。
+  // "操作历史"标签:DB-backed 任务历史(最近 500 条),只读。
   allTasks: TaskItem[];
   busy: Set<string>;
   onAction: (task: TaskItem, verb: TaskVerb) => void;
 }) {
   const [tab, setTab] = React.useState(0);
-  const lists = [tasks, completedTasks, failedTasks, allTasks];
+  // 顺序：进行中 / 操作历史 / 失败。前两个标题取自 TASK_TABS，失败单列以便重试。
+  const lists = [tasks, allTasks, failedTasks];
+  const tabLabels = [TASK_TABS[0].label, TASK_TABS[1].label, "失败"];
+  const tabEmpties = [TASK_TABS[0].empty, TASK_TABS[1].empty, "暂无失败的任务"];
   const current = lists[tab] ?? [];
-  const isHistoryTab = tab === 3;
+  const isHistoryTab = tab === 1;
 
   return (
     <Dialog open={open} onClose={onClose} fullScreen>
@@ -43,8 +44,8 @@ export default function TaskQueueFullscreenDialog({
           </IconButton>
         </Toolbar>
         <Tabs value={tab} onChange={(_e, v) => setTab(v)} sx={{ px: { xs: 1.5, md: 3 } }}>
-          {TASK_TABS.map((t, i) => (
-            <Tab key={t.label} label={`${t.label} ${lists[i].length}`} />
+          {tabLabels.map((label, i) => (
+            <Tab key={label} label={`${label} ${lists[i].length}`} />
           ))}
         </Tabs>
       </AppBar>
@@ -52,7 +53,7 @@ export default function TaskQueueFullscreenDialog({
         {current.length === 0 ? (
           <Box sx={{ py: 8, textAlign: "center" }}>
             <Typography variant="body2" color="text.disabled">
-              {TASK_TABS[tab].empty}
+              {tabEmpties[tab]}
             </Typography>
           </Box>
         ) : (

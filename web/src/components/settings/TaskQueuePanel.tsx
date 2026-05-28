@@ -1,9 +1,6 @@
 "use client";
 import * as React from "react";
-import { Box, Chip, IconButton, Tab, Tabs, Tooltip, Typography } from "@mui/material";
-import { SparkLineChart } from "@mui/x-charts/SparkLineChart";
-import OpenInFullRoundedIcon from "@mui/icons-material/OpenInFullRounded";
-import { fmtBytes } from "@/lib/media";
+import { Alert, Box, Tab, Tabs, Typography } from "@mui/material";
 import type { TaskItem, TaskVerb } from "@/types/api";
 import TaskRow, { TASK_TABS, taskKey } from "./TaskRow";
 import TaskQueueFullscreenDialog from "./TaskQueueFullscreenDialog";
@@ -12,26 +9,24 @@ const PANEL_CAP = 20; // 面板每标签只显示前 20 条，更多走「展开
 
 function TaskQueuePanel({
   tasks,
-  completedTasks,
   failedTasks,
   allTasks,
-  bps,
-  series,
   queue,
   onAction,
+  fsOpen,
+  onFsOpenChange,
 }: {
   tasks: TaskItem[];
-  completedTasks: TaskItem[];
   failedTasks: TaskItem[];
   // DB-backed 全部历史(最近 500 条倒序),网关重启不丢。
   allTasks: TaskItem[];
-  bps: number;
-  series: number[];
   queue: { thumb: number; buffer: number };
   onAction: (task: TaskItem, verb: TaskVerb) => Promise<void>;
+  // 全屏弹窗开关：受控，便于顶部状态条徽标也能打开它。
+  fsOpen: boolean;
+  onFsOpenChange: (open: boolean) => void;
 }) {
   const [tab, setTab] = React.useState(0);
-  const [fsOpen, setFsOpen] = React.useState(false);
   const [busy, setBusy] = React.useState<Set<string>>(new Set());
 
   // 包一层管理 busy（动作在途禁用按钮，避免连点导致重复请求）。
@@ -52,38 +47,41 @@ function TaskQueuePanel({
     [onAction],
   );
 
-  const lists = [tasks, completedTasks, failedTasks, allTasks];
+  const lists = [tasks, allTasks];
   const current = lists[tab] ?? [];
   const shown = current.slice(0, PANEL_CAP);
-  const working = tasks.filter((t) => t.state === "working").length;
-  const isHistoryTab = tab === 3;
+  const isHistoryTab = tab === 1;
 
   return (
-    <Box sx={{ display: "flex", flexDirection: "column", minHeight: 0, height: "100%" }}>
-      {/* 头部：标题 + 计数 + 速率 + 折线 + 展开全屏。flexWrap 让右侧组窄屏时换行。 */}
-      <Box sx={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 1, rowGap: 0.5, mb: 0.5 }}>
-        <Typography variant="subtitle2">任务队列</Typography>
-        <Chip size="small" label={`${working} 进行 · ${tasks.length} 总`} sx={{ height: 22, fontSize: 11 }} />
-        <Box sx={{ ml: "auto", display: "flex", alignItems: "center", gap: 0.5 }}>
-          <Tooltip title="下载速率">
-            <Typography variant="caption" color="text.secondary" sx={{ fontVariantNumeric: "tabular-nums" }}>
-              {fmtBytes(bps)}/s
-            </Typography>
-          </Tooltip>
-          {series.length > 1 && (
-            <Box sx={{ width: 72, height: 22 }} role="img" aria-label={`下载速率 ${fmtBytes(bps)} 每秒`}>
-              <SparkLineChart data={series} height={22} showHighlight={false} area />
-            </Box>
-          )}
-          <Tooltip title="全屏查看全部任务">
-            <IconButton size="small" onClick={() => setFsOpen(true)} sx={{ p: 0.25 }} aria-label="展开全屏">
-              <OpenInFullRoundedIcon sx={{ fontSize: 16 }} />
-            </IconButton>
-          </Tooltip>
-        </Box>
-      </Box>
+    <Box sx={{ display: "flex", flexDirection: "column", minHeight: 0 }}>
+      <Typography variant="subtitle2" sx={{ mb: 0.5 }}>任务队列</Typography>
 
-      {/* 标签：进行中 / 已完成 / 失败 */}
+      {/* 失败横幅：仅当有失败任务时出现，把被埋的失败提到最顶。点「重试」走第一条失败任务。 */}
+      {failedTasks.length > 0 && (
+        <Alert
+          severity="warning"
+          sx={{ mb: 1, py: 0, alignItems: "center" }}
+          action={
+            <Typography
+              variant="caption"
+              color="warning.dark"
+              role="button"
+              tabIndex={0}
+              onClick={() => onFsOpenChange(true)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") onFsOpenChange(true);
+              }}
+              sx={{ cursor: "pointer", textDecoration: "underline", pr: 1 }}
+            >
+              查看
+            </Typography>
+          }
+        >
+          {failedTasks.length} 个任务失败
+        </Alert>
+      )}
+
+      {/* 标签：进行中 / 操作历史 */}
       <Tabs
         value={tab}
         onChange={(_e, v) => setTab(v)}
@@ -99,12 +97,18 @@ function TaskQueuePanel({
         ))}
       </Tabs>
 
+      {isHistoryTab && (
+        <Typography variant="caption" color="text.disabled" sx={{ mb: 0.5 }}>
+          只读：历史是已完成 / 已取消 / 失败任务的冻结快照（网关重启不丢）。
+        </Typography>
+      )}
+
       {/* 列表（可滚动） */}
       <Box
         sx={{
           flex: 1,
           minHeight: 0,
-          maxHeight: 168,
+          maxHeight: 240,
           overflowY: "auto",
           border: (t) => `1px solid ${t.palette.divider}`,
           borderRadius: (t) => t.radius.md,
@@ -130,7 +134,7 @@ function TaskQueuePanel({
             ))}
             {current.length > shown.length && (
               <Box sx={{ py: 0.5, textAlign: "center" }}>
-                <Typography variant="caption" color="primary" sx={{ cursor: "pointer" }} onClick={() => setFsOpen(true)}>
+                <Typography variant="caption" color="primary" sx={{ cursor: "pointer" }} onClick={() => onFsOpenChange(true)}>
                   还有 {current.length - shown.length} 条，展开全屏查看全部
                 </Typography>
               </Box>
@@ -147,9 +151,8 @@ function TaskQueuePanel({
 
       <TaskQueueFullscreenDialog
         open={fsOpen}
-        onClose={() => setFsOpen(false)}
+        onClose={() => onFsOpenChange(false)}
         tasks={tasks}
-        completedTasks={completedTasks}
         failedTasks={failedTasks}
         allTasks={allTasks}
         busy={busy}
