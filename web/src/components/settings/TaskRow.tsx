@@ -60,6 +60,14 @@ const VERB_BTN: Record<TaskVerb, { title: string; Icon: typeof PauseRoundedIcon;
   cancel: { title: "取消", Icon: CloseRoundedIcon, color: "error" },
 };
 
+// 取消按钮的标签/提示按 kind 区分：缓冲取消是「暂停并保留已缓存片段」(可恢复)，
+// 缩略图取消是「终止」(单次 ffmpeg 无部分续传，取消后不可恢复)。
+function cancelMeta(kind: TaskItem["kind"]) {
+  return kind === "thumb"
+    ? { label: "终止", tip: "缩略图取消后不可恢复" }
+    : { label: "取消", tip: "取消会暂停并保留已缓存片段" };
+}
+
 function TaskRow({
   task,
   onAction,
@@ -80,11 +88,13 @@ function TaskRow({
   const chip = CHIP[st];
   const chipColor: ChipColor = working ? k.color : chip.color;
   const verbs = onAction && !isHistory ? availableVerbs(task.kind, st) : [];
+  const isPrefetch = task.kind === "prefetch";
+  const isThumb = task.kind === "thumb";
   const dotColor =
     st === "paused" ? "warning.main" : st === "error" ? "error.main" : st === "done" ? "success.main" : "text.disabled";
 
   return (
-    <Box sx={{ display: "flex", alignItems: "center", gap: 1, py: 0.5, px: 0.5 }}>
+    <Box sx={{ display: "flex", alignItems: "center", gap: 1, py: 0.5, px: 0.5, opacity: isPrefetch ? 0.7 : 1 }}>
       {/* 状态指示：进行中转圈，其余用对应颜色的点 */}
       {working ? (
         <CircularProgress size={14} thickness={6} />
@@ -105,15 +115,19 @@ function TaskRow({
         </Typography>
         <Typography variant="caption" color="text.secondary" noWrap title={task.courseName}>
           {task.courseName}
+          {isPrefetch ? " · 由播放自动触发，不可手动操作" : ""}
         </Typography>
         {pct != null && (
           <LinearProgress variant="determinate" value={pct} sx={{ mt: 0.5, height: 4, borderRadius: (t) => t.radius.full }} />
         )}
       </Box>
-      {/* 状态徽标 + 分片计数 */}
+      {/* 状态徽标 + 分片计数（缩略图为单次 ffmpeg，段数无意义 → 不显示） */}
       <Box sx={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 0.5, flexShrink: 0 }}>
+        {isPrefetch && (
+          <Chip size="small" variant="outlined" color="info" label="自动" sx={{ height: 22, fontSize: 11 }} />
+        )}
         <Chip size="small" variant="outlined" color={chipColor} label={chip.label} sx={{ height: 22, fontSize: 11 }} />
-        {task.cached != null && (
+        {!isThumb && task.cached != null && (
           <Typography variant="caption" color="text.secondary" sx={{ fontVariantNumeric: "tabular-nums" }}>
             {task.cached}
             {task.total ? `/${task.total}` : ""} 段
@@ -125,8 +139,11 @@ function TaskRow({
         <Box sx={{ display: "flex", gap: 0.25, flexShrink: 0 }}>
           {verbs.map((v) => {
             const b = VERB_BTN[v];
+            const cm = cancelMeta(task.kind);
+            const title = v === "cancel" ? cm.tip : b.title;
+            const aria = v === "cancel" ? cm.label : b.title;
             return (
-              <Tooltip key={v} title={b.title}>
+              <Tooltip key={v} title={title}>
                 <span>
                   <IconButton
                     size="small"
@@ -134,7 +151,7 @@ function TaskRow({
                     disabled={busy}
                     onClick={() => onAction?.(v)}
                     sx={{ p: 0.25 }}
-                    aria-label={b.title}
+                    aria-label={aria}
                   >
                     <b.Icon sx={{ fontSize: 16 }} />
                   </IconButton>
