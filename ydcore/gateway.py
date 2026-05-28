@@ -679,6 +679,17 @@ class Gateway:
             with self.thumb_lock:
                 self.thumb_meta[vid] = {"state": "error", "reason": "no headers"}
             return
+        # 生成期间保护 tvid: 缩略图源段(t_前缀)在共享 DiskLRU 里, 不加保护时一个大缩略图批
+        # 可能把刚缓冲好的播放段挤出(_pick_victim 只保护 LIVE+_extra_protect)。这里把 tvid
+        # 加进保护集, ffmpeg 跑完即移除——窗口短且有界, 不会长期占用 LRU 保护名额。
+        self.seg_cache.add_protect_vid(tvid)
+        try:
+            self._gen_thumbs_inner(vid, tvid, m3u8, tier, out, number, rows)
+        finally:
+            self.seg_cache.remove_protect_vid(tvid)
+
+    def _gen_thumbs_inner(self, vid, tvid, m3u8, tier, out, number, rows):
+        th = dict(self.video_headers.get(tvid) or {})
         # 先按档位把低清分片+密钥灌进缓存，ffmpeg 再顺序读缓存就很快
         try:
             pl, _, _ = self.pri_fetch(tier, th, m3u8)
