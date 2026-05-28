@@ -92,6 +92,9 @@ THUMB_COLS = 10
 # 缩略图持久化目录（生成后不删，跨会话复用）
 THUMB_DIR = os.path.join(os.path.expanduser("~"), ".youdao_course", "thumbs")
 THUMB_WORKERS = 3
+# buf_state 跨重启保留的"终态"(done/cancelled)上限: 防止跨上千讲无限膨胀。
+# 非终态(queued/working/paused/error)永远保留(用户可能要 resume/retry)。
+_BUF_TERMINAL_KEEP = 500
 
 
 class Gateway:
@@ -277,21 +280,38 @@ class Gateway:
                 # 但 seg_cache 是断点续传的, 重新入队等价于继续。
                 # done/cancelled 保留(供任务列表"已完成/已取消"显示历史),不重新入队。
                 # paused/queued/error 保留, 用户能 resume/retry。
+                # 先把终态(done/cancelled)按出现顺序收集, 只保留最近 _BUF_TERMINAL_KEEP 个,
+                # 避免 buf_state 跨上千讲无限膨胀。非终态(queued/working/paused/error)全留。
+                terminal = []
+                live_items = []
                 for vid, st in loaded.items():
-                    if isinstance(st, str) and st in (
+                    if not (isinstance(st, str) and st in (
                         "queued", "working", "paused", "done", "error", "cancelled"
-                    ):
-                        actual = "queued" if st == "working" else st
-                        self.buf_state[str(vid)] = actual
-                        # queued 状态的任务自动重入队(需要 buf_jobs 中有重试上下文)
-                        if actual == "queued":
-                            job = self.buf_jobs.get(str(vid))
-                            if job:
-                                self.buf_q.put(job)
-                            else:
-                                # 没上下文, 状态保留但下游 _buffer_worker 出队时会 skip。
-                                # 实际是僵尸,用户 retry 时如果 web 重新提交 batch 会被 start_buffer 接住。
-                                pass
+                    )):
+                        continue
+                    if st in ("done", "cancelled"):
+                        terminal.append((str(vid), st))
+                    else:
+                        live_items.append((str(vid), st))
+                # 终态只保留尾部(假定 JSON 写入顺序≈时间顺序; dict 在 py3.7+ 保序)
+                for vid, st in terminal[-_BUF_TERMINAL_KEEP:]:
+                    self.buf_state[vid] = st
+                for vid, st in live_items:
+                    # working → queued: 网关被砍时正在跑的任务, 重启后无法续片中位置,
+                    # 但 seg_cache 是断点续传的, 重新入队等价于继续。
+                    actual = "queued" if st == "working" else st
+                    if actual == "queued":
+                        job = self.buf_jobs.get(vid)
+                        if job:
+                            self.buf_state[vid] = "queued"
+                            self.buf_q.put(job)
+                        else:
+                            # 没重试上下文的 queued = 僵尸: 永远跑不起来。转成 error,
+                            # 用户能看到"失败"并(若 web 重提 batch)重新排队, 不再卡在 queued。
+                            self.buf_state[vid] = "error"
+                            self._last_buf_error[vid] = "重启后丢失任务上下文, 请重新缓存"
+                    else:
+                        self.buf_state[vid] = actual
             except Exception:  # noqa: BLE001
                 self._quarantine_corrupt(self.buf_state_path, "buf_state")
                 self.buf_state = {}
@@ -304,11 +324,17 @@ class Gateway:
                     loaded = json.load(f) or {}
                 for vid, reason in loaded.items():
                     if (isinstance(reason, str) and reason
-                            and self.buf_state.get(str(vid)) == "error"):
+                            and self.buf_state.get(str(vid)) == "error"
+                            and str(vid) not in self._last_buf_error):
                         self._last_buf_error[str(vid)] = reason
             except Exception:  # noqa: BLE001
                 self._quarantine_corrupt(self.buf_errors_path, "buf_errors")
                 self._last_buf_error = {}
+
+        # 启动时若做了僵尸修正/终态裁剪, 立刻回写一次, 让下次启动不再重复处理同样的僵尸。
+        # (init 阶段还没启 buffer worker, 无并发, 不需 buf_lock。)
+        self._save_buf_state()
+        self._save_buf_errors()
 
         # 自动预缓存：以"播放头"为中心向前后双向补未缓存分片。
         self.pf_lock = threading.Lock()
