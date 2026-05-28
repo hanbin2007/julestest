@@ -125,6 +125,11 @@ class Gateway:
         self.video_headers = {}
         self.vh_lock = threading.Lock()
         self.seg_cache = DiskLRU(cache_bytes, cache_dir)
+        # 缩略图源段以 "t_"+vid 为 key 灌进同一 DiskLRU; 注入拆分器让 vid_stats 把它们归
+        # thumb 桶(去前缀), 而 cache.py 自身不必硬编码 "t_" 命名约定。
+        self.seg_cache.set_namespace_splitter(
+            lambda vid: ("thumb", vid[2:]) if isinstance(vid, str) and vid.startswith("t_") else ("real", vid)
+        )
         # 三档优先级闸门：0=LIVE(观看) > 1=AUTO(自动缓存) > 2=MANUAL(手动缓存)。
         self.gate = PriorityGate()
 

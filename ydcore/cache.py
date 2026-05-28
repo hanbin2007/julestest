@@ -29,6 +29,9 @@ class DiskLRU:
         # 当前在看那集 + 额外保护 vid (例: 正在缓冲中的多集); 淘汰时优先丢别的, 最后才动它
         self._live_vid = None      # 单值: 当前 /api/play 那集 (LIVE 最高优先)
         self._extra_protect = set()  # 集合: 当前 _buffer_one / _prefetch_worker 跑中的 vid
+        # vid -> (bucket, key) 拆分器: 默认恒等(全归 real)。gateway 注入 't_' 前缀规则,
+        # 让 cache.py 不必知道上层命名约定(缩略图源段如何命名是 gateway 的事)。
+        self._ns_split = lambda vid: ("real", vid)
         self.persist = bool(persist_dir)
         if self.persist:
             # 固定目录 + index.json：重启不清缓存。目录由调用方（resolve_cache_dir）按
@@ -156,6 +159,11 @@ class DiskLRU:
         with self.lock:
             self._extra_protect.discard(vid)
 
+    def set_namespace_splitter(self, fn):
+        """注入 vid -> (bucket, display_key) 拆分器; bucket ∈ {'real','thumb'}。
+        gateway 用它把 't_'+vid 的缩略图源段归入 thumb 桶,而 cache.py 自身不识别前缀。"""
+        self._ns_split = fn
+
     def extra_protect_vids(self):
         """当前额外保护集的快照(供 gateway 落盘 playhead.json)。"""
         with self.lock:
@@ -260,17 +268,17 @@ class DiskLRU:
                        if v == vid and urllib.parse.urlparse(t).path.endswith((".ts", ".m4s")))
 
     def vid_stats(self):
-        """一次遍历汇总每个 vid 的磁盘占用：真实视频段 vs 缩略图源段(t_ 前缀)。
-        segments 只算 .ts(与 count_vid 同义)；bytes 把该 vid 的所有条目(段+密钥)都计入，
+        """一次遍历汇总每个 vid 的磁盘占用：真实视频段 vs 缩略图源段。
+        归桶规则由 set_namespace_splitter 注入(默认全 real),cache.py 不识别上层前缀。
+        segments 只算 .ts/.m4s；bytes 把该 vid 的所有条目(段+密钥)都计入,
         因此 sum(real.bytes)+sum(thumb.bytes) == self.size（与存储总量自洽）。"""
         real, thumb = {}, {}
         with self.lock:
             for (url, vid), (_ctype, size, _fname) in self.meta.items():
                 is_seg = urllib.parse.urlparse(url).path.endswith((".ts", ".m4s"))
-                if isinstance(vid, str) and vid.startswith("t_"):
-                    d = thumb.setdefault(vid[2:], {"segments": 0, "bytes": 0})
-                else:
-                    d = real.setdefault(vid, {"segments": 0, "bytes": 0})
+                bucket, key = self._ns_split(vid)
+                target = thumb if bucket == "thumb" else real
+                d = target.setdefault(key, {"segments": 0, "bytes": 0})
                 d["bytes"] += size
                 if is_seg:
                     d["segments"] += 1
