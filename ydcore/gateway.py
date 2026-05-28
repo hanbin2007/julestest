@@ -395,6 +395,8 @@ class Gateway:
         threading.Thread(target=self._buffer_worker, daemon=True).start()
         # 后台 flush 线程: playhead 节流落盘(5s/次),只在 dirty 时写。
         threading.Thread(target=self._playhead_flush_loop, daemon=True).start()
+        # 后台 flush 线程: 掉盘恢复后重刷全部持久化状态(防丢掉盘窗口内的变更)。
+        threading.Thread(target=self._recover_flush_loop, daemon=True).start()
 
     def pri_fetch(self, t, hdrs, url, range_header=None):
         """按优先级档位回源（委托给闸门）。"""
@@ -484,6 +486,38 @@ class Gateway:
                     self._save_playhead()
                 except Exception:  # noqa: BLE001
                     _log.debug("playhead 节流落盘失败", exc_info=True)
+
+    def _recover_flush_loop(self):
+        """监测掉盘恢复: seg_cache.ok 由 False→True 时, 把所有内存态强制重刷一遍。
+        掉盘期间 _atomic_write_json 全被跳过, 盘回来后磁盘 JSON 还停在掉盘前快照,
+        不重刷的话此后一次 kill -9 会丢掉整个掉盘窗口内的状态变更。"""
+        prev_ok = self.seg_cache.ok
+        while True:
+            time.sleep(5)
+            now_ok = self.seg_cache.ok
+            # ok 可能被 _save_index/_atomic_write_json 在掉盘时设 False; 目录恢复后
+            # 由 dir_ok() 探测回真, 再手动把 ok 拉回 True 解除封印。
+            if not now_ok and self.seg_cache.dir_ok():
+                self.seg_cache.ok = True
+                now_ok = True
+            if now_ok and not prev_ok:
+                _log.warning("缓存盘恢复可写, 重刷全部持久化状态")
+                try:
+                    self._save_seg_urls()
+                    self._save_video_meta()
+                    self._save_pf_done()
+                    self._save_playhead()
+                    self._save_thumb_index()
+                    with self.buf_lock:
+                        self._save_buf_state()
+                        self._save_buf_jobs()
+                        self._save_buf_errors()
+                    with self.thumb_lock:
+                        self._save_thumb_jobs()
+                    self.seg_cache._dirty = True  # 让 cache 的 _flush_loop 也重写 index.json
+                except Exception:  # noqa: BLE001
+                    _log.warning("掉盘恢复重刷失败", exc_info=True)
+            prev_ok = now_ok
 
     def _remember_video(self, video, m3u8):
         """从一次 thumb/buffer/warm/play 调用记下该 vid 的元数据。

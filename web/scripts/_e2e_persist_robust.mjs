@@ -5,7 +5,10 @@
 //   #3 无 queued-无-job 僵尸             (修复前: 重启后存在 queued 但无 reason 的死任务)
 //   #4 原子性: 无残留 *.json.tmp + thumb/seg_urls JSON 可正常 parse
 //   #5 pf_threads 有界
+//   #6 recover-flush 循环不破坏持久化态(周期性 tick 幂等)
 // 可重复运行: 用一个固定测试 vid, 每次跑前先清掉它的状态文件痕迹(幂等)。
+// 手动掉盘验证(无法无头自动化): 缓冲运行时拔掉外置盘, 观察 /api/status cacheDirOk:false,
+// 重新挂载, 等 6s, 确认 /api/_debug extraProtect + 盘上 seg_urls.json 反映掉盘后的最新状态。
 import { promises as fs } from "node:fs";
 import { execSync, spawn } from "node:child_process";
 
@@ -149,6 +152,12 @@ async function main() {
   const dbg2 = await fetch(`${GW}/api/_debug`).then((r) => r.json());
   check("#5 pfThreads 有界(<=64)", Array.isArray(dbg2.pfThreads) && dbg2.pfThreads.length <= 64,
     { pfThreads: dbg2.pfThreads.length });
+
+  // #6 recover-flush 循环不破坏状态: 等一个 flush 周期, extraProtect/bufStates 仍自洽。
+  await sleep(6000);
+  const dbg3 = await fetch(`${GW}/api/_debug`).then((r) => r.json());
+  check("#6 recover-flush 不损坏持久化态", (dbg3.extraProtect || []).includes(TEST_VID),
+    { extraProtect: dbg3.extraProtect });
 
   await cleanupSeed();
 
