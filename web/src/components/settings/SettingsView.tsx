@@ -118,15 +118,21 @@ export default function SettingsView() {
   }, [allRows, q, courseId, thumbF, bufF, data]);
 
   // ---- 操作 ----
+  // 去抖：拦截在途的重复提交(网格行/批量按钮连点 → 多个 POST)。课程卡按钮另由 busyIds 禁用。
+  const submittingRef = React.useRef(false);
   const submit = async (vids: Video[], kind: "thumb" | "buffer") => {
     const t = kind === "thumb" ? vids.filter((v) => thumbSrc(v)) : vids.filter((v) => pickM3u8(v));
     if (!t.length) return toast("没有可处理的讲次");
+    if (submittingRef.current) return; // 连点去抖：在途提交未结束时忽略重复点击
+    submittingRef.current = true;
     try {
       const r = kind === "thumb" ? await batchThumbs(t.map(MK_THUMB)) : await batchBuffer(t.map(MK_BUF));
       toast(`已加入队列 ${r.queued}（跳过 ${r.skipped}）`, { severity: "success" });
       refresh();
     } catch (e) {
       toast("提交失败：" + (e as Error).message, { severity: "error" });
+    } finally {
+      submittingRef.current = false;
     }
   };
 

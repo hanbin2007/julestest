@@ -81,17 +81,31 @@ function CourseStatusGrid({
     );
   }
   return (
-    <Box sx={GRID_SX}>
-      {sorted.map((c) => (
-        <CourseStatusCard
-          key={c.productId}
-          course={c}
-          busy={busyIds.has(c.productId)}
-          onOpen={onOpen}
-          onBuffer={onBuffer}
-          onThumbs={onThumbs}
-        />
-      ))}
+    <Box>
+      {/* 常驻图例：解释卡片上的双环含义(原来只在 hover tooltip 里,发现性差)。 */}
+      <Box sx={{ display: "flex", alignItems: "center", gap: 2, mb: 1, px: 0.5, flexWrap: "wrap" }}>
+        <Typography variant="caption" color="text.secondary">环形图例</Typography>
+        <Box sx={{ display: "flex", alignItems: "center", gap: 0.5 }}>
+          <Box sx={{ width: 12, height: 12, borderRadius: "50%", border: "3px solid", borderColor: "primary.main" }} />
+          <Typography variant="caption" color="text.secondary">外环 = 缓存进度</Typography>
+        </Box>
+        <Box sx={{ display: "flex", alignItems: "center", gap: 0.5 }}>
+          <Box sx={{ width: 12, height: 12, borderRadius: "50%", border: "2px dashed", borderColor: "success.main" }} />
+          <Typography variant="caption" color="text.secondary">内环(虚线) = 已看</Typography>
+        </Box>
+      </Box>
+      <Box sx={GRID_SX}>
+        {sorted.map((c) => (
+          <CourseStatusCard
+            key={c.productId}
+            course={c}
+            busy={busyIds.has(c.productId)}
+            onOpen={onOpen}
+            onBuffer={onBuffer}
+            onThumbs={onThumbs}
+          />
+        ))}
+      </Box>
     </Box>
   );
 }

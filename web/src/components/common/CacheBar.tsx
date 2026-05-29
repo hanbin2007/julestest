@@ -46,21 +46,24 @@ function CacheBar({
   };
   const working = state === "working";
   const error = state === "error";
-  const pct = eff.total ? Math.round((eff.cached / eff.total) * 100) : 0;
+  // 磁盘真相(cached)可能短暂 > seg_urls 长度(total)，如清晰度切换后磁盘多出几片：夹紧到
+  // total，避免出现 146/145 段、101% 这类越界显示。
+  const knownTotal = eff.total != null;
+  const cachedShown = knownTotal ? Math.min(eff.cached, eff.total as number) : eff.cached;
+  const pct = eff.total ? Math.min(100, Math.round((cachedShown / eff.total) * 100)) : 0;
 
   // total 现由 Plan 1 收敛为可信值；只有真正没有有序分片列表(buckets 也无)时 total 才会缺失。
   // 三态：已知总数 → "X/Y 段"；cached>0 但范围未知 → "已缓存（部分）"；cached===0 → "未缓存"。
-  const knownTotal = eff.total != null;
   const partialUnknown = !knownTotal && eff.cached > 0;
   const label = knownTotal
-    ? `${eff.cached}/${eff.total} 段`
+    ? `${cachedShown}/${eff.total} 段`
     : partialUnknown
       ? "已缓存（部分）"
       : "未缓存";
   const tip = error
     ? "缓冲失败"
     : knownTotal
-      ? `已缓存 ${eff.cached}/${eff.total} 段（${pct}%）${working ? " · 缓冲中" : ""}`
+      ? `已缓存 ${cachedShown}/${eff.total} 段（${pct}%）${working ? " · 缓冲中" : ""}`
       : partialUnknown
         ? `已缓存 ${eff.cached} 段（范围未知，确切总数待补片时确认）`
         : "尚未缓存";

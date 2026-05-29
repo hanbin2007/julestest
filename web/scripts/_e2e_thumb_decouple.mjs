@@ -50,11 +50,15 @@ async function triggerThumb(videoId) {
 }
 
 function restartStack() {
-  // 与部署口径一致: kill -9 网关 → perl setsid 重启。
+  // 监督模式: 只硬杀网关进程, run.sh 监督器会在 ~2-4s 内自动重启它(web 不下线)。
+  // 兜底: 后台等 12s, 若仍无网关(无监督环境下单独跑)再单独拉起一个网关——绝不重启整条 run.sh,
+  // 否则会与仍在线的 web :3000 端口冲突。
   const cmd = `
-    pkill -9 -f "youdao_course.py serve" 2>/dev/null; sleep 1
-    for i in $(seq 1 20); do L=$(lsof -nP -iTCP:8808 -sTCP:LISTEN -t 2>/dev/null); [ -z "$L" ] && break; sleep 1; done
-    nohup perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' ./run.sh > "$HOME/.youdao_course/run.log" 2>&1 </dev/null & disown
+    pkill -9 -f "youdao_course.py serve" 2>/dev/null
+    ( sleep 12
+      if ! curl -fsS http://127.0.0.1:8808/api/_debug >/dev/null 2>&1; then
+        cd "${ROOT}" && nohup python3 youdao_course.py serve -r req.txt > /tmp/_gw_e2e.log 2>&1 & disown
+      fi ) &
   `;
   const p = spawn("bash", ["-lc", cmd], { cwd: ROOT, detached: true, stdio: "ignore" });
   p.unref();
