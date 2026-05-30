@@ -1015,6 +1015,10 @@ class Gateway:
                         urls.insert(0, urllib.parse.urljoin(m3u8, _km.group(1)))
 
             for u in urls:
+                # 预取期复查取消: 与出队复查(_thumb_worker)/ffmpeg 后复查同口径。取消后立即停下载,
+                # 不再把整批低清源段拉完(省带宽 + 减共享缓存压力), 也不进入 Popen 启动 ffmpeg。
+                if (self.thumb_meta.get(vid) or {}).get("state") == "cancelled":
+                    return
                 if self.seg_cache.has((u, tvid)):
                     continue
                 try:
