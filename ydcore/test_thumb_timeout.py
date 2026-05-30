@@ -51,10 +51,14 @@ class ThumbTimeoutTest(_FakeFfmpegMixin, unittest.TestCase):
         # 超时常量调到 2s, 否则真等默认 120s。
         self._old_env_to = os.environ.get("YD_THUMB_FFMPEG_TIMEOUT")
         os.environ["YD_THUMB_FFMPEG_TIMEOUT"] = "2"
+        # 隔离 thumb_dir, 否则真实构造默认指向生产 ~/.youdao_course/thumbs([[julestest-no-prod-db-writes]])。
+        self._old_thumb_dir = gwmod.THUMB_DIR
+        gwmod.THUMB_DIR = os.path.join(self.tmp, "_iso_thumbs")
 
     def tearDown(self):
         import shutil
         self._restore_path()
+        gwmod.THUMB_DIR = self._old_thumb_dir
         if self._old_env_to is None:
             os.environ.pop("YD_THUMB_FFMPEG_TIMEOUT", None)
         else:

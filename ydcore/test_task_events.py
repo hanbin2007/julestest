@@ -14,6 +14,7 @@ import os
 import tempfile
 import unittest
 
+from ydcore import gateway as _gwmod
 from ydcore.gateway import Gateway, _TASK_EVENTS_KEEP
 
 
@@ -26,9 +27,15 @@ def _mk_gateway(cache_dir):
 class TaskEventsTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="ydtest_te_")
+        # 隔离 thumb_dir: 真实 Gateway 构造默认把 thumb_dir 指向生产 ~/.youdao_course/thumbs,
+        # 会读到线上正在 gen 的缩略图并发出 init 事件污染 _task_seq([[julestest-no-prod-db-writes]])。
+        # 把模块级 THUMB_DIR 临时指向独立临时目录, 构造期不再碰生产。
+        self._old_thumb_dir = _gwmod.THUMB_DIR
+        _gwmod.THUMB_DIR = os.path.join(self.tmp, "_iso_thumbs")
 
     def tearDown(self):
         import shutil
+        _gwmod.THUMB_DIR = self._old_thumb_dir
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_emit_seq_monotonic(self):

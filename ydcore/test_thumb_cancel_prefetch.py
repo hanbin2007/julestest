@@ -14,6 +14,7 @@ import os
 import tempfile
 import unittest
 
+from ydcore import gateway as _gwmod
 from ydcore.gateway import Gateway
 
 
@@ -40,9 +41,13 @@ _M3U8 = "\n".join([
 class ThumbCancelPrefetchTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="ydtest_thumbcancel_")
+        # 隔离 thumb_dir, 否则真实构造默认指向生产 ~/.youdao_course/thumbs([[julestest-no-prod-db-writes]])。
+        self._old_thumb_dir = _gwmod.THUMB_DIR
+        _gwmod.THUMB_DIR = os.path.join(self.tmp, "_iso_thumbs")
 
     def tearDown(self):
         import shutil
+        _gwmod.THUMB_DIR = self._old_thumb_dir
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def _prep(self, gw, vid, cancel_after):
