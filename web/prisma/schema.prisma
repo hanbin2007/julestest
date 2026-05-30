@@ -143,10 +143,12 @@ model SyncState {
   at    DateTime @updatedAt
 }
 
-// 任务历史:网关在每个真实终态转换点 append 带单调 seq 的事件,web 按 seq>上次拉增量写入。
+// 任务历史:网关在每个真实终态转换点 append 带 (epoch, seq) 的事件,web 按 seq>上次拉增量写入。
 // 设置页"全部"标签从这里倒序读;cap 后端 500 条够看。
-// seq: 来自网关事件日志的全局单调序号;事件行 id='evt-'+seq、seq=该序号(@unique 让二次插入被
-// skipDuplicates 拦=幂等)。存量随机-id 行 / full→done 回填行 seq=NULL(SQLite UNIQUE 允许多 NULL)。
+// 幂等由主键 id='evt-<epoch>-<seq>' 担保(#3):每 boot epoch +1,跨重启复用的 seq 在新 epoch
+// 下是另一行 id。seq 列保留作 epoch 内序号(展示/排序参考),但【不再 @unique】——加 epoch 后
+// seq 跨 boot 会复用,旧的 seq @unique 会让第二个 boot 的同 seq 行插入抛 P2002→整批 ingest 回滚
+// →静默丢真终态(正是 #3 要修的 bug)。存量随机-id 行 / full→done 回填行 seq=NULL。
 model TaskHistory {
   id      String   @id
   kind    String // "buffer" | "thumb" | "prefetch"
@@ -154,7 +156,7 @@ model TaskHistory {
   state   String // "done"|"error"|"cancelled"|"paused"(运行态 queued/working 不再入库)
   reason  String? // error 时填失败原因(最多 200 字)
   at      DateTime @default(now())
-  seq     Int?     @unique // 网关事件序号;NULL=存量/回填行
+  seq     Int? // 网关事件 epoch 内序号(非全局唯一,幂等靠 id 主键);NULL=存量/回填行
 
   @@index([at])
   @@index([videoId, kind, at])

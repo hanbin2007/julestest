@@ -175,6 +175,74 @@ class TaskEventsTest(unittest.TestCase):
         self.assertEqual(len(dones), 2)
         self.assertNotEqual(dones[0]["seq"], dones[1]["seq"])
 
+    def test_epoch_bumps_on_reload_so_reused_seq_is_distinct_id(self):
+        """Task 2 (#3): 每条事件带 per-boot epoch。掉盘期 seq 在内存涨但盘没写,
+        kill-9 重启从盘载老 seq → 新事件复用旧 seq; 但 epoch 必涨, 故 evt-<epoch>-<seq>
+        是不同行, web 不会误去重丢事件。"""
+        gw = _mk_gateway(self.tmp)
+        gw._emit_task_event("buffer", "1", "done")    # epoch=E, seq=1
+        e1 = list(gw.task_events)[-1]
+        self.assertIn("epoch", e1)                     # 事件必须带 epoch 字段
+
+        gw2 = _mk_gateway(self.tmp)                    # 从同目录重载(新 boot)
+        gw2._emit_task_event("buffer", "2", "done")    # epoch=E+1, seq 可能复用
+        e2 = list(gw2.task_events)[-1]
+
+        self.assertNotEqual(e1["epoch"], e2["epoch"])  # 跨重启 epoch 必不同
+        self.assertGreater(e2["epoch"], e1["epoch"])   # 单调递增(新 boot 更大)
+
+    def test_epoch_bumps_even_when_seq_reused(self):
+        """构造 seq 真撞: 盘上停在 {epoch:E, seq:3}, 但内存继续涨到 5(掉盘期未落盘),
+        kill-9 丢内存 → 重启从盘载 epoch=E,seq=3 → 续发 seq=4(撞掉盘期的 4)但 epoch=E+1。
+        断言: 同 seq 不同 epoch, 拼出的 id 不同。"""
+        path = os.path.join(self.tmp, "task_events.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"epoch": 7, "seq": 3, "events": [
+                {"epoch": 7, "seq": 3, "ts": 1.0, "kind": "buffer",
+                 "vid": "a", "state": "done", "reason": None},
+            ]}, f)
+        gw = _mk_gateway(self.tmp)
+        # 重载: epoch = 盘上 epoch + 1 = 8; seq = 盘上峰值 3(续发从 4 起)。
+        self.assertEqual(gw._task_epoch, 8)
+        self.assertEqual(gw._task_seq, 3)
+        gw._emit_task_event("buffer", "b", "done")     # seq=4, epoch=8
+        ev = list(gw.task_events)[-1]
+        self.assertEqual(ev["seq"], 4)
+        self.assertEqual(ev["epoch"], 8)
+        # 和盘上老事件 (epoch=7, seq=3) 比: 这是不同 (epoch,seq) → 不同 id。
+        self.assertNotEqual((ev["epoch"], ev["seq"]), (7, 3))
+
+    def test_first_boot_epoch_starts_at_one(self):
+        """首次启动(无盘文件): epoch 从 1 起(load 不到 → epoch=0+1)。"""
+        gw = _mk_gateway(self.tmp)
+        self.assertEqual(gw._task_epoch, 1)
+        gw._emit_task_event("buffer", "1", "done")
+        self.assertEqual(list(gw.task_events)[-1]["epoch"], 1)
+
+    def test_save_writes_epoch_top_level(self):
+        """_save_task_events 写 {epoch, seq, events}; 落盘后可被下次 load 读到。"""
+        gw = _mk_gateway(self.tmp)
+        gw._emit_task_event("buffer", "1", "done")
+        with open(gw.task_events_path, "r", encoding="utf-8") as f:
+            saved = json.load(f)
+        self.assertEqual(saved["epoch"], gw._task_epoch)
+        self.assertEqual(saved["seq"], 1)
+        self.assertEqual(saved["events"][0]["epoch"], gw._task_epoch)
+
+    def test_api_returns_epoch(self):
+        """/api/task_events 返回体含 epoch(复刻 handler 逻辑)。"""
+        gw = _mk_gateway(self.tmp)
+        gw._emit_task_event("buffer", "1", "done")
+
+        def api(since):
+            cur = gw._task_seq
+            evs = [e for e in gw.task_events if e["seq"] > since]
+            return {"epoch": gw._task_epoch, "seq": cur, "events": evs}
+
+        r = api(0)
+        self.assertEqual(r["epoch"], gw._task_epoch)
+        self.assertEqual(r["events"][0]["epoch"], gw._task_epoch)
+
     def test_emit_holds_only_task_lock(self):
         """死锁守护: emit 临界区只取 task_lock, 在持有 buf_lock/thumb_lock/pf_lock 时调用不死锁。
         (worker/act 调用 emit 时往往已持那些锁, 锁序必须是 X_lock -> task_lock 单向)。"""

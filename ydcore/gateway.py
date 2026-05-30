@@ -155,6 +155,11 @@ class Gateway:
         # 绝不嵌套 buf_lock/thumb_lock/pf_lock(调用方已持那些锁, 避免死锁)。
         self.task_lock = threading.Lock()
         self._task_seq = 0  # 全局单调序号(历史峰值, 跨重启不归零)
+        # per-boot epoch(#3): 掉盘期 seq 在内存涨但盘没写, kill-9 重启从盘载老 seq →
+        # 新事件复用旧 seq, 旧 evt-<seq> 方案会被 web 误去重丢真终态。每 boot epoch +1,
+        # 事件 id 变 evt-<epoch>-<seq>: 复用的 seq 在新 epoch 下是另一行, 永不撞。
+        # epoch 持久化在 task_events.json 顶层, load 时 = 盘上 epoch + 1(新 boot 必更大)。
+        self._task_epoch = 1
         self.task_events = collections.deque(maxlen=_TASK_EVENTS_KEEP)
         self.task_events_path = (
             os.path.join(self.seg_cache.dir, "task_events.json")
@@ -540,10 +545,12 @@ class Gateway:
 
     # ---- 任务事件日志 ----------------------------------------------------
     def _load_task_events(self):
-        """回载 task_events.json: {seq: 峰值, events: [...]}。
+        """回载 task_events.json: {epoch, seq: 峰值, events: [...]}。
         _task_seq = max(顶层 seq, events 内 max seq), 永不倒退(防文件被部分篡改/截断)。
-        损坏走 _quarantine_corrupt 隔离 + 内存重置 seq=0。
-        临时缓存目录(task_events_path=None)无文件可载, 直接 return。"""
+        _task_epoch = (顶层 epoch, 或 events 内 max epoch) + 1: 新 boot 必比盘上大,
+        故掉盘期复用的 seq 在新 epoch 下是另一行(#3, 防 web 误去重丢真终态)。
+        损坏走 _quarantine_corrupt 隔离 + 内存重置 seq=0(epoch 仍前进, 不复位避免撞历史)。
+        临时缓存目录(task_events_path=None)无文件可载, 直接 return(epoch 保持构造时的 1)。"""
         path = self.task_events_path
         if not path or not os.path.isfile(path):
             return
@@ -551,8 +558,10 @@ class Gateway:
             with open(path, "r", encoding="utf-8") as f:
                 loaded = json.load(f) or {}
             top_seq = int(loaded.get("seq") or 0)
+            top_epoch = int(loaded.get("epoch") or 0)
             events = loaded.get("events") or []
             max_ev = 0
+            max_epoch = 0
             for ev in events:
                 if not isinstance(ev, dict):
                     continue
@@ -562,22 +571,35 @@ class Gateway:
                     continue
                 if s > max_ev:
                     max_ev = s
+                try:
+                    e = int(ev.get("epoch"))
+                    if e > max_epoch:
+                        max_epoch = e
+                except (TypeError, ValueError):
+                    pass
                 self.task_events.append(ev)
             self._task_seq = max(top_seq, max_ev)
+            # 新 boot = 盘上最大 epoch + 1(顶层与事件内取较大者, 防文件被部分篡改)。
+            self._task_epoch = max(top_epoch, max_epoch) + 1
         except Exception:  # noqa: BLE001
             self._quarantine_corrupt(path, "task_events")
             self.task_events.clear()
             self._task_seq = 0
+            # epoch 不复位: 损坏文件可能仍被某历史 web 游标记着旧 (epoch,seq), 复位会撞。
+            # 保持构造时的 1(或更高), 续发用 +1 后的新 epoch 仍安全。
+            self._task_epoch = self._task_epoch + 1
 
     def _save_task_events(self):
         """落盘 task_events. 调用方已持 task_lock(_emit 内)或确保无并发。
         persist=False 时 task_events_path=None, 静默跳过不落盘(R9)。
-        写 {seq: 历史峰值 _task_seq, events: [...有界 deque 内容, 旧->新]}。"""
+        写 {epoch: 本 boot epoch, seq: 历史峰值 _task_seq, events: [...有界 deque, 旧->新]}。
+        epoch 落盘后下次 load 会 +1, 保证跨重启 epoch 单调(#3)。"""
         if not self.task_events_path:
             return
         self._atomic_write_json(
             self.task_events_path,
-            {"seq": self._task_seq, "events": list(self.task_events)},
+            {"epoch": self._task_epoch, "seq": self._task_seq,
+             "events": list(self.task_events)},
         )
 
     def _emit_task_event(self, kind, vid, state, reason=None):
@@ -593,6 +615,7 @@ class Gateway:
         with self.task_lock:
             self._task_seq += 1
             ev = {
+                "epoch": self._task_epoch,  # #3: 跨重启复用 seq 时靠 epoch 区分行
                 "seq": self._task_seq,
                 "ts": time.time(),
                 "kind": kind,
@@ -742,6 +765,7 @@ class Gateway:
         # task_events 基础设施
         self.task_lock = threading.Lock()
         self._task_seq = 0
+        self._task_epoch = 1  # #3: per-boot epoch(测试骨架不回载, 直接给初值)
         self.task_events = collections.deque(maxlen=_TASK_EVENTS_KEEP)
         self.task_events_path = os.path.join(cache_dir, "task_events.json")
 
@@ -1606,7 +1630,8 @@ def make_handler(gateway):
                     continue
                 self.gw._emit_task_event(kind, vid, state, ev.get("reason"))
                 n += 1
-            self._send_json({"emitted": n, "seq": self.gw._task_seq})
+            self._send_json({"emitted": n, "seq": self.gw._task_seq,
+                             "epoch": self.gw._task_epoch})
 
         def _api_buffer_batch(self):
             try:
@@ -1819,19 +1844,26 @@ def make_handler(gateway):
             })
 
         def _api_task_events(self, qs):
-            """任务事件增量拉取: ?since=N → {"seq": 当前峰值, "events": [seq>N 升序]}。
-            web 用 since=上次游标拉增量写 TaskHistory(按 seq 区分, 不漏不重)。
-            只取 task_lock 快照(与 _emit 同锁), 保证 cur 与 events 一致。"""
+            """任务事件增量拉取: ?since=N → {"epoch": 本 boot, "seq": 当前峰值, "events": [seq>N 升序]}。
+            web 用 (epoch, since=上次游标) 拉增量写 TaskHistory: epoch 翻转(重启)则从 0 重拉,
+            evt-<epoch>-<seq> 幂等不重复计数; 同 epoch 内按 seq>since 续传(不漏不重, #3)。
+            只取 task_lock 快照(与 _emit 同锁), 保证 epoch/cur/events 一致。
+            since 语义保持"本 epoch 内的 seq": 老 epoch 的事件仍在 deque 里也一并返回(各自带
+            epoch, web 按 id 去重), 这样跨 epoch 切换时旧事件不丢。"""
             try:
                 since = int((qs.get("since") or ["0"])[0])
             except (ValueError, TypeError):
                 since = 0
             gw = self.gw
             with gw.task_lock:
+                epoch = gw._task_epoch
                 cur = gw._task_seq
-                # deque 天然按 seq 升序 append, 过滤 seq>since 保持升序
-                evs = [e for e in gw.task_events if e["seq"] > since]
-            self._send_json({"seq": cur, "events": evs})
+                # deque 天然按 seq 升序 append; 过滤 seq>since(限本 epoch 增量)外,
+                # 仍带上 epoch != 本 boot 的老事件(它们的 seq 可能 <=since 但属于上一 epoch,
+                # web 按 evt-<epoch>-<seq> 去重不会重复, 跨重启切 epoch 时这批旧行不丢)。
+                evs = [e for e in gw.task_events
+                       if e["seq"] > since or e.get("epoch") != epoch]
+            self._send_json({"epoch": epoch, "seq": cur, "events": evs})
 
         def _thumb_video(self, d):
             """从 dict 取出生成缩略图需要的字段，返回 (video, m3u8_low, duration) 或 None。"""

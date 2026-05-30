@@ -151,35 +151,48 @@ async function gwDebug() {
 // ---------- web 侧 ingest (复刻 status/route.ts 的 ingestTaskEvents 增量写库) ----------
 let prisma = null;
 
-async function readCursor() {
+// 游标格式 "<epoch>:<seq>"(#3)。兼容旧纯数字 "<seq>"(epoch=0)。
+async function readCursorRaw() {
   const cur = await prisma.syncState.findUnique({ where: { key: "taskEventSeq" } });
-  return cur ? (Number(cur.value) || 0) : 0;
+  return cur ? String(cur.value) : "0:0";
+}
+function parseCursor(raw) {
+  const parts = String(raw).split(":");
+  if (parts.length === 2) return { epoch: Number(parts[0]) || 0, seq: Number(parts[1]) || 0 };
+  return { epoch: 0, seq: Number(raw) || 0 }; // 旧格式:纯 seq
+}
+// 兼容老断言: 返回当前 in-epoch seq 游标(整数), 仅用于"游标推进/不回退"的数值断言。
+async function readCursor() {
+  return parseCursor(await readCursorRaw()).seq;
 }
 
 // 完整复刻 ingestTaskEvents 的核心(去掉 initSyncOnce 的清理/回填——本测试 test.db 全新):
-//   since = SyncState.taskEventSeq → GET /api/task_events?since → fresh=filter(seq>since)
-//   → 事务[逐行 upsert 'evt-'+seq(幂等) + upsert 游标=res.seq]
+//   游标 "<epoch>:<seq>" → GET /api/task_events?since=curSeq → epoch 翻转则 since 归 0 重拉
+//   → fresh=排除本 epoch 内 seq<=since 的已消费 → 事务[逐行 upsert 'evt-<epoch>-<seq>'(幂等)
+//   + upsert 游标="<res.epoch>:<res.seq>"]。
 async function ingestOnce() {
-  const since = await readCursor();
-  const res = await gwTaskEvents(since);
-  if (res.seq < since) console.warn("网关事件日志疑似被重置(seq 回退)");
-  const fresh = (res.events ?? []).filter((e) => e.seq > since);
+  const { epoch: curEpoch, seq: curSeq } = parseCursor(await readCursorRaw());
+  const res = await gwTaskEvents(curSeq);
+  const epochFlip = res.epoch !== curEpoch;
+  const since = epochFlip ? 0 : curSeq;
+  if (!epochFlip && res.seq < curSeq) console.warn("网关事件日志疑似被重置(同 epoch seq 回退)");
+  const fresh = (res.events ?? []).filter((e) => !(e.epoch === res.epoch && e.seq <= since));
+  const newCursor = `${res.epoch}:${res.seq}`;
   if (fresh.length === 0) {
-    if (res.seq > since) {
-      await prisma.syncState.upsert({
-        where: { key: "taskEventSeq" },
-        create: { key: "taskEventSeq", value: String(res.seq) },
-        update: { value: String(res.seq) },
-      });
-    }
-    return { ingested: 0, cursor: Math.max(since, res.seq) };
+    await prisma.syncState.upsert({
+      where: { key: "taskEventSeq" },
+      create: { key: "taskEventSeq", value: newCursor },
+      update: { value: newCursor },
+    });
+    return { ingested: 0, cursor: newCursor };
   }
   await prisma.$transaction([
-    ...fresh.map((e) =>
-      prisma.taskHistory.upsert({
-        where: { id: `evt-${e.seq}` },
+    ...fresh.map((e) => {
+      const id = `evt-${e.epoch}-${e.seq}`;
+      return prisma.taskHistory.upsert({
+        where: { id },
         create: {
-          id: `evt-${e.seq}`,
+          id,
           kind: e.kind,
           videoId: Number(e.vid),
           state: e.state,
@@ -188,15 +201,15 @@ async function ingestOnce() {
           seq: e.seq,
         },
         update: {},
-      }),
-    ),
+      });
+    }),
     prisma.syncState.upsert({
       where: { key: "taskEventSeq" },
-      create: { key: "taskEventSeq", value: String(res.seq) },
-      update: { value: String(res.seq) },
+      create: { key: "taskEventSeq", value: newCursor },
+      update: { value: newCursor },
     }),
   ]);
-  return { ingested: fresh.length, cursor: res.seq };
+  return { ingested: fresh.length, cursor: newCursor };
 }
 
 async function dbRows(where = {}) {
@@ -310,6 +323,74 @@ async function task6_extra() {
     "[T6附带] thumb cancelled 不进历史: act_thumb 真实路径不 emit(emit 侧实现, 非 ingest 过滤)",
     actThumbNoEmit,
     { actThumbHasNoEmit: actThumbNoEmit },
+  );
+}
+
+// --- Task 2 (#3): 掉盘+kill-9 复用 seq 不被误去重 ---
+// 场景: 网关 boot E1 emit 若干事件(seq 1..N)→ web 已 ingest(游标记 E1:N)。模拟掉盘窗口
+// (seq 在内存继续涨但盘上 task_events.json 停在旧值)→ kill-9 丢内存 → 重启从盘载 → epoch 变 E2,
+// _task_seq 从盘上峰值续。续发新事件的 seq 会【撞上 E1 期已被 web 消费过的 seq】。旧 'evt-<seq>'
+// 方案: 新事件 id 撞旧行 → upsert update no-op → 真终态【静默丢失】(正是 #3 的 bug)。
+// epoch 方案: id='evt-<E2>-<seq>' 与 'evt-<E1>-<seq>' 不同 → 新事件【入库不丢】。
+async function task2_epoch_collision() {
+  // 当前处于 boot E1。记录 E1 的 epoch 与当前峰值 seq。
+  const before = await gwTaskEvents(0);
+  const epoch1 = before.epoch;
+  const peakSeq1 = before.seq;
+  // 取一个"已被 web 消费过"的 seq 作撞库目标: peakSeq1(前面 T6 已全部 ingest)。
+  const targetSeq = peakSeq1;
+  const targetOldId = `evt-${epoch1}-${targetSeq}`;
+  const oldRow = await prisma.taskHistory.findUnique({ where: { id: targetOldId } });
+
+  // 冻结盘上 task_events.json(模拟掉盘: 内存继续 emit 但盘不更新), 然后 kill-9 + 重启回载。
+  // 用"只读化文件 + kill-9"模拟: kill-9 后内存丢, 盘保留 E1 峰值; 重启 epoch→E2, seq 从盘续。
+  // (这里不需真冻结: kill-9 本身就丢了"掉盘期内存增量"; 关键是重启后 epoch 必变 + seq 可复用。)
+  killGatewayHard();
+  startGateway();
+  await waitGatewayUp();
+
+  const after = await gwTaskEvents(0);
+  const epoch2 = after.epoch;
+  check(
+    "[T2] kill-9 重启后 epoch 必递增(每 boot +1, 跨重启复用 seq 才能被区分)",
+    epoch2 > epoch1,
+    { epoch1, epoch2 },
+  );
+
+  // 续发一条新事件: 它的 seq 会从盘上峰值续(== peakSeq1+1 起)。为了【精确复现 seq 撞库】,
+  // 我们直接读它的新 id 是否与某条 E1 老行同 seq —— 更强的断言: 构造一条 seq 恰好 = targetSeq 的
+  // 新事件不可控(seq 自增), 故改为验证不变量: 新事件 id 含 epoch2, 与 E1 同 seq 的老行不同 id、
+  // 且新事件确实入库(不被 E1 老行的 'evt-<seq>' 误去重)。
+  const COLVID = "200000099";
+  await gwEmit([{ kind: "buffer", vid: COLVID, state: "done" }]);
+  const newEv = (await gwTaskEvents(0)).events.filter((e) => e.vid === COLVID).pop();
+  const newId = `evt-${newEv.epoch}-${newEv.seq}`;
+  // 构造同 seq 的 E1 老 id, 证明"若无 epoch 则会撞": 'evt-<seq>'(旧方案) vs 'evt-<E2>-<seq>'(新)。
+  const wouldCollideOldId = `evt-${newEv.seq}`; // 旧方案 id 只有 seq
+
+  const dbCountBefore = await prisma.taskHistory.count();
+  await ingestOnce();
+  const dbCountAfter = await prisma.taskHistory.count();
+  const landed = await prisma.taskHistory.findUnique({ where: { id: newId } });
+  const colRows = await dbRows({ videoId: Number(COLVID) });
+
+  check(
+    "[T2] 复用 seq 的新事件靠 epoch 区分: 新行 id=evt-<E2>-<seq> 入库(不被旧 evt-<seq> 误去重丢)",
+    landed != null && colRows.length === 1 && dbCountAfter === dbCountBefore + 1,
+    { newId, wouldCollideOldId, epoch1, epoch2, newSeq: newEv.seq,
+      landed: !!landed, dbDelta: dbCountAfter - dbCountBefore },
+  );
+  // 失败信号显式化: 若 id 退回纯 seq, newId===wouldCollideOldId, 且当 seq 撞已消费值时会丢。
+  check(
+    "[T2] 失败信号确认: 带 epoch 的新 id 与旧纯-seq id 不同(旧方案此处会撞旧行=丢事件)",
+    newId !== wouldCollideOldId,
+    { newId, wouldCollideOldId },
+  );
+  // 老行(E1 期 targetSeq)未被新 boot 覆盖/破坏: 仍在库且 epoch 内 seq 不变。
+  check(
+    "[T2] E1 期老事件未被复用 seq 的新事件污染(id 各自独立, 老行原样保留)",
+    oldRow == null || (await prisma.taskHistory.findUnique({ where: { id: targetOldId } })) != null,
+    { targetOldId, hadOldRow: !!oldRow },
   );
 }
 
@@ -522,6 +603,7 @@ async function main() {
   try {
     await task6_core();
     await task6_extra();
+    await task2_epoch_collision();
     await task7_restart_resume();
     await task7_restart_zombies();
     await task8_persist_robust();

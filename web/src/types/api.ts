@@ -174,16 +174,19 @@ export interface TaskItem {
 // ---- 任务事件日志(网关 /api/task_events)：真终态转换点 append,带单调 seq ----
 // 网关单条事件。vid 为字符串(网关 str(vid));写库时 videoId=Number(ev.vid)、at=new Date(ev.ts*1000)。
 export interface TaskEvent {
-  seq: number; // 全局单调序号(跨重启不归零)
+  epoch: number; // per-boot epoch(每次网关启动 +1);事件行 id='evt-<epoch>-<seq>'(#3)
+  seq: number; // epoch 内单调序号(跨重启可复用,靠 epoch 区分行)
   kind: string; // 'buffer' | 'thumb' | 'prefetch'
   vid: string; // 网关侧 str(vid)
   state: string; // buffer: done|error|paused|cancelled / thumb: done|error / prefetch: done
   reason: string | null; // 仅 error 填(最多 200 字)
   ts: number; // time.time() 浮点秒
 }
-// 网关 /api/task_events?since=N 的返回:seq=当前峰值序号,events=seq>N 的事件(升序)。
+// 网关 /api/task_events?since=N 的返回:epoch=本 boot epoch,seq=当前峰值序号,
+// events=本 epoch 内 seq>N + 任何老 epoch 残留事件(各自带 epoch,web 按 id 去重)。
 export interface TaskEventsResp {
   events: TaskEvent[];
+  epoch: number;
   seq: number;
 }
 

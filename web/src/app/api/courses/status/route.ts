@@ -390,45 +390,67 @@ async function mirror(gw: GwStatus) {
   }
 }
 
-// 事件日志增量拉取:读游标 since=SyncState['taskEventSeq'] → GET /api/task_events?since
-// → fresh=events.filter(seq>since) → 事务[逐行 upsert 事件('evt-'+seq 幂等) + upsert 游标=res.seq]。
-// 网关掉线/异常:catch 静默,since 不动,下轮续传(不漏不重;靠单调 seq + id='evt-'+seq 幂等 upsert)。
+// 事件日志增量拉取:游标 = SyncState['taskEventSeq'] = "<epoch>:<seq>"(#3)。
+// 解析 [curEpoch, curSeq] → 若网关 epoch 变了(kill-9 重启,epoch 必 +1)就从 since=0 重拉本
+// epoch(evt-<epoch>-<seq> 是全新 id,幂等 upsert 不会重复计数);epoch 不变则 since=curSeq 续传。
+// 行 id 用 'evt-<epoch>-<seq>':掉盘期复用的 seq 在新 epoch 下是另一行,web 不再误去重丢真终态。
+// 网关掉线/异常:catch 静默,游标不动,下轮续传(不漏不重;靠 (epoch,seq) + 幂等 upsert)。
 async function ingestTaskEvents() {
   try {
     // 启动一次清理 + 回填(90 天清理 / 存量噪声 / full→done),与拉取解耦但同处触发。
     await initSyncOnce();
 
-    // 读游标(无则 0)。SyncState 可能尚未建表(首次升级前)→ 防御性 catch 退回 0。
-    let since = 0;
+    // 读游标 "<epoch>:<seq>"(无则 "0:0")。SyncState 可能尚未建表 → 防御性 catch 退回 0:0。
+    // 兼容旧游标(纯数字 "<seq>",升级前写的):无 ":" 时视作 epoch=0、seq=该数字,
+    // 这样升级后第一次拉取必触发 epoch 翻转重拉(旧 evt-<seq> 行残留无害,新行用新 id)。
+    let curEpoch = 0;
+    let curSeq = 0;
     try {
       const cur = await prisma.syncState.findUnique({ where: { key: "taskEventSeq" } });
-      if (cur) since = Number(cur.value) || 0;
-    } catch { /* 表不存在/查询失败,since 保持 0 */ }
-
-    const res = await gatewayGet<TaskEventsResp>(`/api/task_events?since=${since}`, 10000);
-    // R10 可观测:网关日志被重置(seq 回退)能看见,不静默吞。
-    if (res.seq < since) console.warn("网关事件日志疑似被重置");
-
-    // R10 双保险:即便网关 seq 单调,web 仍按 seq>since 过滤 + 'evt-'+seq 幂等 upsert。
-    const fresh = (res.events ?? []).filter((e) => e.seq > since);
-    if (fresh.length === 0) {
-      // 没有新事件:仍把游标推进到网关当前 seq(若它更大),减少下轮重复传输。
-      if (res.seq > since) {
-        await prisma.syncState.upsert({
-          where: { key: "taskEventSeq" },
-          create: { key: "taskEventSeq", value: String(res.seq) },
-          update: { value: String(res.seq) },
-        });
+      if (cur) {
+        const parts = String(cur.value).split(":");
+        if (parts.length === 2) {
+          curEpoch = Number(parts[0]) || 0;
+          curSeq = Number(parts[1]) || 0;
+        } else {
+          curSeq = Number(cur.value) || 0; // 旧格式:纯 seq,epoch 视作 0
+        }
       }
+    } catch { /* 表不存在/查询失败,游标保持 0:0 */ }
+
+    // epoch 未知前先按 curSeq 拉一次(若 epoch 翻转,本轮取到的 res.epoch 与 curEpoch 不符,
+    // 下面把 since 归 0 重过滤——deque 内本 epoch 全量已随响应带回,无需二次请求)。
+    const res = await gatewayGet<TaskEventsResp>(`/api/task_events?since=${curSeq}`, 10000);
+
+    // 防御:极旧网关无 epoch 字段时退化为 0(本 task 与网关同次部署,正常永远有 epoch)。
+    const resEpoch = Number.isFinite(res.epoch) ? res.epoch : 0;
+    // epoch 翻转(网关重启)→ since 归 0:本 epoch 从头重拉,旧事件靠 id 幂等不重复计数。
+    const epochFlip = resEpoch !== curEpoch;
+    const since = epochFlip ? 0 : curSeq;
+    if (!epochFlip && res.seq < curSeq) console.warn("网关事件日志疑似被重置(同 epoch seq 回退)");
+
+    // fresh = 排除"本 epoch 内 seq<=since 的已消费事件";其余(本 epoch 新事件 + 任何老 epoch
+    // 残留事件)都进 upsert,按 id='evt-<epoch>-<seq>' 幂等去重。
+    const fresh = (res.events ?? []).filter((e) => !((e.epoch ?? 0) === resEpoch && e.seq <= since));
+    const newCursor = `${resEpoch}:${res.seq}`;
+
+    if (fresh.length === 0) {
+      // 没有新事件:仍把游标推进到网关当前 (epoch, seq),减少下轮重复传输。
+      await prisma.syncState.upsert({
+        where: { key: "taskEventSeq" },
+        create: { key: "taskEventSeq", value: newCursor },
+        update: { value: newCursor },
+      });
       return;
     }
 
-    // 事件行用 upsert(按 id='evt-'+seq 幂等)而非 createMany({skipDuplicates}):
+    // 事件行用 upsert(按 id='evt-<epoch>-<seq>' 幂等)而非 createMany({skipDuplicates}):
     // SQLite provider 的 Prisma createMany 不支持 skipDuplicates(类型为 never)。
-    // 同一事件再次拉到(并发轮询/续传重叠)时 upsert 走 update no-op,不抛 P2002、不毒化游标。
-    // fresh 通常仅个位数(只含 seq>since 的新事件),逐行 upsert 成本可忽略。
+    // 同一事件再次拉到(并发轮询/续传重叠/epoch 翻转重拉)时 upsert 走 update no-op,
+    // 不抛 P2002、不毒化游标。TaskHistory.seq 仍存 epoch 内 seq(列语义不变)。
     await prisma.$transaction([
       ...fresh.map((e) => {
+        const id = `evt-${e.epoch ?? 0}-${e.seq}`;
         const row = {
           kind: e.kind,
           videoId: Number(e.vid),
@@ -438,24 +460,24 @@ async function ingestTaskEvents() {
           seq: e.seq,
         };
         return prisma.taskHistory.upsert({
-          where: { id: `evt-${e.seq}` },
-          create: { id: `evt-${e.seq}`, ...row },
+          where: { id },
+          create: { id, ...row },
           update: {}, // 已存在则不动(幂等);事件是不可变的,无需覆盖
         });
       }),
       prisma.syncState.upsert({
         where: { key: "taskEventSeq" },
-        create: { key: "taskEventSeq", value: String(res.seq) },
-        update: { value: String(res.seq) },
+        create: { key: "taskEventSeq", value: newCursor },
+        update: { value: newCursor },
       }),
     ]);
   } catch {
-    /* 网关掉线/事务失败:游标不动,下轮按同一 since 续传(不漏不重) */
+    /* 网关掉线/事务失败:游标不动,下轮按同一 (epoch,seq) 续传(不漏不重) */
   }
 }
 
-// 回填路径用的历史行:随机 id + now(seq=NULL,@unique 允许多 NULL)。
-// 事件路径不用此 helper(它用 id='evt-'+seq + at=new Date(ts*1000),见 ingestTaskEvents)。
+// 回填路径用的历史行:随机 id + now(seq=NULL)。
+// 事件路径不用此 helper(它用 id='evt-<epoch>-<seq>' + at=new Date(ts*1000),见 ingestTaskEvents)。
 function mkHistRow(kind: string, videoId: number, state: string, reason?: string | null) {
   return {
     id: `${kind}-${videoId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
