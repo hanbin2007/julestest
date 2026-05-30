@@ -177,21 +177,25 @@ function renderStage() {
 
 ## 5. 验收(CLAUDE.md 硬要求)
 
-### 5.1 node 单测 `web/scripts/_e2e_ink_processor.mjs`(纯数学,无浏览器)
+**工具链事实**:仓库无 `tsx`/`ts-node`,`node --test` 只跑纯 JS,且现有 `_e2e_*.mjs` 从不 import TS 源(只 fetch 运行中的服务)。源码用无扩展名相对导入(`./oneEuro`),node 原生 strip-types 解析不了。故所有断言走 **Playwright 浏览器 `page.evaluate`**,直接打**实际打包后的模块**(经页面 `window.__inktune` 测试钩子暴露)——这比纯 node 跑一份"可能漂移的拷贝"保真度更高,且与本仓库 `smoke.mjs` 的浏览器测试惯例一致。
+
+单一脚本 `web/scripts/_e2e_ink_tune.mjs`(沿用 `smoke.mjs` 的 `playwright-core` + 本机 Chrome 无头,不用 Playwright MCP),分两组断言:
+
+### 5.1 处理器数学(`page.evaluate` 调打包后的 `InkStrokeProcessor`)
 - **确定性**:同一组合成原始样本 + 同 cfg,跑两次 → 输出逐位相同。
 - **参数真生效(失败信号)**:两组明显不同的 cfg(如 `minSampleDist` 0.1 vs 3,或 `posMinCutoff` 0.5 vs 4)→ 输出样本数/坐标明显不同。若"不同 cfg 输出相同"则判定失败(证明输入阶段重算没生效 / 参数没接上)。
 - **流式==一次性(保真)**:把同一原始流分批 `push` vs 一次 `processAll` → 结果相同(证明生产流式路径与调参台一次性路径等价)。
 
-### 5.2 smoke e2e `web/scripts/_e2e_ink_tune.mjs`(沿用 `smoke.mjs` 的无头浏览器,不用 Playwright MCP)
-1. 打开 `/ink-tune`。
-2. **导入**一组已知原始笔画 JSON(经导入路径,顺带验证导入)→ 截图留证,断言 canvas 非空白。
-3. 抓 canvas 像素 hash/采样基线,然后分别验证两阶段都作用于**已录笔画**(这正是"看到之前笔画变化"的核心):
-   - **渲染阶段**:`pen.thinning` 0→0.9(或 `taperEnd` 0→4)→ 像素**必须变化**。
-   - **输入阶段**:`minSampleDist` 0.1→3(或 `posMinCutoff` 0.5→4)→ 像素**必须变化**(证明 `processAll` 对已录原始数据重跑了输入阶段,不是只换了渲染)。
-   - 任一不变 = 重算没作用于已存笔画 = **失败**。
-4. **reload** 页面 → 断言笔画集 + 候选参数仍在(localStorage 持久化的"跨重启"等价验证)。
-5. (A/B)开"对比基线" → 断言渲染像素较关闭时变化(基线幽灵层出现)。
-6. 同脚本**连跑两次都通过**(警惕 localStorage 残留导致的 stateful 副作用;脚本开头清相关 key 或用独立断言)。
+### 5.2 页面 UI / 像素 / 持久化
+1. 打开 `/ink-tune`,等 `window.__inktune` 就绪。
+2. **导入**一组已知原始笔画 JSON(经 `window.__inktune.importBundle`,顺带验证导入路径)→ 截图留证,断言 stage canvas 非空白(`toDataURL` 长度 > 阈值 / 有非透明像素)。
+3. 抓 stage canvas `toDataURL` 基线,然后分别验证两阶段都作用于**已录笔画**(这正是"看到之前笔画变化"的核心):
+   - **渲染阶段**:`pen.thinning` 0→0.9(或 `taperEnd` 0→4)→ `toDataURL` **必须变化**。
+   - **输入阶段**:`minSampleDist` 0.1→3(或 `posMinCutoff` 0.5→4)→ `toDataURL` **必须变化**(证明 `processAll` 对已录原始数据重跑了输入阶段,不是只换了渲染)。
+   - 任一不变 = 重算没作用于已存笔画 = **失败**。(合成笔画须够抖/够长,使两阶段都产生肉眼/像素级差异。)
+4. **reload** 页面 → 断言笔画集计数 + 候选参数仍在(localStorage 持久化的"跨重启"等价验证)。
+5. (A/B)开"对比基线" → 断言 `toDataURL` 较关闭时变化(基线幽灵层出现)。
+6. 同脚本**连跑两次都通过**:每次用全新 Playwright context(localStorage 天然干净);reload-持久化断言在**同一** context 内做。
 
 ### 5.3 真机口径
 台子部署到 `:3000` 后,iPad Apple Pencil 实写若干代表性笔画(写字/画圈/快速甩笔/轻重压感)→ 调参 → 观察之前笔画即时变化 → 导出留存 → 重开续上。
@@ -202,6 +206,6 @@ function renderStage() {
 - 不做参数预设库(老页的 `PRESETS` 已随老页删除,且与 main 字段不符);需要时手动导入 JSON 即可。
 
 ## 7. 涉及文件
-- 新增:`web/src/components/annotate/inkProcessor.ts`、`web/src/app/ink-tune/page.tsx`、`web/scripts/_e2e_ink_processor.mjs`、`web/scripts/_e2e_ink_tune.mjs`。
+- 新增:`web/src/components/annotate/inkProcessor.ts`、`web/src/app/ink-tune/page.tsx`(含 `window.__inktune` 测试钩子)、`web/scripts/_e2e_ink_tune.mjs`。
 - 改造:`web/src/components/annotate/AnnotationLayer.tsx`(抽 `InkStrokeProcessor` + 加 `onCommitStroke` prop + 累积原始样本)。
 - 只读复用:`inkTuning.ts`、`oneEuro.ts`、`inputPipeline.ts`、`renderEngine.ts`、`model.ts`、`useAnnotation.ts`。
