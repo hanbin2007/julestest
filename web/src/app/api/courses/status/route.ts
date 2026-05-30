@@ -3,6 +3,15 @@ import { gatewayGet, gatewayPost } from "@/lib/gateway";
 import { getCatalogRollup, type VidMeta } from "@/lib/catalogRollup";
 import { computeDedupedTotals } from "@/lib/statusTotals";
 import { normalizeThumbState } from "@/lib/thumbStatus";
+import {
+  parseCursor,
+  formatCursor,
+  planIngest,
+  filterFreshEvents,
+  eventRowId,
+  normalizeEventProductId,
+  resolveTaskCourse,
+} from "@/lib/taskEvents";
 import type { CoursesStatus, CourseStatus, GwStatus, TaskEventsResp, TaskItem, VidStatusDetail } from "@/types/api";
 
 export const runtime = "nodejs";
@@ -305,20 +314,22 @@ async function build(): Promise<CoursesStatus> {
       orderBy: { at: "desc" },
       take: 500,
     });
+    // #15 回退边界: 共享讲(同 videoId 跨课)按 (productId,videoId) 归属。byCourseVid 命中即正确;
+    // 未命中(讲已从该课移除/课改目录)时, 按 h.productId 直接查 Course.name(courseNameByPid)而非回退
+    // byVid——byVid 对共享讲是「后写覆盖」, 回退会把这条历史归到另一门仍持有同 videoId 的课(归错课)。
+    // 仅当那门课也删了(courseNameByPid 也无)才最后回退 byVid 兜底。courses 即 getCatalogRollup 的
+    // 课列表, 直接取 productId→name(无需再查 prisma)。
+    const courseNameByPid = new Map<number, string>(courses.map((c) => [c.productId, c.name]));
     allTasks = history.map((h) => {
-      // #15: 共享讲(同 videoId 跨课)按 (productId,videoId) 取课程名才归属正确;
-      // h.productId 存在则优先走 byCourseVid, 取不到/为 NULL(存量行)再回退 byVid(后写覆盖)。
-      const m =
-        (h.productId != null ? byCourseVid.get(`${h.productId}:${h.videoId}`) : undefined) ??
-        byVid.get(h.videoId);
+      const c = resolveTaskCourse({ videoId: h.videoId, productId: h.productId }, byCourseVid, byVid, courseNameByPid);
       const b = perVidGw[String(h.videoId)];
       // 同 mk():仅 buffer/prefetch 附段数,避免 thumb 任务误显示 "完成 19/243 段"。
       const showSegs = h.kind !== "thumb";
       return {
         vid: h.videoId,
-        title: m?.title ?? `视频 ${h.videoId}`,
-        courseName: m?.courseName ?? "未知课程",
-        courseId: m?.courseId ?? 0,
+        title: c.title ?? `视频 ${h.videoId}`,
+        courseName: c.courseName,
+        courseId: c.courseId,
         kind: h.kind as TaskItem["kind"],
         state: h.state as TaskItem["state"],
         cached: showSegs ? b?.cached : undefined,
@@ -414,9 +425,11 @@ async function mirror(gw: GwStatus) {
 }
 
 // 事件日志增量拉取:游标 = SyncState['taskEventSeq'] = "<epoch>:<seq>"(#3)。
-// 解析 [curEpoch, curSeq] → 若网关 epoch 变了(kill-9 重启,epoch 必 +1)就从 since=0 重拉本
-// epoch(evt-<epoch>-<seq> 是全新 id,幂等 upsert 不会重复计数);epoch 不变则 since=curSeq 续传。
+// 解析 [curEpoch, curSeq] → epoch 翻转(kill-9 重启,epoch 必 +1)靠 evt-<epoch>-<seq> 全新 id 幂等
+// 去重, 老事件随响应带回(网关过滤保留 epoch!=cur 的残留);epoch 不变则 since=curSeq 续传。
 // 行 id 用 'evt-<epoch>-<seq>':掉盘期复用的 seq 在新 epoch 下是另一行,web 不再误去重丢真终态。
+// corrupt 治本(planIngest.refetchFromZero):网关日志损坏重启 → seq 归 0(< curSeq), 当前 epoch 低 seq
+// 新事件会被首个 `?since=curSeq` 请求在网关侧过滤丢; 检测到 seq 回退 → 以 `?since=0` 重新请求拉回。
 // 网关掉线/异常:catch 静默,游标不动,下轮续传(不漏不重;靠 (epoch,seq) + 幂等 upsert)。
 async function ingestTaskEvents() {
   try {
@@ -424,38 +437,37 @@ async function ingestTaskEvents() {
     await initSyncOnce();
 
     // 读游标 "<epoch>:<seq>"(无则 "0:0")。SyncState 可能尚未建表 → 防御性 catch 退回 0:0。
-    // 兼容旧游标(纯数字 "<seq>",升级前写的):无 ":" 时视作 epoch=0、seq=该数字,
-    // 这样升级后第一次拉取必触发 epoch 翻转重拉(旧 evt-<seq> 行残留无害,新行用新 id)。
-    let curEpoch = 0;
-    let curSeq = 0;
+    // parseCursor(@/lib/taskEvents) 兼容旧纯数字游标(epoch 视作 0),与测试同源一份(#14)。
+    let cur = { epoch: 0, seq: 0 };
     try {
-      const cur = await prisma.syncState.findUnique({ where: { key: "taskEventSeq" } });
-      if (cur) {
-        const parts = String(cur.value).split(":");
-        if (parts.length === 2) {
-          curEpoch = Number(parts[0]) || 0;
-          curSeq = Number(parts[1]) || 0;
-        } else {
-          curSeq = Number(cur.value) || 0; // 旧格式:纯 seq,epoch 视作 0
-        }
-      }
+      const row = await prisma.syncState.findUnique({ where: { key: "taskEventSeq" } });
+      if (row) cur = parseCursor(row.value);
     } catch { /* 表不存在/查询失败,游标保持 0:0 */ }
 
-    // epoch 未知前先按 curSeq 拉一次(若 epoch 翻转,本轮取到的 res.epoch 与 curEpoch 不符,
-    // 下面把 since 归 0 重过滤——deque 内本 epoch 全量已随响应带回,无需二次请求)。
-    const res = await gatewayGet<TaskEventsResp>(`/api/task_events?since=${curSeq}`, 10000);
-
+    // 先按 curSeq 拉一次。res.epoch/res.seq 回来后用 planIngest 判定本轮策略(epoch 翻转/corrupt 复位)。
+    let res = await gatewayGet<TaskEventsResp>(`/api/task_events?since=${cur.seq}`, 10000);
     // 防御:极旧网关无 epoch 字段时退化为 0(本 task 与网关同次部署,正常永远有 epoch)。
-    const resEpoch = Number.isFinite(res.epoch) ? res.epoch : 0;
-    // epoch 翻转(网关重启)→ since 归 0:本 epoch 从头重拉,旧事件靠 id 幂等不重复计数。
-    const epochFlip = resEpoch !== curEpoch;
-    const since = epochFlip ? 0 : curSeq;
-    if (!epochFlip && res.seq < curSeq) console.warn("网关事件日志疑似被重置(同 epoch seq 回退)");
+    let resEpoch = Number.isFinite(res.epoch) ? res.epoch : 0;
+    let plan = planIngest(cur, resEpoch, res.seq);
+
+    // corrupt 治本(web 侧): 网关 task_events 损坏重启 → seq 归 0(< curSeq) → 新事件是【当前 epoch
+    // 的低 seq】, 首个 `?since=curSeq` 请求把它们在网关侧(过滤 e.seq>since OR e.epoch!=cur)挡掉了,
+    // 本地二次过滤救不回(它们根本没进响应)。检测到 seq 回退 → 用 `?since=0` 重新请求, 让网关把当前
+    // epoch 从头全量带回。重复事件靠 id='evt-<epoch>-<seq>' 幂等去重, 不会重复计数。
+    if (plan.refetchFromZero) {
+      console.warn(
+        `网关事件日志疑似被重置(seq 回退 ${cur.seq}→${res.seq}, epoch ${cur.epoch}→${resEpoch}); 以 since=0 重拉避免丢当前 epoch 低 seq 事件`,
+      );
+      res = await gatewayGet<TaskEventsResp>(`/api/task_events?since=0`, 10000);
+      resEpoch = Number.isFinite(res.epoch) ? res.epoch : 0;
+      // 重请求后用最新 res 重新规划(此时 since=0, 当前 epoch 低 seq 事件不再被过滤)。
+      plan = planIngest(cur, resEpoch, res.seq);
+    }
 
     // fresh = 排除"本 epoch 内 seq<=since 的已消费事件";其余(本 epoch 新事件 + 任何老 epoch
     // 残留事件)都进 upsert,按 id='evt-<epoch>-<seq>' 幂等去重。
-    const fresh = (res.events ?? []).filter((e) => !((e.epoch ?? 0) === resEpoch && e.seq <= since));
-    const newCursor = `${resEpoch}:${res.seq}`;
+    const fresh = filterFreshEvents(res.events ?? [], resEpoch, plan.since);
+    const newCursor = formatCursor(resEpoch, res.seq);
 
     if (fresh.length === 0) {
       // 没有新事件:仍把游标推进到网关当前 (epoch, seq),减少下轮重复传输。
@@ -473,10 +485,9 @@ async function ingestTaskEvents() {
     // 不抛 P2002、不毒化游标。TaskHistory.seq 仍存 epoch 内 seq(列语义不变)。
     await prisma.$transaction([
       ...fresh.map((e) => {
-        const id = `evt-${e.epoch ?? 0}-${e.seq}`;
+        const id = eventRowId(e.epoch, e.seq);
         // #15: 写入事件携带的 productId(共享讲归属)。网关从 video_meta 盖上,可能缺省/为 null。
-        const pid =
-          typeof e.productId === "number" && Number.isFinite(e.productId) ? e.productId : null;
+        const pid = normalizeEventProductId(e.productId);
         const row = {
           kind: e.kind,
           videoId: Number(e.vid),

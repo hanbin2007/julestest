@@ -22,6 +22,16 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { PrismaClient } from "@prisma/client";
+// 同源真函数(#14/#15): 不再手抄复刻 route.ts 的 ingest/课程名解析逻辑。Node 22 原生 import .ts。
+import {
+  parseCursor,
+  formatCursor,
+  planIngest,
+  filterFreshEvents,
+  eventRowId,
+  normalizeEventProductId,
+  resolveTaskCourse,
+} from "../src/lib/taskEvents.ts";
 
 const __filename = fileURLToPath(import.meta.url);
 const WEB_DIR = path.resolve(path.dirname(__filename), "..");
@@ -128,17 +138,19 @@ async function gwTaskEvents(since) {
   return r.json();
 }
 
-// ---- web 侧 ingest(复刻 status/route.ts ingestTaskEvents, 含 productId 写入) ----
+// ---- web 侧 ingest(直接用 route.ts 同源 lib: parseCursor/planIngest/filterFreshEvents/...)----
+// 与生产 ingestTaskEvents 走同一份纯逻辑, 不再手抄复刻(改 .ts 即改这里, 杜绝漂移)。
 async function ingestOnce() {
   const curRaw = (await prisma.syncState.findUnique({ where: { key: "taskEventSeq" } }))?.value ?? "0:0";
-  const parts = String(curRaw).split(":");
-  const curEpoch = parts.length === 2 ? Number(parts[0]) || 0 : 0;
-  const curSeq = parts.length === 2 ? Number(parts[1]) || 0 : Number(curRaw) || 0;
-  const res = await gwTaskEvents(curSeq);
-  const epochFlip = res.epoch !== curEpoch;
-  const since = epochFlip ? 0 : curSeq;
-  const fresh = (res.events ?? []).filter((e) => !(e.epoch === res.epoch && e.seq <= since));
-  const newCursor = `${res.epoch}:${res.seq}`;
+  const cur = parseCursor(curRaw);
+  let res = await gwTaskEvents(cur.seq);
+  let plan = planIngest(cur, res.epoch, res.seq);
+  if (plan.refetchFromZero) {
+    res = await gwTaskEvents(0); // corrupt 复位 → since=0 重拉(治本)
+    plan = planIngest(cur, res.epoch, res.seq);
+  }
+  const fresh = filterFreshEvents(res.events ?? [], res.epoch, plan.since);
+  const newCursor = formatCursor(res.epoch, res.seq);
   if (fresh.length === 0) {
     await prisma.syncState.upsert({
       where: { key: "taskEventSeq" },
@@ -149,9 +161,8 @@ async function ingestOnce() {
   }
   await prisma.$transaction([
     ...fresh.map((e) => {
-      const id = `evt-${e.epoch}-${e.seq}`;
-      const pid =
-        typeof e.productId === "number" && Number.isFinite(e.productId) ? e.productId : null;
+      const id = eventRowId(e.epoch, e.seq);
+      const pid = normalizeEventProductId(e.productId);
       return prisma.taskHistory.upsert({
         where: { id },
         create: {
@@ -176,25 +187,23 @@ async function ingestOnce() {
   return { ingested: fresh.length };
 }
 
-// 复刻 status/route.ts 的课程名解析: h.productId 存在则优先 byCourseVid((pid,vid)),
-// 否则回退 byVid(后写覆盖)。两张索引构造与 catalogRollup.buildKeyMaps 一致。
+// 测试用的 key 索引(与 catalogRollup.buildKeyMaps 同形, 仅取本测试需要的最小字段)。
 function buildKeyMaps(courses) {
   const byVid = new Map();
   const byCourseVid = new Map();
   for (const c of courses) {
     for (const v of c.vids) {
-      const meta = { courseId: c.productId, courseName: c.name };
+      const meta = { courseId: c.productId, courseName: c.name, title: null };
       byVid.set(v.videoId, meta); // 后写覆盖
       byCourseVid.set(`${c.productId}:${v.videoId}`, meta);
     }
   }
   return { byVid, byCourseVid };
 }
-function resolveCourseName(h, byVid, byCourseVid) {
-  const m =
-    (h.productId != null ? byCourseVid.get(`${h.productId}:${h.videoId}`) : undefined) ??
-    byVid.get(h.videoId);
-  return m?.courseName ?? "未知课程";
+// 课程名解析走 route.ts 同源 resolveTaskCourse(#15): byCourseVid 命中→正确课; 未命中按 productId
+// 查 Course.name(courseNameByPid)而非回退 byVid; 课也删了才最后回退 byVid。
+function resolveCourseName(h, byVid, byCourseVid, courseNameByPid = new Map()) {
+  return resolveTaskCourse(h, byCourseVid, byVid, courseNameByPid).courseName;
 }
 
 // ================= 测试主体 =================
@@ -259,6 +268,25 @@ async function task8_shared_lesson_attribution() {
     "[T8] 回退: productId=NULL 的存量行走 byVid(不崩, 解析到后写课程)",
     legacyResolved === "课程Y",
     { legacyResolved },
+  );
+
+  // #15 回退边界: 讲已从课X移除(byCourseVid 无 "PX:vid")但课X仍在 → 按 productId 查 Course.name
+  // 归到课X, 不回退 byVid 误归课Y。courseNameByPid 模拟 prisma 查 Course.name。
+  const byCourseVidMissingX = new Map([[`${PY}:${SHARED_VID}`, { courseId: PY, courseName: "课程Y", title: null }]]);
+  const courseNameByPid = new Map([[PX, "课程X"], [PY, "课程Y"]]);
+  const boundaryResolved = resolveCourseName(h, byVid, byCourseVidMissingX, courseNameByPid);
+  check(
+    "[T8 #15回退边界] 讲从课X移除(byCourseVid miss)但课X仍在 → 按 productId 归课X(不回退 byVid 误归课Y)",
+    boundaryResolved === "课程X" && boundaryResolved !== "课程Y",
+    { boundaryResolved, want: "课程X", byVidWrong: byVidName },
+  );
+  // 课X也删了(courseNameByPid 无 PX) → 才最后回退 byVid 到课Y(best-effort 不崩)。
+  const courseNameByPidNoX = new Map([[PY, "课程Y"]]);
+  const lastResort = resolveCourseName(h, byVid, byCourseVidMissingX, courseNameByPidNoX);
+  check(
+    "[T8 #15回退边界] 课X也删了(Course.name 也无) → 最后回退 byVid 到课Y(best-effort)",
+    lastResort === "课程Y",
+    { lastResort },
   );
 }
 

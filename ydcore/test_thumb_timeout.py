@@ -21,8 +21,12 @@ from ydcore.gateway import Gateway
 
 
 def _mk_gateway(cache_dir):
-    return Gateway({"User-Agent": "test"}, session={"User-Agent": "test"},
-                   prefetch=False, port=0, cache_dir=cache_dir)
+    """纯内存 seam: Gateway.__new__ + _init_persist_min, 不起任何 worker 线程
+    (生产 Gateway(...) 会拉起 thumb/buffer/flush 守护线程, 单测里全是泄漏)。
+    本测试只直接调 _gen_thumbs_inner / start_thumbs, 不依赖 worker。"""
+    gw = Gateway.__new__(Gateway)
+    gw._init_persist_min(cache_dir, ok=True)
+    return gw
 
 
 class _FakeFfmpegMixin:
@@ -51,14 +55,19 @@ class ThumbTimeoutTest(_FakeFfmpegMixin, unittest.TestCase):
         # 超时常量调到 2s, 否则真等默认 120s。
         self._old_env_to = os.environ.get("YD_THUMB_FFMPEG_TIMEOUT")
         os.environ["YD_THUMB_FFMPEG_TIMEOUT"] = "2"
-        # 隔离 thumb_dir, 否则真实构造默认指向生产 ~/.youdao_course/thumbs([[julestest-no-prod-db-writes]])。
+        # 隔离 thumb_dir([[julestest-no-prod-db-writes]]): _init_persist_min seam 本就把
+        # thumb_dir 落到 cache_dir/_thumb, 这里再兜一层 module 级 THUMB_DIR 不碰生产。
         self._old_thumb_dir = gwmod.THUMB_DIR
         gwmod.THUMB_DIR = os.path.join(self.tmp, "_iso_thumbs")
+        # play_headers 是模块级符号; 个别测试 stub 掉它避免网络, 必须在 tearDown 还原,
+        # 否则污染同进程后续测试(测试卫生)。setUp 先记原值。
+        self._old_play_headers = gwmod.play_headers
 
     def tearDown(self):
         import shutil
         self._restore_path()
         gwmod.THUMB_DIR = self._old_thumb_dir
+        gwmod.play_headers = self._old_play_headers  # 还原 stub, 别污染后续测试
         if self._old_env_to is None:
             os.environ.pop("YD_THUMB_FFMPEG_TIMEOUT", None)
         else:

@@ -2,8 +2,10 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 // 测试目标：catalogRollup.ts 里 buildKeyMaps 的纯逻辑（byVid 后写覆盖 / byCourseVid 复合键独立）。
-// 限制说明：node --test 跑 .mjs 无法直接 import .ts（无编译步骤），故此处「复刻」同一份纯逻辑
-// 做不变式回归（与 buildKeyMaps 保持字节级一致）。若将来加了 TS→JS 编译产物，可改为直接 import。
+// 限制说明：本测试无法直接 import catalogRollup.ts——它顶层 `import { prisma } from "./db"`(无扩展名),
+// Node 原生 ESM(strip-types) 解析裸 "./db" 会 ERR_MODULE_NOT_FOUND(该写法靠 Next/tsconfig 解析,非 Node)。
+// 故此处仍「复刻」同一份纯逻辑做不变式回归（与 buildKeyMaps 字节级一致）。改 .ts 须同步改这里。
+// (对比: 无相对 import 的纯 lib——thumbStatus/statusTotals/taskEvents——其 .mjs 已改为直接 import .ts。)
 function buildKeyMaps(courses) {
   const byVid = new Map();
   const byCourseVid = new Map();

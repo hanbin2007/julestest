@@ -25,6 +25,8 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { PrismaClient } from "@prisma/client";
+// 同源真函数(#14): 直接 import route.ts/mirror 同款 normalizeThumbState, 不再手抄复刻。
+import { normalizeThumbState } from "../src/lib/thumbStatus.ts";
 
 const __filename = fileURLToPath(import.meta.url);
 const WEB_DIR = path.resolve(path.dirname(__filename), "..");
@@ -41,10 +43,7 @@ let DB_FILE = "";
 let DB_URL = "";
 let prisma = null;
 
-// ---- 复刻 thumbStatus.ts normalizeThumbState(与 .ts / .test.mjs 字节级一致)----
-function normalizeThumbState(raw) {
-  return raw === "ready" || raw === "gen" || raw === "error" ? raw : null;
-}
+// normalizeThumbState 现直接 import 自 ../src/lib/thumbStatus.ts(顶上 import), 不再手抄复刻。
 
 // ---- 复刻 route.ts mirror() 的 thumb 写入侧白名单归一(#14)----
 // ready/gen/error → upsert; cancelled/queued/未知 → deleteMany(归一为 null = 不在镜像里)。
@@ -138,15 +137,21 @@ async function test_fallback_self_heals_poisoned_rows() {
   );
 }
 
-// 验证内置 normalizeThumbState 复刻逻辑与 thumbStatus.ts 源文件一致(防漂移)。
-async function test_replica_matches_source() {
-  let srcMatches = false;
-  try {
-    const src = await fs.readFile(path.join(WEB_DIR, "src", "lib", "thumbStatus.ts"), "utf-8");
-    // 源里的核心判定: raw === "ready" || raw === "gen" || raw === "error" ? raw : null
-    srcMatches = /raw === "ready" \|\| raw === "gen" \|\| raw === "error" \? raw : null/.test(src);
-  } catch { /* */ }
-  check("[T10] 复刻判定与 thumbStatus.ts 源一致(防白名单漂移)", srcMatches, { srcMatches });
+// 行为守卫: 现在直接 import 真源 normalizeThumbState(不再手抄), 故无「复刻漂移」可言。
+// 仍断言导入的真函数白名单口径正确(ready/gen/error 保留, cancelled/queued/未知→null)——
+// 若有人改坏 thumbStatus.ts 这条会红。
+async function test_imported_source_whitelist() {
+  const ok =
+    normalizeThumbState("ready") === "ready" &&
+    normalizeThumbState("gen") === "gen" &&
+    normalizeThumbState("error") === "error" &&
+    normalizeThumbState("cancelled") === null &&
+    normalizeThumbState("queued") === null &&
+    normalizeThumbState("weird") === null;
+  check("[T10] 直接 import 的 thumbStatus.ts normalizeThumbState 白名单口径正确(真源, 非手抄)", ok, {
+    ready: normalizeThumbState("ready"),
+    cancelled: normalizeThumbState("cancelled"),
+  });
 }
 
 // ================= 启停 + 主流程 =================
@@ -181,7 +186,7 @@ async function main() {
   try {
     await test_mirror_drops_cancelled();
     await test_fallback_self_heals_poisoned_rows();
-    await test_replica_matches_source();
+    await test_imported_source_whitelist();
     // 安全断言: prisma 连的是隔离 test.db。
     check("[安全] prisma 连隔离 test.db(非生产 app.db)", DB_URL.includes(TMPDIR) && DB_FILE !== PROD_DB, { DB_URL });
   } finally {

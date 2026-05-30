@@ -104,7 +104,10 @@ class DiskLRU:
             for fn in os.listdir(self.dir):
                 if fn in keep:
                     continue
-                if fn.endswith(".json") or fn.endswith(".json.tmp"):
+                # gateway 的持久化 JSON 以 .json 结尾; 其原子写 tmp 以 .tmp 结尾
+                # (唯一名形如 seg_urls.json.<rand>.tmp, #19 治本)。两类都不是分片缓存
+                # 的 fname(sha1 无后缀), 一刀切扩展名白名单跳过, 别误删 in-flight tmp。
+                if fn.endswith(".json") or fn.endswith(".tmp"):
                     continue
                 # .corrupt-<ts> 是索引/各 JSON 损坏时隔离下来的取证备份(救数据用),
                 # 不以 .json 结尾, 别当孤儿一刀切删掉。
@@ -282,6 +285,32 @@ class DiskLRU:
         removed = 0
         with self.lock:
             victims = [k for k in self.meta if k[1] == vid]
+            for key in victims:
+                _ctype, sz, fname = self.meta.pop(key)
+                self.size -= sz
+                removed += 1
+                try:
+                    os.remove(os.path.join(self.dir, fname))
+                except OSError:
+                    pass
+            if removed:
+                self._dirty = True   # 索引变了, 待 _flush_loop 落盘
+        return removed
+
+    def sweep_thumb_bucket(self):
+        """一次性迁移: 清掉本桶里所有归 'thumb' 桶的键(扣 size + 删盘文件)。
+
+        旧版本把缩略图源段和播放段混灌进同一个播放桶 + index.json; re-architecture 后
+        缩略图源段改进独立小桶 thumb_seg_cache, 生成完在那边 drop_vid 释放。但旧 index.json
+        里残留的缩略图源键回载进播放桶后, 永远没有 worker 去 drop(drop 只在 thumb 桶发生),
+        永久占用播放桶容量(生产 ~3.3GB)。本方法在【注入 namespace splitter 之后】由
+        gateway 调一次, 把误留在本桶的 thumb 键扫干净。
+
+        归桶判定走注入的 _ns_split(bucket=='thumb'), cache.py 不硬编码 't_' 字面量
+        (命名约定是 gateway 的事)。返回清掉的条目数。"""
+        removed = 0
+        with self.lock:
+            victims = [k for k in self.meta if self._ns_split(k[1])[0] == "thumb"]
             for key in victims:
                 _ctype, sz, fname = self.meta.pop(key)
                 self.size -= sz

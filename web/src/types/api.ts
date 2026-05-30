@@ -87,7 +87,10 @@ export interface GwStatus {
   thumbDir: string;
   cacheDir?: string;
   cacheDirOk?: boolean;
-  // 任务事件日志当前峰值序号。web 先判 maxSeq 未涨则跳过拉增量(省一次请求)。
+  // 预留 hint(网关仍在 /api/status 里发, 但 route.ts 当前【从不读】): 本意是「maxSeq 未涨就跳过拉
+  // task_events 省一次请求」。⚠️ 若将来真要据它跳过, 必须用 (epoch, maxSeq) 复合判定而非裸 maxSeq:
+  // corrupt 重启会把 seq 复位到 0(< 本地游标), 裸 maxSeq 比较会误判「没涨」而 stale-skip, 永远拉不到
+  // 当前 epoch 的低 seq 新事件(正是 ingestTaskEvents.refetchFromZero 治的那条路)。当前未消费, 留作文档。
   tasks?: { maxSeq: number };
 }
 

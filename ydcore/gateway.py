@@ -24,6 +24,7 @@ import queue
 import re
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -147,6 +148,11 @@ class Gateway:
         self.seg_cache.set_namespace_splitter(
             lambda vid: ("thumb", vid[2:]) if isinstance(vid, str) and vid.startswith("t_") else ("real", vid)
         )
+        # mustFix-1: 升级一次性迁移。旧版把缩略图源段(t_)和播放段混灌进同一 256MB 播放桶
+        # + index.json; re-arch 后源段改进独立 thumb_seg_cache, 生成完在那边 drop。但旧
+        # index.json 里残留的 t_ 键回载进播放桶后永无 worker drop(drop 只在 thumb 桶发生),
+        # 永久占用播放桶容量(生产 ~3.3GB)还挤出真实播放段。注入 splitter 之后扫一次干净。
+        self.seg_cache.sweep_thumb_bucket()
         # 三档优先级闸门：0=LIVE(观看) > 1=AUTO(自动缓存) > 2=MANUAL(手动缓存)。
         self.gate = PriorityGate()
 
@@ -279,28 +285,30 @@ class Gateway:
             if self.seg_cache.persist else None
         )
         self._playhead_dirty = False
-        # #19: playhead 写盘串行化锁。_save_playhead 被两条线程调用 —— 5s 节流的
-        # _playhead_flush_loop 与掉盘恢复的 _flush_all_persist(经 _recover_once)。
-        # 两者都走 _atomic_write_json(playhead_path,...), 共享 tmp 名 path+".tmp";
-        # 并发时 tmp 互相截断 / os.replace 交错, playhead.json 可能落成撕裂半文件。
-        # 用本锁把写盘段串起来, 同一时刻只有一个 playhead 写者(不影响别的 *.json)。
-        self._playhead_lock = threading.Lock()
+        # #19 治本后: playhead 专用锁已退役。撕裂洞由 _atomic_write_json 的唯一 tmp 名
+        # 根上堵死(各写各的 tmp + 原子 replace), _save_playhead 不再需要串行化锁。
 
         # 所有持久化路径/dict/锁都就绪后, 一次性回载全部 *.json 持久化表(顺序见方法内)。
         # 抽成 _load_persist_tables 让掉盘恢复守卫(#2)能在盘回来后复用同一回载路径,
         # 而不是用空内存覆盖磁盘。emit_init_events=True: init 期允许发僵尸终态事件。
         self._load_persist_tables(emit_init_events=True)
 
-        # 启动时若做了僵尸修正/终态裁剪, 立刻回写一次, 让下次启动不再重复处理同样的僵尸。
-        # (init 阶段还没启 buffer worker, 无并发, 不需 buf_lock。)
-        self._save_buf_state()
-        self._save_buf_errors()
-
         # 全部 *.json 已成功载入(或本就无盘/无文件): 此后内存即权威, 掉盘恢复走"刷回盘"。
         # 注意: 启动时若 seg_cache.ok=False(盘没挂), 上面所有 isfile/open 读盘均落空 ->
         # 内存全空; 这种情况下不能置 _ever_loaded(否则盘回来会用空内存覆盖, 即本 bug)。
+        #
+        # nit _ever_loaded 时机: _ever_loaded 必须由"载入时盘是否可用"判定, 且要在下面那两次
+        # 落盘【之前】定格。否则若 _save_buf_state/_save_buf_errors 撞到瞬时 OSError,
+        # _atomic_write_json 会把 seg_cache.ok 翻 False, 导致这里漏置 _ever_loaded ->
+        # 后续 _recover_once 误走重载支路 -> 双发 init 终态事件。先按载入态定格, 再落盘。
         if self.seg_cache.ok:
             self._ever_loaded = True
+
+        # 启动时若做了僵尸修正/终态裁剪, 立刻回写一次, 让下次启动不再重复处理同样的僵尸。
+        # (init 阶段还没启 buffer worker, 无并发, 不需 buf_lock。)放在 _ever_loaded 定格后:
+        # 即便这两次落盘撞瞬时 OSError 翻了 seg_cache.ok, 也不影响已定格的 _ever_loaded。
+        self._save_buf_state()
+        self._save_buf_errors()
 
         for _ in range(max(1, THUMB_WORKERS)):
             threading.Thread(target=self._thumb_worker, daemon=True).start()
@@ -533,7 +541,13 @@ class Gateway:
         风暴 + 防止用空快照覆盖有效数据。#17: 缩略图持久化落在 thumb_dir(默认系统盘),
         与段盘(可能外置盘)是【不同的盘】, 故 thumb 写盘传 ok_gate=self._thumb_dir_ok 用
         自己的健康探针 —— 段盘掉线绝不冻结 thumb 写盘; 反之 thumb 盘掉线也不污染段盘 ok。
-        ok_gate 为 None 时沿用旧行为(段盘闸门 + OSError 连锁标记 seg_cache.ok=False)。"""
+        ok_gate 为 None 时沿用旧行为(段盘闸门 + OSError 连锁标记 seg_cache.ok=False)。
+
+        #19 治本: tmp 名带【唯一后缀】(tempfile.mkstemp 在同目录开唯一文件), 不再用共享
+        path+'.tmp'。共享名时两线程并发写同一 path 会互相截断对方写一半的 tmp / os.replace
+        交错 -> 目标 JSON 撕裂成半文件。唯一 tmp + 原子 os.replace 让任一时刻目标都是某次
+        完整写入, 永不撕裂 —— 覆盖 seg_urls/video_meta/pf_done/playhead/task_events/thumb
+        全部 *.json, playhead 专用锁可退役。"""
         if not path:
             return False
         if ok_gate is None:
@@ -541,14 +555,24 @@ class Gateway:
                 return False  # 段盘掉线: 不再尝试写盘
         elif not ok_gate():
             return False      # 自定义闸门(如 thumb_dir 探针)判定不可写: 跳过
+        d = os.path.dirname(path) or "."
+        base = os.path.basename(path)
+        tmp = None
         try:
-            tmp = path + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
+            # 同目录开唯一 tmp(保证 os.replace 是同文件系统的原子重命名)。
+            fd, tmp = tempfile.mkstemp(dir=d, prefix=base + ".", suffix=".tmp")
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False)
             os.replace(tmp, path)
             return True
         except Exception as e:  # noqa: BLE001
             _log.warning("索引落盘失败:%s", path, exc_info=True)
+            # 失败时清掉自己的 tmp(唯一名, 不会误删别的写者的), 否则残留半截文件白占盘。
+            if tmp:
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
             # 只有走默认段盘闸门时, OSError 才连锁标记段盘掉线。自定义闸门(thumb)的
             # 失败不得污染 seg_cache.ok —— 那是另一块盘的健康标志。
             if ok_gate is None and isinstance(e, OSError):
@@ -611,10 +635,26 @@ class Gateway:
         _task_seq = max(顶层 seq, events 内 max seq), 永不倒退(防文件被部分篡改/截断)。
         _task_epoch = (顶层 epoch, 或 events 内 max epoch) + 1: 新 boot 必比盘上大,
         故掉盘期复用的 seq 在新 epoch 下是另一行(#3, 防 web 误去重丢真终态)。
-        损坏走 _quarantine_corrupt 隔离 + 内存重置 seq=0(epoch 仍前进, 不复位避免撞历史)。
-        临时缓存目录(task_events_path=None)无文件可载, 直接 return(epoch 保持构造时的 1)。"""
+        损坏走 _quarantine_corrupt 隔离 + 内存重置 seq=0。epoch 用 max(当前, 墙钟)+1:
+        旧版 except 分支 self._task_epoch+1 在 __init__(epoch=1)下确定性落到 2, 可能撞历史
+        epoch=2 行致 web 误去重复活已删事件; 改用墙钟做底永不撞历史小 epoch(corrupt epoch)。
+
+        mustFix-3: 对 _task_seq/_task_epoch/task_events 的写整段在 with self.task_lock 内
+        (reload 期 web/worker 也可能并发 _emit_task_event 读写这三者, 不上锁 -> deque
+        mutated-during-iteration / seq 竞争)。成功路径也【先 clear deque 再 append】, 否则
+        reload 复用本方法时旧事件会累积。emit 仍只取 task_lock, 故本方法持 task_lock 期间
+        不得调任何 emit(只填内存); 临界区内绝不嵌套 buf/thumb/meta/pf 锁。
+        临时缓存目录(task_events_path=None)无文件可载, 直接 return(epoch 保持构造时的 1)。
+        盘上有路径但无文件(首启 / 掉盘期发的 init 事件从未落盘): reload 复用本方法时
+        必须把内存 deque 重置成盘上真相(空), 否则 __init__ 期那条只在内存、没落盘的"幻影"
+        事件会残留, 叠加 _replay_pending_init_events 补发 -> 同一僵尸双发(shouldFix 失败信号)。"""
         path = self.task_events_path
-        if not path or not os.path.isfile(path):
+        if not path:
+            return
+        if not os.path.isfile(path):
+            # 盘上无文件 = 没有已落盘事件; 把内存 deque 对齐到此真相(reload 去幻影)。
+            with self.task_lock:
+                self.task_events.clear()
             return
         try:
             with open(path, "r", encoding="utf-8") as f:
@@ -622,6 +662,7 @@ class Gateway:
             top_seq = int(loaded.get("seq") or 0)
             top_epoch = int(loaded.get("epoch") or 0)
             events = loaded.get("events") or []
+            kept = []
             max_ev = 0
             max_epoch = 0
             for ev in events:
@@ -639,17 +680,24 @@ class Gateway:
                         max_epoch = e
                 except (TypeError, ValueError):
                     pass
-                self.task_events.append(ev)
-            self._task_seq = max(top_seq, max_ev)
-            # 新 boot = 盘上最大 epoch + 1(顶层与事件内取较大者, 防文件被部分篡改)。
-            self._task_epoch = max(top_epoch, max_epoch) + 1
+                kept.append(ev)
+            with self.task_lock:
+                # 成功路径也先 clear 再 append: reload 复用本方法时不累积旧事件。
+                self.task_events.clear()
+                for ev in kept:
+                    self.task_events.append(ev)
+                self._task_seq = max(top_seq, max_ev)
+                # 新 boot = 盘上最大 epoch + 1(顶层与事件内取较大者, 防文件被部分篡改)。
+                self._task_epoch = max(top_epoch, max_epoch) + 1
         except Exception:  # noqa: BLE001
             self._quarantine_corrupt(path, "task_events")
-            self.task_events.clear()
-            self._task_seq = 0
-            # epoch 不复位: 损坏文件可能仍被某历史 web 游标记着旧 (epoch,seq), 复位会撞。
-            # 保持构造时的 1(或更高), 续发用 +1 后的新 epoch 仍安全。
-            self._task_epoch = self._task_epoch + 1
+            with self.task_lock:
+                self.task_events.clear()
+                self._task_seq = 0
+                # corrupt epoch 撞号治本: 旧版 +1 在 __init__(epoch=1)下确定性落到 2,
+                # 可能撞历史 epoch=2 行 -> web 误去重让 #3 复活。用墙钟做底(单调、跨重启
+                # 必比任何历史小 epoch 大), 永不撞历史小 epoch。
+                self._task_epoch = max(self._task_epoch, int(time.time())) + 1
 
     def _save_task_events(self):
         """落盘 task_events. 调用方已持 task_lock(_emit 内)或确保无并发。
@@ -729,22 +777,21 @@ class Gateway:
         """落盘 playhead + protect_vid. 由 _playhead_flush_loop 节流调用,不直接在
         /p 处理线程里调(每秒可能多次写盘,无价值)。
 
-        #19: 写盘段被 _playhead_lock 串行化。本方法被 5s 节流线程和掉盘恢复
-        (_flush_all_persist)两条线程调用, 都走同一 playhead_path + 共享 tmp 名,
-        并发会让 tmp 互相截断 / os.replace 交错 -> 撕裂半文件。锁内取快照 + 落盘,
-        保证任一时刻只有一个 playhead 写者(不影响别的 *.json 写)。"""
+        #19 治本后: 撕裂洞由 _atomic_write_json 的唯一 tmp 名根上堵死, playhead 专用锁
+        已退役(不再需要靠串行化绕过共享 tmp 名)。本方法被 5s 节流线程和掉盘恢复
+        (_flush_all_persist)两条线程调用并发也不会撕裂: 各写各的唯一 tmp + 原子 replace,
+        目标 playhead.json 任一时刻都是某次完整写入。"""
         if not self.playhead_path:
             return
-        with self._playhead_lock:
-            data = {
-                "playhead": dict(self.playhead),
-                "protect_vid": self.seg_cache.protect_vid,
-                "extra_protect": self.seg_cache.extra_protect_vids(),
-            }
-            # 只有真写成功才清 dirty: _atomic_write_json 掉盘时静默跳过(返回 False),
-            # 此时若清了 dirty, 失败的 flush 不会重试, 位置/保护集可能再也补不上。
-            if self._atomic_write_json(self.playhead_path, data):
-                self._playhead_dirty = False
+        data = {
+            "playhead": dict(self.playhead),
+            "protect_vid": self.seg_cache.protect_vid,
+            "extra_protect": self.seg_cache.extra_protect_vids(),
+        }
+        # 只有真写成功才清 dirty: _atomic_write_json 掉盘时静默跳过(返回 False),
+        # 此时若清了 dirty, 失败的 flush 不会重试, 位置/保护集可能再也补不上。
+        if self._atomic_write_json(self.playhead_path, data):
+            self._playhead_dirty = False
 
     def _playhead_flush_loop(self):
         """每 5s 检查 playhead/protect_vid 是否 dirty, 是就落盘。
@@ -782,26 +829,51 @@ class Gateway:
 
         与 __init__ 回载共用底层 _load_persist_tables; 只补 cache 索引重载 + 重建
         video_headers(派生态, 让重载后立刻能直接观看)。不在此重入队 buffer/thumb worker
-        (它们已在跑, 见到回载好的 buf_q/thumb 状态会自然推进), 也不重发 init 期事件
-        (那是一次性僵尸修正, 重载不是新转换)。"""
+        (它们已在跑, 见到回载好的 buf_q/thumb 状态会自然推进)。
+
+        mustFix-2: _load_persist_tables 传 emit_init_events=False —— 重载不是新转换,
+        僵尸 queued->error / thumb gen->error 在 __init__ 期已发过(掉盘期没落成的暂存到
+        _pending_init_events, 由 _recover_once 在本方法返回后 _replay_pending_init_events
+        补发)。这里再发会双发同一僵尸事件(web 多写一行历史)。
+
+        mustFix-3: 整个重载(reset + 回填同临界区)在【与 _flush_all_persist 一致的固定锁序】
+        buf_lock -> thumb_lock -> meta_lock -> pf_lock 内, 避免运行期 web/worker 并发读改
+        buf_state/video_meta/seg_urls/thumb_meta/playhead 致 dict/deque mutated-during-iteration
+        (web 500)。_load_task_events 自持 task_lock(锁序最内, 永不在持有它时取上面四锁);
+        本临界区内绝不调任何 emit(emit 只取 task_lock, 但锁内 emit 会让 task_lock 落到
+        buf/thumb/meta/pf 之后, 仍是一致序 —— 不过 emit_init_events=False 本就不在此 emit)。"""
         # 1) cache 自身索引(index.json -> meta/size): 启动时 ok=False 跳过了 _load_index。
         if self.seg_cache.persist and self.seg_cache.ok:
             try:
                 self.seg_cache._load_index()
+                # mustFix-1: 重载也清旧 t_ 缩略图源段残留(否则掉盘恢复又把它们回播放桶)。
+                self.seg_cache.sweep_thumb_bucket()
             except Exception:  # noqa: BLE001
                 _log.warning("掉盘恢复重载 cache 索引失败", exc_info=True)
-        # 2) 全部 *.json 持久化表回载到内存。
+        # 2) task_events 先于其它表回载(自持 task_lock, 锁序最内)。
         self._load_task_events()
-        self._load_persist_tables()
-        # 3) 重建 video_headers(派生态): 让重载后曾见过的 vid 立刻能直接观看。
-        for vid, meta in self.video_meta.items():
+        # 3) 全部 *.json 持久化表回载到内存。整段在固定锁序内(reset+回填同临界区), 重载期
+        #    web/worker 看到的始终是"全旧"或"全新", 不会撞到半重置的 dict。emit_init_events=False。
+        with self.buf_lock, self.thumb_lock, self.meta_lock, self.pf_lock:
+            self._load_persist_tables(emit_init_events=False)
+            # nit reload 后落盘: 回载把僵尸 buf_state(queued->error)修正了, 落回盘让下次
+            #     启动不再重复处理同样的僵尸(此时已持 buf_lock, 满足 _save_* 的持锁约定)。
+            self._save_buf_state()
+            self._save_buf_errors()
+        # 4) 重建 video_headers(派生态): 让重载后曾见过的 vid 立刻能直接观看。
+        #    在四锁外做: video_headers 由 vh_lock 保护(与上面四锁无序约束), 且 play_headers
+        #    可能慢, 不该把 buf/thumb/meta/pf 锁占住。读 video_meta 用 GIL 原子快照。
+        for vid, meta in list(self.video_meta.items()):
             m3u8 = meta.get("m3u8")
             if not m3u8:
                 continue
             try:
-                self.video_headers[str(vid)] = play_headers(self.session, meta, m3u8)
+                hdrs = play_headers(self.session, meta, m3u8)
             except Exception:  # noqa: BLE001
                 _log.debug("掉盘恢复重建 video_headers 失败 vid=%s", vid, exc_info=True)
+                continue
+            with self.vh_lock:
+                self.video_headers[str(vid)] = hdrs
 
     def _recover_once(self):
         """掉盘恢复的单次 tick(从 _recover_flush_loop 抽出, 供单元测试直接调)。
@@ -860,12 +932,14 @@ class Gateway:
         生产代码不依赖本方法; 仅单元测试用。"""
         self.base_headers = {}
         self.session = {}
+        self.port = 0  # 缩略图 ffmpeg 代理 URL 用; 单测不起真 server, 0 即可
         self.video_headers = {}
         self.vh_lock = threading.Lock()
         self.seg_cache = DiskLRU(SEG_CACHE_BYTES, cache_dir)
         self.seg_cache.set_namespace_splitter(
             lambda vid: ("thumb", vid[2:]) if isinstance(vid, str) and vid.startswith("t_") else ("real", vid)
         )
+        self.seg_cache.sweep_thumb_bucket()  # mustFix-1: 与生产 __init__ 同构(扫旧 t_ 残留)
         self.seg_cache.ok = ok  # 模拟启动时盘(不)可用
 
         self._ever_loaded = False
@@ -919,7 +993,7 @@ class Gateway:
         self.pf_segidx = {}
         self.playhead = {}
         self._playhead_dirty = False
-        self._playhead_lock = threading.Lock()  # #19: 串行化 playhead 写盘
+        # #19 治本后: playhead 专用锁退役(唯一 tmp 名根上堵撕裂洞), 与生产 __init__ 同构。
 
         # 全部持久化路径
         self.seg_urls_path = os.path.join(cache_dir, "seg_urls.json")

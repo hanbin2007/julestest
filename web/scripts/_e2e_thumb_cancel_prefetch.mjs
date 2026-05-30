@@ -2,21 +2,25 @@
 //
 // 验证: thumb gen 的 `for u in urls` 源段预取循环每轮复查 thumb_meta[vid].state。预取进行中
 // 调 /api/tasks/action {verb:cancel,kind:thumb,vid} 后, 预取必须立即停下载剩余低清源段, 而不是
-// 把整批拉完才"看起来取消"。失败信号: 修复前取消后磁盘缓存文件数继续增长到整批; 修复后停增。
+// 把整批拉完才"看起来取消"。失败信号: 修复前取消后 thumb 桶源段计数继续增长到整批; 修复后停增。
+// 注意: 缩略图源段物理隔离后落【独立 thumb 桶】(不进 CACHE_DIR), 故用 /api/_debug 的 thumbSegItems
+// 量"已下载源段数"(thumb 桶段计数的单一真相源), 不再数 CACHE_DIR 直下文件(那恒 0 会令本测永远 SKIP)。
 //
 // 硬约束 [[julestest-no-prod-db-writes]]: 本脚本 *绝不* 碰生产 app.db / 生产缓存 / 生产网关 8808 /
 // web 3000。隔离网关跑在 8811 + 全新 TMPDIR(--cache-dir / YD_THUMB_DIR 全指 TMPDIR)。
-//   · 假 ffmpeg: TMPDIR/bin/ffmpeg = `#!/bin/sh\nexec sleep 600`(挂死), 注入 PATH 首位。让 gen 阶段
+//   · 假 ffmpeg: TMPDIR/bin/ffmpeg = `#!/bin/sh\nexec sleep <本测试唯一随机秒数>`(挂死), 注入 PATH
+//     首位; teardown 按该随机秒数精确 pkill, 绝不宽匹配误杀别的 sleep。让 gen 阶段
 //     的 ffmpeg 不会瞬间结束——但本测重点在 ffmpeg 之*前*的预取期取消, 假 ffmpeg 只为防止
 //     gen 提前进终态干扰观察。
 //   · 用一门真实课程里源段较多的一讲, 让预取有可观察时长; 触发后立刻 cancel。
 //
 // 失败信号(区分"修复生效"vs"旧预取不复查 cancelled"):
-//   旧代码: for u in urls 不复查 → 取消后整批源段继续下载 → 缓存文件数在 cancel 后仍涨。
-//   修复后: 取消瞬间 return → cancel 后 settle 期内缓存文件数 *不再增长*。
+//   旧代码: for u in urls 不复查 → 取消后整批源段继续下载 → thumb 桶段计数在 cancel 后仍涨。
+//   修复后: 取消瞬间 return → cancel 后 settle 期内 thumb 桶段计数 *不再增长*。
 //
 // 前置: 需真实网络 + 一门真实课程低清 m3u8(从 /api/courses 自动挑)。无网络/无课程 → SKIP
-//   (退出码 0)。Task 5 的机器化失败信号已由 ydcore/test_thumb_cancel_prefetch.py 提供(纯单元,
+//   (打印 SKIPPED + 退出码 3, 【不计入 ALL PASS】)。Task 5 的机器化失败信号已由
+//   ydcore/test_thumb_cancel_prefetch.py 提供(纯单元,
 //   桩 pri_fetch, 无网络)。本脚本是整合阶段(起网关)的端到端补强。
 //
 // 可重复: 每次跑全新 mkdtemp TMPDIR, teardown 杀隔离进程(只杀 8811)+ rm -rf TMPDIR + 清假 ffmpeg。
@@ -40,6 +44,7 @@ const PROD_THUMBS = "/Users/zhb/.youdao_course/thumbs";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const results = [];
+let skipped = null; // 非 null 则全程 SKIP(退出码 3, 不计入 ALL PASS)
 function check(name, ok, detail) {
   results.push({ name, ok: !!ok, detail });
   console.log(`${ok ? "PASS" : "FAIL"} ${name}: ${JSON.stringify(detail)}`);
@@ -50,6 +55,9 @@ let TMPDIR = "";
 let CACHE_DIR = "";
 let THUMB_DIR = "";
 let BIN_DIR = "";
+// 假 ffmpeg 用一个【本测试唯一】的随机 sleep 秒数: teardown 按该数精确 pkill, 绝不宽匹配
+// 'sleep 600' 误杀别的进程。98000~98999 远离常见值, 也与 thumb_timeout(99xxx)区分。
+const FAKE_SLEEP_SECS = 98000 + Math.floor(Math.random() * 1000);
 
 function assertIsolatedPaths() {
   for (const p of [TMPDIR, CACHE_DIR, THUMB_DIR, BIN_DIR]) {
@@ -65,7 +73,8 @@ async function installFakeFfmpeg() {
   BIN_DIR = path.join(TMPDIR, "bin");
   await fs.mkdir(BIN_DIR, { recursive: true });
   const script = path.join(BIN_DIR, "ffmpeg");
-  await fs.writeFile(script, "#!/bin/sh\nexec sleep 600\n", "utf-8");
+  // sleep 秒数用本测试唯一随机数(FAKE_SLEEP_SECS), 便于 teardown 精确 pkill 不误杀。
+  await fs.writeFile(script, `#!/bin/sh\nexec sleep ${FAKE_SLEEP_SECS}\n`, "utf-8");
   await fs.chmod(script, 0o755);
 }
 
@@ -93,10 +102,21 @@ function startGateway() {
 async function waitGatewayUp(timeoutMs = 40000) {
   const t0 = Date.now();
   while (Date.now() - t0 < timeoutMs) {
-    try { if ((await fetch(`${GW}/api/_debug`)).ok) return true; } catch { /* */ }
+    try {
+      const r = await fetch(`${GW}/api/_debug`);
+      if (r.ok) {
+        const d = await r.json();
+        // 防误连外来网关(尤其生产): segCacheDir 必须落在本测试 TMPDIR 下, 否则硬失败。
+        if (typeof d.segCacheDir === "string" && d.segCacheDir.startsWith(TMPDIR)) return true;
+        throw new Error(`连到了非本测试网关(segCacheDir=${d.segCacheDir} 不在 ${TMPDIR})`);
+      }
+    } catch (e) {
+      if (String(e.message || "").includes("非本测试网关")) throw e;
+      /* not up yet */
+    }
     await sleep(500);
   }
-  throw new Error("隔离网关未就绪(8811)");
+  throw new Error(`隔离网关未就绪(${PORT})`);
 }
 
 function gatewayPid() {
@@ -109,21 +129,17 @@ function killGatewayHard() {
   for (let i = 0; i < 20; i++) { if (!gatewayPid()) return; try { execSync("sleep 0.3"); } catch { /* */ } }
 }
 function killOrphanFfmpegSleeps() {
-  try { execSync(`pkill -9 -f 'sleep 600' 2>/dev/null || true`); } catch { /* */ }
+  // 只按【本测试唯一随机秒数】精确匹配, 绝不宽匹配 'sleep 600' 全系统误杀无关进程。
+  try { execSync(`pkill -9 -f 'sleep ${FAKE_SLEEP_SECS}' 2>/dev/null || true`); } catch { /* */ }
 }
 
-// 统计隔离缓存目录里的缓存文件数(粗粒度"已下载源段+段"代理)。预取期下载源段会让它增长;
-// 取消后应停增。只数 CACHE_DIR 直下文件, 排除 *.json 持久化与 *.tmp 中间态。
-async function cacheFileCount() {
-  let n = 0;
-  try {
-    for (const e of await fs.readdir(CACHE_DIR, { withFileTypes: true })) {
-      if (!e.isFile()) continue;
-      if (e.name.endsWith(".json") || e.name.endsWith(".tmp")) continue;
-      n++;
-    }
-  } catch { /* */ }
-  return n;
+// 统计【已下载的缩略图源段】数。物理隔离后(#1,#8)缩略图源段进【独立 thumb 桶】, 落盘在
+// THUMB_DIR/segcache, 【绝不进 CACHE_DIR】—— 旧版数 CACHE_DIR 直下文件恒得 0, 会让本测试
+// 永远 SKIP(测不到预取/取消)。改用 /api/_debug 的 thumbSegItems(thumb 桶段计数的单一真相源),
+// 它是预取期源段落桶的权威计数: 预取下载源段 → 涨; 取消后预取 return → 停增。
+async function thumbSrcSegCount() {
+  try { return (await (await fetch(`${GW}/api/_debug`)).json()).thumbSegItems ?? 0; }
+  catch { return 0; }
 }
 
 async function pickFatLesson() {
@@ -150,6 +166,13 @@ async function pickFatLesson() {
   return best;
 }
 
+// 从 clarity 数组取低清 m3u8(缩略图用最低清=type 最小; 缺省回退旧字段名)。/api/course 的
+// videos[] 每条带 clarity:[{type,url}], 而非 lowSrc/src —— 旧版只看 lowSrc 会一讲都挑不到 → 永远 SKIP。
+function lowSrcOf(node) {
+  const cl = [...(node.clarity || [])].filter((c) => c && c.url).sort((a, b) => (a.type || 0) - (b.type || 0));
+  if (cl.length) return cl[0].url; // 最低清
+  return node.lowSrc || node.src || node.m3u8Low || node.m3u8 || null;
+}
 function collectLessons(detail) {
   const out = [];
   const walk = (node, ctx) => {
@@ -158,7 +181,7 @@ function collectLessons(detail) {
     const cardPackageId = node.cardPackageId ?? ctx.cardPackageId;
     const contentId = node.contentId ?? ctx.contentId;
     const videoId = node.videoId;
-    const src = node.lowSrc || node.src || node.m3u8Low || node.m3u8;
+    const src = lowSrcOf(node);
     if (videoId && (productId != null) && (contentId != null) && (cardPackageId != null) && src) {
       out.push({ videoId, contentId, cardPackageId, productId, src, duration: node.duration || 600 });
     }
@@ -176,37 +199,37 @@ async function gwStatus() {
   try { return await (await fetch(`${GW}/api/status`)).json(); } catch { return {}; }
 }
 function thumbStateOf(status, vid) {
-  const t = status?.thumbs || status?.thumb || {};
-  const e = t[String(vid)] || t[Number(vid)];
-  return e?.state ?? null;
+  // /api/status 的缩略图态在 thumb.states 下, 形如 {vid: "gen"/"cancelled"/...}(值是字符串)。
+  const states = status?.thumb?.states || {};
+  return states[String(vid)] ?? states[Number(vid)] ?? null;
 }
 
 async function run() {
   const L = await pickFatLesson();
   if (!L) {
-    console.log("SKIP: 无网络/无可用课程, 跳过端到端 thumb 取消预取 e2e(机器化信号见 ydcore/test_thumb_cancel_prefetch.py)");
-    return true;
+    skipped = "无网络/无可用课程, 跳过端到端 thumb 取消预取 e2e(机器化信号见 ydcore/test_thumb_cancel_prefetch.py)";
+    return;
   }
 
-  // 触发 thumb gen → 预取低清源段(同步在 worker 里跑)。
+  // 触发 thumb gen → 预取低清源段(同步在 worker 里跑, 落独立 thumb 桶)。
   await fetch(`${GW}/api/thumbs/batch`, {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ videos: [{ ...L }] }),
   });
 
-  // 等预取真的开始下载(缓存文件数 >0)再取消, 确保"取消发生在预取进行中"。
+  // 等预取真的开始下载(thumb 桶段计数 >0)再取消, 确保"取消发生在预取进行中"。
   let started = false;
   const startDeadline = Date.now() + 15000;
   while (Date.now() < startDeadline) {
-    if ((await cacheFileCount()) > 0) { started = true; break; }
+    if ((await thumbSrcSegCount()) > 0) { started = true; break; }
     await sleep(200);
   }
   if (!started) {
-    console.log("SKIP: 预取未观察到任何源段下载(可能网络太慢/源不可达), 跳过");
-    return true;
+    skipped = "预取未观察到任何源段下载(可能网络太慢/源不可达), 跳过";
+    return;
   }
 
-  const countAtCancel = await cacheFileCount();
+  const countAtCancel = await thumbSrcSegCount();
   // 取消!
   const resp = await fetch(`${GW}/api/tasks/action`, {
     method: "POST", headers: { "Content-Type": "application/json" },
@@ -214,11 +237,16 @@ async function run() {
   });
   const actRes = await resp.json().catch(() => ({}));
 
-  // settle: 修复后取消瞬间 return, 缓存文件数应基本停增(给少量在途容差: 取消那刻可能有 1 个
-  // put 已在路上)。修复前会继续涨到整批(几十~上百段)。
-  await sleep(2500);
-  const countAfter = await cacheFileCount();
-  const grew = countAfter - countAtCancel;
+  // settle: 修复后取消瞬间 return, thumb 桶段计数应基本停增(给少量在途容差: 取消那刻可能有 1~2
+  // 个 put 已在路上)。修复前会继续涨到整批(几十~上百段)再被 drop_vid 一次性清空——故"停增"
+  // 要在【drop 之前的窗口】量: 取消后立刻多采几拍取峰值, 比"整批拉完才 drop"的旧行为低得多。
+  let peakAfter = countAtCancel;
+  const settleDeadline = Date.now() + 2500;
+  while (Date.now() < settleDeadline) {
+    peakAfter = Math.max(peakAfter, await thumbSrcSegCount());
+    await sleep(250);
+  }
+  const grew = peakAfter - countAtCancel;
 
   const st = thumbStateOf(await gwStatus(), L.videoId);
   check(
@@ -227,14 +255,15 @@ async function run() {
     { vid: L.videoId, state: st, actRes },
   );
   check(
-    "[T5] 取消后源段预取停增(预取循环复查 cancelled 并 return)",
+    "[T5] 取消后源段预取停增(预取循环复查 cancelled 并 return, 不把整批拉完)",
     grew <= 2, // 容差: 取消瞬间至多 1~2 个在途 put 落地; 修复前会 +几十
-    { vid: L.videoId, atCancel: countAtCancel, after: countAfter, grew },
+    { vid: L.videoId, atCancel: countAtCancel, peakAfter, grew },
   );
-  return true;
 }
 
 async function setup() {
+  // pre-kill: 清掉可能残留在本端口的上次崩溃实例, 防 startGateway 后误连到旧进程。
+  killGatewayHard();
   TMPDIR = await fs.mkdtemp(path.join(os.tmpdir(), "yd_thumbcancel_"));
   CACHE_DIR = path.join(TMPDIR, "cache");
   THUMB_DIR = path.join(TMPDIR, "thumbs");
@@ -261,9 +290,13 @@ async function teardown() {
 
 async function main() {
   await setup();
-  let ok = true;
-  try { ok = await run(); } finally { await teardown(); }
-  const allOk = ok && results.every((r) => r.ok);
+  try { await run(); } finally { await teardown(); }
+  if (skipped) {
+    console.log(`\nSKIPPED: ${skipped}`);
+    console.log("ALL PASS: false (SKIP 不计入 PASS)");
+    process.exit(3); // 非 0 退出码: SKIP 绝不混进 ALL PASS 绿
+  }
+  const allOk = results.length > 0 && results.every((r) => r.ok);
   console.log(`\n${results.filter((r) => r.ok).length}/${results.length} PASS`);
   console.log(`ALL PASS: ${allOk}`);
   process.exit(allOk ? 0 : 1);

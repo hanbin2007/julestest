@@ -15,13 +15,20 @@ import tempfile
 import unittest
 
 from ydcore import gateway as _gwmod
-from ydcore.gateway import Gateway, _TASK_EVENTS_KEEP
+from ydcore.gateway import Gateway
 
 
 def _mk_gateway(cache_dir):
     """构造一个最小 Gateway: 空 base_headers, 持久化到 cache_dir。"""
     return Gateway({"User-Agent": "test"}, session={"User-Agent": "test"},
                    prefetch=False, port=0, cache_dir=cache_dir)
+
+
+# 测试卫生(去 O(n²)): deque 截断/回载测试若用生产 _TASK_EVENTS_KEEP=2000, 每次 emit 都
+# 把 ~2000 条 deque 全量 json.dump 落盘 -> 2000+ 次 emit ≈ O(n²), 单跑十几秒。把模块级
+# 常量临时调到小值(下面 setUp monkeypatch), __init__ 按它建 deque(maxlen 取调用时全局),
+# 截断语义不变但成本降到 O(KEEP)。引用都走 _gwmod._TASK_EVENTS_KEEP(读 patch 后的值)。
+_KEEP_SMALL = 20
 
 
 class TaskEventsTest(unittest.TestCase):
@@ -32,10 +39,15 @@ class TaskEventsTest(unittest.TestCase):
         # 把模块级 THUMB_DIR 临时指向独立临时目录, 构造期不再碰生产。
         self._old_thumb_dir = _gwmod.THUMB_DIR
         _gwmod.THUMB_DIR = os.path.join(self.tmp, "_iso_thumbs")
+        # 去 O(n²): deque 上限临时降到小值; __init__ 建 deque(maxlen) 时按全局读, 故对
+        # 本测试构造的 gw / 回载的 gw2 都生效。tearDown 还原, 不污染别的测试文件。
+        self._old_keep = _gwmod._TASK_EVENTS_KEEP
+        _gwmod._TASK_EVENTS_KEEP = _KEEP_SMALL
 
     def tearDown(self):
         import shutil
         _gwmod.THUMB_DIR = self._old_thumb_dir
+        _gwmod._TASK_EVENTS_KEEP = self._old_keep
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_emit_seq_monotonic(self):
@@ -66,21 +78,23 @@ class TaskEventsTest(unittest.TestCase):
 
     def test_seq_not_regress_after_deque_truncation(self):
         """deque 截满淘汰旧事件后, _task_seq 仍是历史峰值 (不随 deque 长度回退)。"""
+        keep = _gwmod._TASK_EVENTS_KEEP
         gw = _mk_gateway(self.tmp)
-        total = _TASK_EVENTS_KEEP + 50
+        total = keep + 5  # 去 O(n²): 只需略超上限即可验证截断, 不必 +50
         for i in range(total):
             gw._emit_task_event("buffer", str(i), "done")
         # deque 最多保留 maxlen 条
-        self.assertEqual(len(gw.task_events), _TASK_EVENTS_KEEP)
+        self.assertEqual(len(gw.task_events), keep)
         # 但 _task_seq 必须是发射总次数 (峰值), 不被截断影响
         self.assertEqual(gw._task_seq, total)
         # deque 里最老一条的 seq = total - maxlen + 1 (旧的被淘汰)
-        self.assertEqual(list(gw.task_events)[0]["seq"], total - _TASK_EVENTS_KEEP + 1)
+        self.assertEqual(list(gw.task_events)[0]["seq"], total - keep + 1)
 
     def test_load_restores_peak_seq(self):
         """落盘后重启回载: _task_seq = 文件顶层 seq (峰值), 即便 events 数组已被截断。"""
+        keep = _gwmod._TASK_EVENTS_KEEP
         gw = _mk_gateway(self.tmp)
-        total = _TASK_EVENTS_KEEP + 50
+        total = keep + 5  # 去 O(n²): 略超上限即触发截断
         for i in range(total):
             gw._emit_task_event("buffer", str(i), "done")
         path = gw.task_events_path
@@ -89,12 +103,12 @@ class TaskEventsTest(unittest.TestCase):
             saved = json.load(f)
         # 文件顶层 seq = 峰值, events 有界
         self.assertEqual(saved["seq"], total)
-        self.assertEqual(len(saved["events"]), _TASK_EVENTS_KEEP)
+        self.assertEqual(len(saved["events"]), keep)
 
-        # 新实例从同目录回载
+        # 新实例从同目录回载(gw2 的 deque 也按 patch 后的小 maxlen 建)
         gw2 = _mk_gateway(self.tmp)
         self.assertEqual(gw2._task_seq, total)  # 峰值续上, 不归零
-        self.assertEqual(len(gw2.task_events), _TASK_EVENTS_KEEP)
+        self.assertEqual(len(gw2.task_events), keep)
         # 续发不撞旧 seq
         gw2._emit_task_event("buffer", "next", "done")
         self.assertEqual(gw2._task_seq, total + 1)

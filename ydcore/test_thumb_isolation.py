@@ -73,6 +73,33 @@ class ThumbIsolationTest(unittest.TestCase):
         self.assertEqual(self.gw.thumb_seg_cache.count_vid(tvid), 0)
         self.assertEqual(self.gw.thumb_seg_cache.size, 0)
 
+    def test_negative_control_single_bucket_would_evict_playback(self):
+        """真 negative control: 证明上面的隔离断言不是恒真。若把路由【退化成单桶】
+        (旧 broken 行为: 缩略图源段也灌进同一 256MB 播放桶), 大批缩略图源段会把已缓存
+        的 A/B/C 播放段挤出 -> count 下降。这条恰好相反地"应当被挤出", 用来证明物理分桶
+        路由(_seg_cache_for)才是隔离生效的真正原因, 而非测试构造的巧合。"""
+        n = 8 * 1024 * 1024
+        per_vid = self.gw.seg_cache.max // (3 * n)
+        self.assertGreaterEqual(per_vid, 2)
+        for v in ("A", "B", "C"):
+            for i in range(per_vid):
+                _seg(self.gw.seg_cache, "http://h/%s_%d.ts" % (v, i), v, n)
+        before = {v: self.gw.seg_cache.count_vid(v) for v in ("A", "B", "C")}
+        self.assertTrue(all(c == per_vid for c in before.values()))
+
+        # 退化路由: 直接把缩略图源段灌进【播放桶 seg_cache】(模拟旧 broken: 无 _seg_cache_for)。
+        tvid = "t_D"
+        over = (self.gw.seg_cache.max // n) + 4  # 远超播放桶
+        for i in range(over):
+            _seg(self.gw.seg_cache, "http://h/D_%d.ts" % i, tvid, n)  # 故意灌进播放桶
+
+        # 单桶下: A/B/C 播放段被挤出(总和下降), 这正是隔离要防止的。
+        after_total = sum(self.gw.seg_cache.count_vid(v) for v in ("A", "B", "C"))
+        before_total = sum(before.values())
+        self.assertLess(after_total, before_total,
+                        "单桶退化下播放段【应当】被缩略图源段挤出(否则隔离断言是恒真巧合): "
+                        "before=%d after=%d" % (before_total, after_total))
+
 
 if __name__ == "__main__":
     unittest.main()
