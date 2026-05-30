@@ -337,7 +337,9 @@ export default function ChatBody({
       if (!id) return;
       onChangeChatId(id);
     }
-    send(text, attached ?? undefined, effort, videoT);
+    // 透传 id:刚懒建的 chat,onChangeChatId 触发的 rerender 还没发生,send 闭包里的 chatId 仍是旧值;
+    // 已有 chat 时 id === chatId,行为不变。
+    send(text, attached ?? undefined, effort, videoT, id);
     setInput("");
     setAttached(null);
     atBottomRef.current = true;

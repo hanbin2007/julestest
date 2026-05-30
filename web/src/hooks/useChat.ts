@@ -34,12 +34,22 @@ export function useChat(
   );
 
   const send = React.useCallback(
-    (text: string, image?: string, effort?: ChatEffort, videoT?: number) => {
-      if (!chatId || !text.trim()) return;
-      if (stream.phase === "streaming") return; // UI 应已禁用,这里是双保险
+    (
+      text: string,
+      image?: string,
+      effort?: ChatEffort,
+      videoT?: number,
+      // 懒建 chat 后第一条消息:此时 props.chatId 仍是 null(onChangeChatId 的 rerender 还没发生),
+      // 调用方把刚建好的 id 透传进来。否则闭包里的 chatId=null 会让首条被 `if (!id) return` 吞掉。
+      idOverride?: string,
+    ) => {
+      const id = idOverride ?? chatId;
+      if (!id || !text.trim()) return;
+      // 用 id 自己的流态判断,而非闭包 snapshot(可能是旧/空 chatId 的)——新建 chat 时尤其要紧。
+      if (chatStreams.get(id).phase === "streaming") return; // UI 应已禁用,这里是双保险
       const cur = getCurrentLesson?.();
       void chatStreams.startSend({
-        chatId,
+        chatId: id,
         text: text.trim(),
         image,
         effort,
@@ -48,7 +58,7 @@ export function useChat(
         currentVideoId: cur?.videoId ?? null,
       });
     },
-    [chatId, stream.phase, getCurrentLesson],
+    [chatId, getCurrentLesson],
   );
 
   const stop = React.useCallback(() => {
