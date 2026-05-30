@@ -165,15 +165,24 @@ class DiskLRU:
         self._ns_split = fn
 
     def extra_protect_vids(self):
-        """当前额外保护集的快照(供 gateway 落盘 playhead.json)。"""
+        """当前额外保护集的快照(供 gateway 落盘 playhead.json)。
+        过滤 t_ 前缀(缩略图源段生成期保护): 这类保护只在 _gen_thumbs 生命周期内有意义,
+        生成结束就 remove。若落盘后 kill-9 重启落在生成窗口, 回载的 t_<vid> 永无 worker
+        移除 -> 永久僵尸保护慢慢吃掉有效缓存容量。故绝不落盘 t_ 前缀(#5)。"""
         with self.lock:
-            return sorted(self._extra_protect)
+            return sorted(
+                v for v in self._extra_protect
+                if not (isinstance(v, str) and v.startswith("t_"))
+            )
 
     def set_extra_protect(self, vids):
         """启动时从 playhead.json 还原额外保护集。整体替换(不并集),
-        因为这是重启回载、内存里此前为空。"""
+        因为这是重启回载、内存里此前为空。
+        回载也过滤 t_ 前缀: 既兜底(万一旧版 playhead.json 已被污染), 也自愈(#5)。"""
         with self.lock:
-            self._extra_protect = set(str(v) for v in vids if v)
+            self._extra_protect = set(
+                str(v) for v in vids if v and not str(v).startswith("t_")
+            )
 
     def _pick_victim(self):
         # 持锁调用。meta 头部=最久未用。优先丢最久未用的"非保护集"分片;
