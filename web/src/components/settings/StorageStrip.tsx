@@ -3,6 +3,28 @@ import * as React from "react";
 import { Box, Tooltip, Typography } from "@mui/material";
 import { fmtBytes } from "@/lib/media";
 
+// 标签文案纯函数（#12）：把"播放缓存"与"缩略图"明确并列，互不混算。
+// 背景：缩略图源段已物理隔离到网关独立桶 thumb_seg_cache，buffer.bytes 只含播放段、
+// thumb.bytes 只含缩略图源段，二者不重叠。旧标签裸写"缓存"会让用户误以为缩略图也算在内，
+// 故这里把播放数值标注为"缓存(播放)"，与单列"缩略图"区隔。
+// 抽成纯函数便于无浏览器 TDD（见 web/scripts/_e2e_storage_strip_labels.mjs）。
+export function storageStripLabels({
+  bufferBytes,
+  bufferLimit,
+  thumbBytes,
+  fmtBytes,
+}: {
+  bufferBytes: number;
+  bufferLimit: number;
+  thumbBytes: number;
+  fmtBytes: (n: number) => string;
+}): { cacheLabel: string; detail: string } {
+  const cacheLabel = "缓存(播放)";
+  // 播放缓存只显示 bufferBytes（已是纯播放段），缩略图单列，绝不相加。
+  const detail = `${cacheLabel} ${fmtBytes(bufferBytes)} / ${fmtBytes(bufferLimit)}　·　缩略图 ${fmtBytes(thumbBytes)}`;
+  return { cacheLabel, detail };
+}
+
 // 存储条：缓冲已用/上限 的堆叠横条 + 缩略图占用。宽度过渡动画，避免饼图每秒重排闪烁。
 function StorageStrip({
   bufferBytes,
@@ -16,6 +38,7 @@ function StorageStrip({
   const limit = bufferLimit || 1;
   const usedPct = Math.min(100, (bufferBytes / limit) * 100);
   const near = usedPct >= 90;
+  const { cacheLabel, detail } = storageStripLabels({ bufferBytes, bufferLimit, thumbBytes, fmtBytes });
   return (
     // height 100% + justify center mirrors HealthBar so both short components
     // sit vertically centered rather than leaving a void when TaskQueuePanel is taller.
@@ -47,12 +70,12 @@ function StorageStrip({
           color="text.secondary"
           sx={{ ml: "auto", fontVariantNumeric: "tabular-nums" }}
         >
-          缓存 {fmtBytes(bufferBytes)} / {fmtBytes(bufferLimit)}　·　缩略图 {fmtBytes(thumbBytes)}
+          {detail}
         </Typography>
       </Box>
 
       {/* Row 2: progress bar with full tooltip */}
-      <Tooltip title={`缓存占用：${fmtBytes(bufferBytes)} / 上限 ${fmtBytes(bufferLimit)}（${usedPct.toFixed(1)}%）`}>
+      <Tooltip title={`${cacheLabel}占用：${fmtBytes(bufferBytes)} / 上限 ${fmtBytes(bufferLimit)}（${usedPct.toFixed(1)}%）`}>
         <Box
           sx={{
             position: "relative",

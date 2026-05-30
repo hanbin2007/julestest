@@ -106,6 +106,10 @@ class DiskLRU:
                     continue
                 if fn.endswith(".json") or fn.endswith(".json.tmp"):
                     continue
+                # .corrupt-<ts> 是索引/各 JSON 损坏时隔离下来的取证备份(救数据用),
+                # 不以 .json 结尾, 别当孤儿一刀切删掉。
+                if ".corrupt-" in fn:
+                    continue
                 try:
                     os.remove(os.path.join(self.dir, fn))
                 except OSError:

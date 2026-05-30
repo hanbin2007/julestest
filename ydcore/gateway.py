@@ -175,6 +175,12 @@ class Gateway:
             os.path.join(self.seg_cache.dir, "task_events.json")
             if self.seg_cache.persist else None
         )
+        # init 期终态事件掉盘补发(#18): 启动期(或启动即掉盘)若磁盘不可写, init 期发生的
+        # 僵尸终态(buffer queued->error / thumb gen->error)只进内存 deque 没落盘, 此后
+        # kill-9 会永久丢。这些事件经 _emit_init_event 发, 没落成会暂存到此; 盘回来后
+        # _recover_once 调 _replay_pending_init_events 重发落盘。必须在 _load_persist_tables
+        # (会触发 init 期 _emit_init_event)之前就绪。
+        self._pending_init_events = []
         self._load_task_events()
 
         # 缩略图雪碧图：服务端用 ffmpeg 生成（复用已缓存分片），供 Artplayer 拖动预览。
@@ -250,9 +256,12 @@ class Gateway:
         )
         # 自动预缓存：以"播放头"为中心向前后双向补未缓存分片。
         self.pf_lock = threading.Lock()
-        self.pf_active = {"vid": None}
+        # pf_active 记录当前预缓存的 owner: vid + 唯一 token(#11)。token 由 _pf_new_token
+        # 单调分配, A→B→A 快切时新旧 worker token 不同, 旧 worker finally 不会误清新 owner。
+        self.pf_active = {"vid": None, "token": 0}
+        self.pf_next_token = 0   # 单调 token 分配器(pf_lock 保护)
         self.pf_done = set()     # 预缓存到「整集已满」的 vid（供设置页「已完成」+任务历史用)
-        self.pf_threads = {}     # vid -> (thread, stop_event)
+        self.pf_threads = {}     # vid -> (thread, stop_event, token)  # token: #11 per-worker
         self.pf_segidx = {}      # vid -> {seg_url: index}
         self.playhead = {}       # vid -> 最近一次直播请求到的分片下标
         # pf_done.json: 跨会话保留预缓存完成的讲, 让任务历史里 prefetch:done 不会丢。
@@ -270,6 +279,12 @@ class Gateway:
             if self.seg_cache.persist else None
         )
         self._playhead_dirty = False
+        # #19: playhead 写盘串行化锁。_save_playhead 被两条线程调用 —— 5s 节流的
+        # _playhead_flush_loop 与掉盘恢复的 _flush_all_persist(经 _recover_once)。
+        # 两者都走 _atomic_write_json(playhead_path,...), 共享 tmp 名 path+".tmp";
+        # 并发时 tmp 互相截断 / os.replace 交错, playhead.json 可能落成撕裂半文件。
+        # 用本锁把写盘段串起来, 同一时刻只有一个 playhead 写者(不影响别的 *.json)。
+        self._playhead_lock = threading.Lock()
 
         # 所有持久化路径/dict/锁都就绪后, 一次性回载全部 *.json 持久化表(顺序见方法内)。
         # 抽成 _load_persist_tables 让掉盘恢复守卫(#2)能在盘回来后复用同一回载路径,
@@ -340,8 +355,9 @@ class Gateway:
                         self.thumb_meta[vid] = {"state": "error", "reason": "interrupted"}
                         # [发射点 9] init 期唯一*新发生*的 thumb 终态(gen->error): 上次被砍中途,
                         # 这是新转换不是回载快照, 必须发(R3)。回载原样的 ready/error/cancelled 不发(R4)。
+                        # 走 _emit_init_event: 掉盘期没落盘成功会暂存待盘回来补发(#18)。
                         if emit_init_events:
-                            self._emit_task_event("thumb", vid, "error", "interrupted")
+                            self._emit_init_event("thumb", vid, "error", "interrupted")
                     elif st in ("error", "cancelled"):
                         self.thumb_meta[vid] = m
         except FileNotFoundError:
@@ -452,8 +468,9 @@ class Gateway:
                             # [发射点 4] init 期唯一*新发生*的 buffer 终态(僵尸 queued->error):
                             # 发生在 web 轮询建立之前, seq/emit 已在 init 早期就绪故能发(R3)。
                             # 其它回载原样态(done/cancelled/paused/error/queued)一律不发(R4)。
+                            # 走 _emit_init_event: 掉盘期没落盘成功会暂存待盘回来补发(#18)。
                             if emit_init_events:
-                                self._emit_task_event("buffer", vid, "error", reason)
+                                self._emit_init_event("buffer", vid, "error", reason)
                     else:
                         self.buf_state[vid] = actual
             except Exception:  # noqa: BLE001
@@ -509,13 +526,21 @@ class Gateway:
                 self._quarantine_corrupt(self.playhead_path, "playhead")
                 self.playhead = {}
 
-    def _atomic_write_json(self, path, data):
+    def _atomic_write_json(self, path, data, ok_gate=None):
         """tmp + os.replace 原子落盘 JSON。返回是否真的写成功(掉盘/跳过/异常都 False)。
-        掉盘时 self.seg_cache.ok=False, 跳过避免无限错误日志风暴。"""
+
+        闸门(健康判定)默认看段盘 self.seg_cache.ok: 段盘掉线时跳过, 避免无限错误日志
+        风暴 + 防止用空快照覆盖有效数据。#17: 缩略图持久化落在 thumb_dir(默认系统盘),
+        与段盘(可能外置盘)是【不同的盘】, 故 thumb 写盘传 ok_gate=self._thumb_dir_ok 用
+        自己的健康探针 —— 段盘掉线绝不冻结 thumb 写盘; 反之 thumb 盘掉线也不污染段盘 ok。
+        ok_gate 为 None 时沿用旧行为(段盘闸门 + OSError 连锁标记 seg_cache.ok=False)。"""
         if not path:
             return False
-        if not self.seg_cache.ok:
-            return False  # 掉盘后不再尝试写盘(避免 OSError 刷屏 + 防止用空快照覆盖有效数据)
+        if ok_gate is None:
+            if not self.seg_cache.ok:
+                return False  # 段盘掉线: 不再尝试写盘
+        elif not ok_gate():
+            return False      # 自定义闸门(如 thumb_dir 探针)判定不可写: 跳过
         try:
             tmp = path + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
@@ -524,9 +549,21 @@ class Gateway:
             return True
         except Exception as e:  # noqa: BLE001
             _log.warning("索引落盘失败:%s", path, exc_info=True)
-            if isinstance(e, OSError):
+            # 只有走默认段盘闸门时, OSError 才连锁标记段盘掉线。自定义闸门(thumb)的
+            # 失败不得污染 seg_cache.ok —— 那是另一块盘的健康标志。
+            if ok_gate is None and isinstance(e, OSError):
                 self.seg_cache.ok = False  # 掉盘连锁标记
             return False
+
+    def _thumb_dir_ok(self):
+        """缩略图持久化目录(thumb_dir)当前是否可写 —— 与段盘 seg_cache.ok 完全解耦(#17)。
+        thumb_index/thumb_jobs 都落在 thumb_dir(默认 ~/.youdao_course/thumbs, 多在系统盘),
+        段盘(可能是外置盘)掉线不该把缩略图状态也冻住。逻辑对齐 DiskLRU.dir_ok:
+        目录在且可写即真。每次写盘实时复查, 故 thumb 盘中途掉线也能及时跳过。"""
+        d = getattr(self, "thumb_dir", None)
+        if not d:
+            return False
+        return os.path.isdir(d) and os.access(d, os.W_OK)
 
     def _save_buf_state(self):
         """落盘 buf_state. 调用方必须已经持有 buf_lock(或本就在锁外的 init 阶段)。"""
@@ -618,10 +655,13 @@ class Gateway:
         """落盘 task_events. 调用方已持 task_lock(_emit 内)或确保无并发。
         persist=False 时 task_events_path=None, 静默跳过不落盘(R9)。
         写 {epoch: 本 boot epoch, seq: 历史峰值 _task_seq, events: [...有界 deque, 旧->新]}。
-        epoch 落盘后下次 load 会 +1, 保证跨重启 epoch 单调(#3)。"""
+        epoch 落盘后下次 load 会 +1, 保证跨重启 epoch 单调(#3)。
+
+        返回 True 当且仅当真的写成功落盘; path=None / 掉盘跳过 / 异常都返回 False。
+        init 期补发(#18)靠这个返回值判定"这条事件落盘没成功 -> 暂存待补发"。"""
         if not self.task_events_path:
-            return
-        self._atomic_write_json(
+            return False
+        return self._atomic_write_json(
             self.task_events_path,
             {"epoch": self._task_epoch, "seq": self._task_seq,
              "events": list(self.task_events)},
@@ -649,22 +689,56 @@ class Gateway:
                 "reason": (reason[:200] if reason else None),
             }
             self.task_events.append(ev)
-            self._save_task_events()
+            # 返回是否真落盘成功: init 期补发(#18)据此判定要不要暂存这条待盘回来补发。
+            return self._save_task_events()
+
+    def _emit_init_event(self, kind, vid, state, reason=None):
+        """init 期(__init__ 回载 / 启动即掉盘后重载)的终态事件专用发射口(#18)。
+
+        这些是 init 唯一"新发生"的真转换(僵尸 buffer queued->error / thumb gen->error
+        interrupted), 发生在 web 轮询建立之前。普通 _emit_task_event 在掉盘期会进内存 deque
+        但 _save_task_events 静默跳过 -> 只在内存、没落盘; 此后 kill-9 会永久丢这条真终态。
+
+        本方法照常 emit; 若这次没落盘成功(掉盘), 把语义 (kind,vid,state,reason) 暂存到
+        self._pending_init_events, 待盘回来后由 _recover_once 调 _replay_pending_init_events
+        重新 emit(全新 seq/epoch -> 落盘后是带新 id 的一行, web 不会误去重)。"""
+        if not self._emit_task_event(kind, vid, state, reason):
+            self._pending_init_events.append((kind, str(vid), state, reason))
+
+    def _replay_pending_init_events(self):
+        """盘回来后把掉盘期没落盘成功的 init 终态事件重新 emit(而非仅 reflush)。
+        逐条重发分配全新 seq+当前 epoch, 落盘后是带新 id 的事件行(#18)。补发成功(已落盘)
+        才出队, 仍没落成(盘又抖)就留着下次再补 -> 幂等、不丢。由 _recover_once 两条支路调。"""
+        if not self._pending_init_events:
+            return
+        pending = self._pending_init_events
+        self._pending_init_events = []
+        leftover = []
+        for kind, vid, state, reason in pending:
+            if not self._emit_task_event(kind, vid, state, reason):
+                leftover.append((kind, vid, state, reason))  # 盘又抖, 留到下次补
+        self._pending_init_events = leftover
 
     def _save_playhead(self):
         """落盘 playhead + protect_vid. 由 _playhead_flush_loop 节流调用,不直接在
-        /p 处理线程里调(每秒可能多次写盘,无价值)。"""
+        /p 处理线程里调(每秒可能多次写盘,无价值)。
+
+        #19: 写盘段被 _playhead_lock 串行化。本方法被 5s 节流线程和掉盘恢复
+        (_flush_all_persist)两条线程调用, 都走同一 playhead_path + 共享 tmp 名,
+        并发会让 tmp 互相截断 / os.replace 交错 -> 撕裂半文件。锁内取快照 + 落盘,
+        保证任一时刻只有一个 playhead 写者(不影响别的 *.json 写)。"""
         if not self.playhead_path:
             return
-        data = {
-            "playhead": dict(self.playhead),
-            "protect_vid": self.seg_cache.protect_vid,
-            "extra_protect": self.seg_cache.extra_protect_vids(),
-        }
-        # 只有真写成功才清 dirty: _atomic_write_json 掉盘时静默跳过(返回 False),
-        # 此时若清了 dirty, 失败的 flush 不会重试, 位置/保护集可能再也补不上。
-        if self._atomic_write_json(self.playhead_path, data):
-            self._playhead_dirty = False
+        with self._playhead_lock:
+            data = {
+                "playhead": dict(self.playhead),
+                "protect_vid": self.seg_cache.protect_vid,
+                "extra_protect": self.seg_cache.extra_protect_vids(),
+            }
+            # 只有真写成功才清 dirty: _atomic_write_json 掉盘时静默跳过(返回 False),
+            # 此时若清了 dirty, 失败的 flush 不会重试, 位置/保护集可能再也补不上。
+            if self._atomic_write_json(self.playhead_path, data):
+                self._playhead_dirty = False
 
     def _playhead_flush_loop(self):
         """每 5s 检查 playhead/protect_vid 是否 dirty, 是就落盘。
@@ -739,10 +813,14 @@ class Gateway:
                 _log.warning("启动即掉盘后缓存盘回来, 从磁盘重载持久化态(防空内存覆盖)")
                 self._reload_all_persist()
                 self._ever_loaded = True
-                return
-            # 运行中掉盘后回来: 内存态权威, 刷回盘。
-            _log.warning("缓存盘恢复可写, 重刷全部持久化状态")
-            self._flush_all_persist()
+            else:
+                # 运行中掉盘后回来: 内存态权威, 刷回盘。
+                _log.warning("缓存盘恢复可写, 重刷全部持久化状态")
+                self._flush_all_persist()
+            # #18: 掉盘期没落盘成功的 init 终态事件, 盘回来后重新 emit 并落盘(两条支路都补)。
+            # 放在重载/刷回之后: 重载支路里 _reload_all_persist 会 _load_task_events 续上盘上
+            # 峰值 seq, 此时补发分配的新 seq 不会与盘上已有事件撞。
+            self._replay_pending_init_events()
 
     def _recover_flush_loop(self):
         """监测掉盘恢复: seg_cache.ok 由 False→True 时跑一次 _recover_once。
@@ -793,6 +871,7 @@ class Gateway:
         self._task_epoch = 1  # #3: per-boot epoch(测试骨架不回载, 直接给初值)
         self.task_events = collections.deque(maxlen=_TASK_EVENTS_KEEP)
         self.task_events_path = os.path.join(cache_dir, "task_events.json")
+        self._pending_init_events = []  # #18: 掉盘期 init 终态事件暂存待补发
 
         # thumb 隔离目录(不碰生产 THUMB_DIR)
         self.thumb_dir = os.path.join(cache_dir, "_thumb")
@@ -827,12 +906,14 @@ class Gateway:
 
         # 预缓存
         self.pf_lock = threading.Lock()
-        self.pf_active = {"vid": None}
+        self.pf_active = {"vid": None, "token": 0}  # #11: owner = vid+token
+        self.pf_next_token = 0
         self.pf_done = set()
         self.pf_threads = {}
         self.pf_segidx = {}
         self.playhead = {}
         self._playhead_dirty = False
+        self._playhead_lock = threading.Lock()  # #19: 串行化 playhead 写盘
 
         # 全部持久化路径
         self.seg_urls_path = os.path.join(cache_dir, "seg_urls.json")
@@ -959,7 +1040,9 @@ class Gateway:
         # 留半截/零字节索引,否则会丢全部缩略图状态。Plan 3 依赖此原子性,勿重做。
         with self.thumb_lock:
             snap = {k: dict(v) for k, v in self.thumb_meta.items() if v.get("state")}
-        self._atomic_write_json(self.thumb_index_path, snap)
+        # #17: 缩略图持久化用自己的 thumb_dir 健康探针, 与段盘 seg_cache.ok 解耦 ——
+        # 段盘掉线绝不冻结缩略图状态落盘(thumb_dir 多在系统盘, 跟段盘是两块盘)。
+        self._atomic_write_json(self.thumb_index_path, snap, ok_gate=self._thumb_dir_ok)
 
     def _save_thumb_jobs(self):
         """落盘 thumb_jobs (重试上下文)。自身在 thumb_lock 下快照, 调用方必须 *不* 持锁。"""
@@ -975,7 +1058,8 @@ class Gateway:
                     out[str(vid)] = [v, m, int(dur or 0), int(tier or 2)]
             except Exception:  # noqa: BLE001
                 continue
-        self._atomic_write_json(self.thumb_jobs_path, out)
+        # #17: 同 thumb_index, 用 thumb_dir 探针闸门, 不被段盘掉线连累。
+        self._atomic_write_json(self.thumb_jobs_path, out, ok_gate=self._thumb_dir_ok)
 
     def _thumb_worker(self):
         while True:
@@ -1383,7 +1467,25 @@ class Gateway:
         return {"ok": ok, "vid": vid, "kind": "thumb", "state": new_state, "reason": reason}
 
     # ---- 自动预缓存 ------------------------------------------------------
-    def _prefetch_worker(self, vid, m3u8, stop):
+    def _pf_new_token(self, vid):
+        """[#11] 分配一个唯一 token 并把 pf_active 的 owner 设为 (vid, token)。
+        每个新 worker 启动时调一次; 调用方须持 pf_lock(本方法不自锁, 由 start_prefetch
+        统一在 pf_lock 内调用以保证"设 active + 分配 token + 起线程"原子)。返回新 token。"""
+        self.pf_next_token += 1
+        tok = self.pf_next_token
+        self.pf_active["vid"] = vid
+        self.pf_active["token"] = tok
+        return tok
+
+    def _pf_clear_if_owner(self, vid, token):
+        """[#11] CAS 清理: 仅当当前 pf_active 仍属于 (vid, token) 这个 worker 才清空。
+        A→B→A 快切后, 被切走的旧 worker token 已过期, pf_active 已被新 worker 改写,
+        此处 token 不匹配 -> 不动, 避免旧 worker 的 finally 误杀新 owner。"""
+        with self.pf_lock:
+            if self.pf_active.get("vid") == vid and self.pf_active.get("token") == token:
+                self.pf_active["vid"] = None
+
+    def _prefetch_worker(self, vid, m3u8, stop, token):
         hdrs = self.video_headers.get(vid)
         if not hdrs:
             return
@@ -1427,12 +1529,17 @@ class Gateway:
         # 不停地以播放头为中心、前后双向补未缓存分片；播放头一动就立刻重新居中。
         # 任何退出路径（被切走 return / 整集缓存完成 return / 循环条件退出）都经 finally
         # 清掉 pf_active，避免 worker 退出后 pf_active 仍残留本 vid 误导状态/重建判断。
+        # [#11] "我仍是 owner" = pf_active 的 vid 且 token 都匹配本 worker;
+        # A→B→A 快切后旧 worker token 过期, 即使 vid 又变回 A 也立即让位给新 worker。
+        def _is_owner():
+            a = self.pf_active
+            return a.get("vid") == vid and a.get("token") == token
         try:
-            while not stop.is_set() and self.pf_active["vid"] == vid:
+            while not stop.is_set() and _is_owner():
                 center = self.playhead.get(vid, 0)
                 fetched = recenter = False
                 for idx in _order(center):
-                    if stop.is_set() or self.pf_active["vid"] != vid:
+                    if stop.is_set() or not _is_owner():
                         return  # 被切走 -> 停（已缓存的保留，回来可续）
                     if self.playhead.get(vid, 0) != center:
                         recenter = True
@@ -1461,30 +1568,36 @@ class Gateway:
                         self._emit_task_event("prefetch", vid, "done")
                     return
         finally:
-            with self.pf_lock:
-                if self.pf_active.get("vid") == vid:
-                    self.pf_active["vid"] = None
+            # [#11] CAS 清: 只在 pf_active 仍属于本 worker(vid+token 双匹配)时清。
+            # A→B→A 快切后本 worker 已是"旧"worker, token 过期 -> 不动新 owner。
+            self._pf_clear_if_owner(vid, token)
 
     def start_prefetch(self, vid, m3u8):
         with self.pf_lock:
-            self.pf_active["vid"] = vid
             # 清掉已死线程(老 vid 的 worker 跑完早退): 否则 pf_threads 随会话无限膨胀。
             # 只删非当前 vid 且线程已不 alive 的; 当前 vid 下面单独判活/复用。
-            dead = [ov for ov, (t, _ev) in self.pf_threads.items()
+            dead = [ov for ov, (t, _ev, _tk) in self.pf_threads.items()
                     if ov != vid and not t.is_alive()]
             for ov in dead:
                 self.pf_threads.pop(ov, None)
-            for ovid, (_, ev) in self.pf_threads.items():
+            for ovid, (_, ev, _tk) in self.pf_threads.items():
                 if ovid != vid:
                     ev.set()  # 暂停其它正在下的
             cur = self.pf_threads.get(vid)
             # 仅当线程存活且 stop-Event 未被 set 时才视为"活跃 worker"；
             # stop-Event 已 set 说明线程正在退出（如 A→B→A 快切），需重建。
             if cur and cur[0].is_alive() and not cur[1].is_set():
+                # 复用活 worker: pf_active 的 owner 仍是它(同 vid 同 token), 重申一遍即可,
+                # 不分配新 token(否则会把这个活 worker 自己"切走")。
+                self.pf_active["vid"] = vid
+                self.pf_active["token"] = cur[2]
                 return
             ev = threading.Event()  # 新的未 set Event，不能复用旧的
-            t = threading.Thread(target=self._prefetch_worker, args=(vid, m3u8, ev), daemon=True)
-            self.pf_threads[vid] = (t, ev)
+            # [#11] 新 worker 拿唯一 token, pf_active owner 原子切到 (vid, token)。
+            tok = self._pf_new_token(vid)
+            t = threading.Thread(target=self._prefetch_worker, args=(vid, m3u8, ev, tok),
+                                 daemon=True)
+            self.pf_threads[vid] = (t, ev, tok)
             t.start()
 
 

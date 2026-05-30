@@ -1,6 +1,8 @@
 import { prisma } from "@/lib/db";
 import { gatewayGet, gatewayPost } from "@/lib/gateway";
 import { getCatalogRollup, type VidMeta } from "@/lib/catalogRollup";
+import { computeDedupedTotals } from "@/lib/statusTotals";
+import { normalizeThumbState } from "@/lib/thumbStatus";
 import type { CoursesStatus, CourseStatus, GwStatus, TaskEventsResp, TaskItem, VidStatusDetail } from "@/types/api";
 
 export const runtime = "nodejs";
@@ -201,10 +203,9 @@ async function build(): Promise<CoursesStatus> {
   // 一次性 fire 给 /api/warm 让网关只取 m3u8 学到分片顺序+总数（不下分片）。下次轮询就有 total 了。
   void triggerWarmIfNeeded(perVidGw, byVid);
   const perVid: Record<string, VidStatusDetail> = {};
-  const thumbState = (vid: number): VidStatusDetail["thumb"] => {
-    const s = gw!.thumb.states[String(vid)];
-    return s === "ready" || s === "gen" || s === "error" ? s : null;
-  };
+  // 白名单归一与 mirror 写入侧 / 离线回退侧共用 normalizeThumbState(#14)，三处一份口径。
+  const thumbState = (vid: number): VidStatusDetail["thumb"] =>
+    normalizeThumbState(gw!.thumb.states[String(vid)]);
 
   const courseStatus = buildCourseStatus(
     courses,
@@ -327,6 +328,18 @@ async function build(): Promise<CoursesStatus> {
   const downloadingVid = bufWorking[0] ?? activePrefetch ?? thWorking[0] ?? null;
   const dlMeta = downloadingVid ? byVid.get(Number(downloadingVid)) : null;
 
+  // lectures/cachedLectures/thumbsReady 跨课按 distinct videoId 去重（#13）：共享讲（同
+  // videoId 打进多门课）磁盘上只有一份，不能像「各课逐项相加」那样重复计数——否则与
+  // bufferBytes（已用网关 buffer.bytes 物理去重）口径矛盾。见 statusTotals.ts。
+  const dedupTotals = computeDedupedTotals(
+    courses,
+    (videoId) => {
+      const b = perVidGw[String(videoId)];
+      return b ? { cached: b.cached, total: b.total } : null;
+    },
+    thumbState,
+  );
+
   return {
     courses: courseStatus,
     perVid,
@@ -336,9 +349,9 @@ async function build(): Promise<CoursesStatus> {
       bufferBytes: gw.buffer.bytes,
       bufferLimit: gw.buffer.limit,
       thumbBytes,
-      lectures: courseStatus.reduce((a, c) => a + c.lectures, 0),
-      cachedLectures: courseStatus.reduce((a, c) => a + c.cachedLectures, 0),
-      thumbsReady: courseStatus.reduce((a, c) => a + c.thumbsReady, 0),
+      lectures: dedupTotals.lectures,
+      cachedLectures: dedupTotals.cachedLectures,
+      thumbsReady: dedupTotals.thumbsReady,
     },
     activity: {
       downloadingVid: downloadingVid ? Number(downloadingVid) : null,
@@ -378,7 +391,13 @@ async function mirror(gw: GwStatus) {
     for (const [vid, st] of Object.entries(gw.thumb.states)) {
       const videoId = Number(vid);
       if (!videoId) continue;
-      ops.push(prisma.thumbStatus.upsert({ where: { videoId }, create: { videoId, state: st }, update: { state: st } }));
+      // 白名单归一(#14)：网关 state 可能是 cancelled/queued 等非前端合法值；只镜像 ready/gen/error。
+      // 归一为 null（cancelled/queued/未知）时删除镜像行——否则离线回退会把它当 thumb 态吐给前端
+      // 误显示「生成中」/上色错乱。ThumbStatus.state 非空，故落库前必须先白名单化（不能写 null）。
+      const norm = normalizeThumbState(st);
+      if (norm)
+        ops.push(prisma.thumbStatus.upsert({ where: { videoId }, create: { videoId, state: norm }, update: { state: norm } }));
+      else ops.push(prisma.thumbStatus.deleteMany({ where: { videoId } }));
     }
     if (ops.length) await prisma.$transaction(ops);
     // 任务历史:从网关事件日志按 seq 增量拉取写库(替代旧的快照 diff + 字符串去重)。
@@ -556,7 +575,9 @@ async function fallback(
 ): Promise<CoursesStatus> {
   const [cs, ts] = await Promise.all([prisma.cacheStatus.findMany(), prisma.thumbStatus.findMany()]);
   const cacheBy = new Map(cs.map((r) => [r.videoId, r]));
-  const thumbBy = new Map(ts.map((r) => [r.videoId, r.state]));
+  // 离线回退也走白名单归一(#14)：自愈任何在本修复前已被污染（cancelled/queued 落库）的镜像行——
+  // 否则网关掉线时会把非法值当 thumb 态吐给前端误显示「生成中」/上色错乱。归一一次，下游两处共用。
+  const thumbBy = new Map(ts.map((r) => [r.videoId, normalizeThumbState(r.state)]));
   const perVid: Record<string, VidStatusDetail> = {};
 
   const courseStatus = buildCourseStatus(
@@ -569,12 +590,22 @@ async function fallback(
         ? { cached: b.cachedSegments, total: b.totalSegments, state: (b.state as VidStatusDetail["state"]) ?? null, bytes: b.bytes || 0 }
         : null;
     },
-    (videoId) => (thumbBy.get(videoId) as VidStatusDetail["thumb"]) ?? null,
+    (videoId) => thumbBy.get(videoId) ?? null,
     false,
   );
   // 全局总字节按 unique videoId 去重：cacheBy 本身就是 videoId 建键（每讲一行），直接累加其
   // 字节即天然去重；不能用「各课 cachedBytes 相加」，那会把共享讲在每门拥有它的课里重复计数。
   const totalBytes = Array.from(cacheBy.values()).reduce((a, r) => a + (r.bytes || 0), 0);
+
+  // 同 build()：lectures/cachedLectures/thumbsReady 跨课按 distinct videoId 去重（#13）。
+  const dedupTotals = computeDedupedTotals(
+    courses,
+    (videoId) => {
+      const b = cacheBy.get(videoId);
+      return b ? { cached: b.cachedSegments, total: b.totalSegments } : null;
+    },
+    (videoId) => thumbBy.get(videoId) ?? null,
+  );
 
   return {
     courses: courseStatus,
@@ -583,9 +614,9 @@ async function fallback(
       bufferBytes: totalBytes,
       bufferLimit: 0,
       thumbBytes: 0,
-      lectures: courseStatus.reduce((a, c) => a + c.lectures, 0),
-      cachedLectures: courseStatus.reduce((a, c) => a + c.cachedLectures, 0),
-      thumbsReady: courseStatus.reduce((a, c) => a + c.thumbsReady, 0),
+      lectures: dedupTotals.lectures,
+      cachedLectures: dedupTotals.cachedLectures,
+      thumbsReady: dedupTotals.thumbsReady,
     },
     activity: { downloadingVid: null, title: null, tier: null, queue: { thumb: 0, buffer: 0 } },
     tasks: [],
