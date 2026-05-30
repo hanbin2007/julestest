@@ -100,6 +100,12 @@ THUMB_WORKERS = 3
 # 卡在 queued/gen 不动(#4)。超时后 terminate→(5s)→kill, 终态落 error reason="ffmpeg timeout %ds"。
 # YD_THUMB_FFMPEG_TIMEOUT 仅供隔离 e2e/单元测试调小(默认 120s 太长); 生产不设此 env 即用默认。
 _THUMB_FFMPEG_TIMEOUT = int(os.environ.get("YD_THUMB_FFMPEG_TIMEOUT") or 120)
+# 缩略图源段独立桶上限(#1,#8): 缩略图源段(低清流)不再和 256MB 播放桶 seg_cache 抢容量,
+# 物理隔离到自己的小硬桶 thumb_seg_cache。这样生成 D 的缩略图绝不会把已缓存(但当前没在看)
+# 的 A/B/C 播放段挤出(保护窗口覆盖不到任意已缓存段, 只有物理分桶才能真正限界)。
+# 64MB 足够放下一集低清流的全部源段(雪碧图生成顺序读); 生成完即 drop_vid 立即释放。
+# YD_THUMB_CACHE_BYTES 仅供隔离 e2e/单元测试调小; 生产不设此 env 即用默认。
+_THUMB_CACHE_BYTES = int(os.environ.get("YD_THUMB_CACHE_BYTES") or (64 * 1024 * 1024))
 # buf_state 跨重启保留的"终态"(done/cancelled)上限: 防止跨上千讲无限膨胀。
 # 非终态(queued/working/paused/error)永远保留(用户可能要 resume/retry)。
 _BUF_TERMINAL_KEEP = 500
@@ -177,6 +183,21 @@ class Gateway:
         self.thumb_index_path = os.path.join(self.thumb_dir, "index.json")
         # thumb_jobs.json 跟 thumb_index.json 一个目录, 跨重启保留失败/取消任务的重试上下文。
         self.thumb_jobs_path = os.path.join(self.thumb_dir, "thumb_jobs.json")
+        # 缩略图源段独立物理桶(#1,#8): 低清流源段不再灌进 256MB 播放桶 seg_cache,
+        # 改进自己的小硬桶(默认 64MB), 落在 thumb_dir/segcache。物理隔离是唯一能真正限界
+        # "生成 D 缩略图把 A/B/C 已缓存播放段挤出"的手段(保护窗口覆盖不到任意已缓存段)。
+        # 生成完(_gen_thumbs finally)调 thumb_seg_cache.drop_vid('t_'+vid) 立即释放源段。
+        # DiskLRU(persist_dir) 不自建目录(掉盘守卫语义), 故先建 segcache 子目录再构造,
+        # 否则首启 isdir=False -> ok=False -> 源段一片都缓存不进。它是内部再生成缓存,
+        # 跟着 thumb_dir 走(thumb_dir 本就 makedirs), 不是外置盘上的用户数据, 建之无害。
+        self._thumb_seg_dir = os.path.join(self.thumb_dir, "segcache")
+        os.makedirs(self._thumb_seg_dir, exist_ok=True)
+        self.thumb_seg_cache = DiskLRU(_THUMB_CACHE_BYTES, self._thumb_seg_dir)
+        # 注入同一 t_ 拆分器: thumb_seg_cache 里全是 t_<vid> 键, vid_stats()['thumb'] 即得
+        # 去前缀的 {vid: {bytes,segments}}, /api/status 的 per-vid thumbBytes 直接复用。
+        self.thumb_seg_cache.set_namespace_splitter(
+            lambda vid: ("thumb", vid[2:]) if isinstance(vid, str) and vid.startswith("t_") else ("real", vid)
+        )
         self.thumb_meta = {}     # vid -> {"state": "gen"/"ready"/"error"/"cancelled", ...}
         self.thumb_active = set()  # 真正在 ffmpeg 生成中的 vid（区分"生成中"与"排队中"）
         self.thumb_jobs = {}     # vid -> (video, m3u8, duration, tier)，供重试重新入队
@@ -778,6 +799,13 @@ class Gateway:
         os.makedirs(self.thumb_dir, exist_ok=True)
         self.thumb_index_path = os.path.join(self.thumb_dir, "index.json")
         self.thumb_jobs_path = os.path.join(self.thumb_dir, "thumb_jobs.json")
+        # 缩略图源段独立物理桶(#1,#8): 与生产 __init__ 同构, 落在 thumb_dir/segcache。
+        self._thumb_seg_dir = os.path.join(self.thumb_dir, "segcache")
+        os.makedirs(self._thumb_seg_dir, exist_ok=True)
+        self.thumb_seg_cache = DiskLRU(_THUMB_CACHE_BYTES, self._thumb_seg_dir)
+        self.thumb_seg_cache.set_namespace_splitter(
+            lambda vid: ("thumb", vid[2:]) if isinstance(vid, str) and vid.startswith("t_") else ("real", vid)
+        )
         self.thumb_meta = {}
         self.thumb_active = set()
         self.thumb_jobs = {}
@@ -975,6 +1003,14 @@ class Gateway:
                     self.thumb_procs.pop(vid, None)
                 self.thumb_q.task_done()
 
+    def _seg_cache_for(self, vid):
+        """按 vid 前缀选物理桶(#1,#8): 缩略图源段(t_前缀)进独立小桶 thumb_seg_cache,
+        播放段进 256MB seg_cache。/p 回环、缩略图源预取、has/put 全走此 seam 路由,
+        保证两类段物理分离、互不淘汰。cache.py 不识前缀(命名约定是 gateway 的事)。"""
+        if isinstance(vid, str) and vid.startswith("t_"):
+            return self.thumb_seg_cache
+        return self.seg_cache
+
     def _gen_thumbs(self, vid, m3u8, duration, tier):
         if duration <= 0:
             duration = 600
@@ -991,14 +1027,13 @@ class Gateway:
                 # 必须在此就地发)。终态落地, 非回载快照。
                 self._emit_task_event("thumb", vid, "error", "no headers")
             return
-        # 生成期间保护 tvid: 缩略图源段(t_前缀)在共享 DiskLRU 里, 不加保护时一个大缩略图批
-        # 可能把刚缓冲好的播放段挤出(_pick_victim 只保护 LIVE+_extra_protect)。这里把 tvid
-        # 加进保护集, ffmpeg 跑完即移除——窗口短且有界, 不会长期占用 LRU 保护名额。
-        self.seg_cache.add_protect_vid(tvid)
+        # 缩略图源段已物理隔离到 thumb_seg_cache(#1,#8): 不再灌进播放桶, 也就不会挤出
+        # A/B/C 已缓存播放段, 故不再需要 add_protect_vid(tvid) 跨桶保护(那本就覆盖不到
+        # 任意已缓存段)。生成完(成功/失败/取消)统一 drop_vid 立即释放源段, 不留尾巴。
         try:
             self._gen_thumbs_inner(vid, tvid, m3u8, tier, out, number, rows)
         finally:
-            self.seg_cache.remove_protect_vid(tvid)
+            self.thumb_seg_cache.drop_vid(tvid)
 
     def _gen_thumbs_inner(self, vid, tvid, m3u8, tier, out, number, rows):
         th = dict(self.video_headers.get(tvid) or {})
@@ -1019,11 +1054,13 @@ class Gateway:
                 # 不再把整批低清源段拉完(省带宽 + 减共享缓存压力), 也不进入 Popen 启动 ffmpeg。
                 if (self.thumb_meta.get(vid) or {}).get("state") == "cancelled":
                     return
-                if self.seg_cache.has((u, tvid)):
+                # 缩略图源段进独立桶 thumb_seg_cache(经 _seg_cache_for 路由), 不挤播放桶(#1,#8)。
+                tcache = self._seg_cache_for(tvid)
+                if tcache.has((u, tvid)):
                     continue
                 try:
                     d, c, _ = self.pri_fetch(tier, th, u)
-                    self.seg_cache.put((u, tvid), (c or "video/mp2t", d))
+                    tcache.put((u, tvid), (c or "video/mp2t", d))
                 except Exception:  # noqa: BLE001
                     _log.debug("缩略图源分片预取失败：%s", u, exc_info=True)
         except Exception:  # noqa: BLE001
@@ -1516,6 +1553,13 @@ def make_handler(gateway):
                     "active": gw.pf_active["vid"],
                     "cacheItems": len(gw.seg_cache.meta),
                     "cacheBytes": gw.seg_cache.size,
+                    # 缩略图源段独立物理桶(#1,#8): e2e 断言它与播放桶 seg_cache 物理分离
+                    # (不同目录/不同 size/独立上限), 缩略图生成不挤播放段。
+                    "thumbSegItems": len(gw.thumb_seg_cache.meta),
+                    "thumbSegBytes": gw.thumb_seg_cache.size,
+                    "thumbSegMax": gw.thumb_seg_cache.max,
+                    "thumbSegDir": gw.thumb_seg_cache.dir,
+                    "segCacheDir": gw.seg_cache.dir if gw.seg_cache.persist else "",
                     # vid -> 磁盘真实分片数 (e2e 断言 cached 三端一致用)
                     "vidReal": {v: d.get("segments", 0)
                                 for v, d in _real.items()},
@@ -1811,8 +1855,10 @@ def make_handler(gateway):
                 bstates = dict(gw.buf_state)  # 一次持锁快照，避免并发遍历崩溃 + 供任务标签全量态
             with gw.pf_lock:
                 pf_done = sorted(gw.pf_done)  # 本会话预缓存满的讲（供「已完成」）
-            stats = gw.seg_cache.vid_stats()  # 一次遍历拿到磁盘真相
-            real, thumbb = stats["real"], stats["thumb"]
+            real = gw.seg_cache.vid_stats()["real"]  # 播放段磁盘真相(thumb 桶已物理迁出)
+            # 缩略图源段已物理隔离到独立桶 thumb_seg_cache(#1,#8): per-vid thumbBytes 与
+            # 聚合 thumb.bytes 都从它读, 不再从 seg_cache 的 thumb 桶(那桶现已恒空)。
+            thumbb = gw.thumb_seg_cache.vid_stats()["thumb"]
             snap = gw.seg_cache.cached_segs_by_vid()  # _vid_counts 用 (clarity 漂移判定)
             vids = qs.get("videoId") or []  # 可选：只查这些 vid 的缓冲明细
             # 枚举范围 = 磁盘已缓存 ∪ 已学到分片列表(seg_urls) ∪ 缓冲状态。覆盖"任何来源的缓存"。
@@ -1857,8 +1903,9 @@ def make_handler(gateway):
                           # 由 queued_vids 推数：thumb_q.qsize() 会把已取消/在途的也算进去而高报。
                           "queued": len(tqueued), "errors": terr,
                           "session": tsession,
-                          # 缩略图源段在磁盘的总字节(thumb 桶汇总): 取代已删的 /api/thumbs/status。
-                          "bytes": sum((d.get("bytes", 0) for d in thumbb.values()), 0)},
+                          # 缩略图源段在磁盘的总字节: 直接读独立桶 thumb_seg_cache.size(#1,#8),
+                          # 物理分离、不再和播放桶 seg_cache.size 混算(消除 #8 双计)。
+                          "bytes": gw.thumb_seg_cache.size},
                 "buffer": {"perVid": buffer, "bytes": gw.seg_cache.size, "limit": gw.seg_cache.max,
                            "queued": gw.buf_q.qsize(),
                            "working": [k for k, s in bstates.items() if s == "working"],
@@ -2093,9 +2140,12 @@ def make_handler(gateway):
                                  "application/vnd.apple.mpegurl")
                 return
 
-            # 分片 / 密钥：整段缓存，拖动到看过的位置秒开；并支持 Range（Safari 原生拖动）
+            # 分片 / 密钥：整段缓存，拖动到看过的位置秒开；并支持 Range（Safari 原生拖动）。
+            # 缩略图源段(vid=t_xxx, ffmpeg 回环读)走独立桶 thumb_seg_cache, 播放段走 seg_cache,
+            # 经 _seg_cache_for 路由(#1,#8): 物理隔离, ffmpeg 大批量读源段绝不挤播放缓存。
+            seg_cache = self.gw._seg_cache_for(vid)
             ck = (target, vid)
-            cached = self.gw.seg_cache.get(ck)
+            cached = seg_cache.get(ck)
             if cached is None:
                 try:
                     data, ctype, _ = self._fetch_upstream(target, vid)
@@ -2108,7 +2158,7 @@ def make_handler(gateway):
                     self._send_bytes(502, str(e).encode("utf-8"), "text/plain")
                     return
                 ctype = ctype or "application/octet-stream"
-                self.gw.seg_cache.put(ck, (ctype, data))
+                seg_cache.put(ck, (ctype, data))
             else:
                 ctype, data = cached
 

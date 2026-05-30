@@ -271,6 +271,25 @@ class DiskLRU:
                     pass
             self._dirty = True   # 内容/顺序变了，待 _flush_loop 落盘
 
+    def drop_vid(self, vid):
+        """立即删除某 vid 的全部条目(内存 meta + 盘上文件), 精确扣减 self.size。
+        缩略图生成完即调用: 源段只是再生成缓存, 雪碧图已落盘, 没必要等 LRU 慢慢淘汰
+        (拖到淘汰期间它们还白占容量 / 计在 thumbBytes 里, #8)。返回删除的条目数。"""
+        removed = 0
+        with self.lock:
+            victims = [k for k in self.meta if k[1] == vid]
+            for key in victims:
+                _ctype, sz, fname = self.meta.pop(key)
+                self.size -= sz
+                removed += 1
+                try:
+                    os.remove(os.path.join(self.dir, fname))
+                except OSError:
+                    pass
+            if removed:
+                self._dirty = True   # 索引变了, 待 _flush_loop 落盘
+        return removed
+
     def count_vid(self, vid):
         with self.lock:
             return sum(1 for (t, v) in self.meta
