@@ -677,6 +677,11 @@ class Gateway:
         临界区只取 task_lock, 绝不嵌套 buf_lock/thumb_lock/pf_lock:
         调用方(worker/act/init)往往已持有那些锁, 在此再取会死锁。_task_seq 单调递增
         是内存权威(即便落盘被掉盘跳过), web 靠 seq 区分事件、两侧绝不按状态值去重(R1)。"""
+        # #15: 盖上该 vid 的 productId(共享讲同 videoId 跨课, web 按 (productId,videoId)
+        # 才能归属到正确课程)。从 video_meta 读(buffer/thumb/warm/play 入口都先 _remember_video
+        # 落过)。dict.get 是 GIL 原子, 不嵌套 meta_lock(避免与 task_lock 形成锁序冲突/死锁)。
+        meta = self.video_meta.get(str(vid)) or {}
+        product_id = meta.get("productId")
         with self.task_lock:
             self._task_seq += 1
             ev = {
@@ -685,6 +690,7 @@ class Gateway:
                 "ts": time.time(),
                 "kind": kind,
                 "vid": str(vid),
+                "productId": product_id,  # #15: 共享讲归属(可能为 None)
                 "state": state,
                 "reason": (reason[:200] if reason else None),
             }
@@ -1819,6 +1825,15 @@ def make_handler(gateway):
                 state = ev.get("state")
                 if not (isinstance(kind, str) and state and vid is not None):
                     continue
+                # #15 e2e: 可选 productId 先经 _remember_video 落进 video_meta, 让真实
+                # _emit_task_event 从 video_meta 盖上 productId(走生产同一路径, 不绕过)。
+                pid = ev.get("productId")
+                if pid is not None:
+                    try:
+                        self.gw._remember_video(
+                            {"videoId": int(vid), "productId": int(pid)}, None)
+                    except (TypeError, ValueError):
+                        pass
                 self.gw._emit_task_event(kind, vid, state, ev.get("reason"))
                 n += 1
             self._send_json({"emitted": n, "seq": self.gw._task_seq,

@@ -178,6 +178,7 @@ export interface TaskEvent {
   seq: number; // epoch 内单调序号(跨重启可复用,靠 epoch 区分行)
   kind: string; // 'buffer' | 'thumb' | 'prefetch'
   vid: string; // 网关侧 str(vid)
+  productId?: number | null; // 共享讲归属(#15):网关从 video_meta 盖上,可能为 null/缺省
   state: string; // buffer: done|error|paused|cancelled / thumb: done|error / prefetch: done
   reason: string | null; // 仅 error 填(最多 200 字)
   ts: number; // time.time() 浮点秒

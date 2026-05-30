@@ -243,6 +243,47 @@ class TaskEventsTest(unittest.TestCase):
         self.assertEqual(r["epoch"], gw._task_epoch)
         self.assertEqual(r["events"][0]["epoch"], gw._task_epoch)
 
+    @staticmethod
+    def _ev_for(events, vid):
+        """按 vid 选出本测试自己 emit 的那一条(避开构造期可能漏入的 init 事件)。"""
+        rows = [e for e in events if e.get("vid") == str(vid)]
+        assert rows, "no event for vid=%s" % vid
+        return rows[-1]
+
+    def test_emit_stamps_productId_from_video_meta(self):
+        """Task 8 (#15): emit 时从 video_meta 取该 vid 的 productId 盖到事件上,
+        共享讲(同 videoId 跨课)才能按 (productId,videoId) 归属到正确课程。"""
+        gw = _mk_gateway(self.tmp)
+        # 模拟一次 buffer/thumb 前的 _remember_video: 该 vid 归属 productId=42
+        gw._remember_video(
+            {"videoId": 555, "contentId": 1, "cardPackageId": 2, "productId": 42},
+            "https://example.com/x.m3u8",
+        )
+        gw._emit_task_event("buffer", "555", "done")
+        ev = self._ev_for(gw.task_events, "555")
+        self.assertEqual(ev["productId"], 42)
+
+    def test_emit_productId_none_when_unknown(self):
+        """video_meta 里没有该 vid(或无 productId)时, 事件 productId 为 None, 不崩。"""
+        gw = _mk_gateway(self.tmp)
+        gw._emit_task_event("buffer", "999", "done")  # 从未 _remember_video
+        ev = self._ev_for(gw.task_events, "999")
+        self.assertIsNone(ev["productId"])
+
+    def test_save_load_roundtrips_productId(self):
+        """productId 落盘并能回载(重启后历史行仍带归属)。"""
+        gw = _mk_gateway(self.tmp)
+        gw._remember_video(
+            {"videoId": 7, "contentId": 1, "cardPackageId": 2, "productId": 88},
+            "https://example.com/y.m3u8",
+        )
+        gw._emit_task_event("thumb", "7", "done")
+        with open(gw.task_events_path, "r", encoding="utf-8") as f:
+            saved = json.load(f)
+        self.assertEqual(self._ev_for(saved["events"], "7")["productId"], 88)
+        gw2 = _mk_gateway(self.tmp)
+        self.assertEqual(self._ev_for(gw2.task_events, "7")["productId"], 88)
+
     def test_emit_holds_only_task_lock(self):
         """死锁守护: emit 临界区只取 task_lock, 在持有 buf_lock/thumb_lock/pf_lock 时调用不死锁。
         (worker/act 调用 emit 时往往已持那些锁, 锁序必须是 X_lock -> task_lock 单向)。"""

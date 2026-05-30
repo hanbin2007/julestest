@@ -179,7 +179,7 @@ export async function GET() {
 }
 
 async function build(): Promise<CoursesStatus> {
-  const { courses, byVid } = await getCatalogRollup();
+  const { courses, byVid, byCourseVid } = await getCatalogRollup();
   const progress = await prisma.progress.findMany({ select: { productId: true, videoId: true, t: true, d: true } });
   const watched = new Set(progress.filter((p) => p.d > 0 && p.t / p.d >= 0.9).map((p) => `${p.productId}:${p.videoId}`));
 
@@ -306,7 +306,11 @@ async function build(): Promise<CoursesStatus> {
       take: 500,
     });
     allTasks = history.map((h) => {
-      const m = byVid.get(h.videoId);
+      // #15: 共享讲(同 videoId 跨课)按 (productId,videoId) 取课程名才归属正确;
+      // h.productId 存在则优先走 byCourseVid, 取不到/为 NULL(存量行)再回退 byVid(后写覆盖)。
+      const m =
+        (h.productId != null ? byCourseVid.get(`${h.productId}:${h.videoId}`) : undefined) ??
+        byVid.get(h.videoId);
       const b = perVidGw[String(h.videoId)];
       // 同 mk():仅 buffer/prefetch 附段数,避免 thumb 任务误显示 "完成 19/243 段"。
       const showSegs = h.kind !== "thumb";
@@ -470,9 +474,13 @@ async function ingestTaskEvents() {
     await prisma.$transaction([
       ...fresh.map((e) => {
         const id = `evt-${e.epoch ?? 0}-${e.seq}`;
+        // #15: 写入事件携带的 productId(共享讲归属)。网关从 video_meta 盖上,可能缺省/为 null。
+        const pid =
+          typeof e.productId === "number" && Number.isFinite(e.productId) ? e.productId : null;
         const row = {
           kind: e.kind,
           videoId: Number(e.vid),
+          productId: pid,
           state: e.state,
           reason: e.reason ?? null,
           at: new Date(e.ts * 1000),

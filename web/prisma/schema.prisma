@@ -150,13 +150,14 @@ model SyncState {
 // seq 跨 boot 会复用,旧的 seq @unique 会让第二个 boot 的同 seq 行插入抛 P2002→整批 ingest 回滚
 // →静默丢真终态(正是 #3 要修的 bug)。存量随机-id 行 / full→done 回填行 seq=NULL。
 model TaskHistory {
-  id      String   @id
-  kind    String // "buffer" | "thumb" | "prefetch"
-  videoId Int
-  state   String // "done"|"error"|"cancelled"|"paused"(运行态 queued/working 不再入库)
-  reason  String? // error 时填失败原因(最多 200 字)
-  at      DateTime @default(now())
-  seq     Int? // 网关事件 epoch 内序号(非全局唯一,幂等靠 id 主键);NULL=存量/回填行
+  id        String   @id
+  kind      String // "buffer" | "thumb" | "prefetch"
+  videoId   Int
+  productId Int? // 共享讲(同 videoId 跨课)归属:按 (productId,videoId) 取课程名(#15);NULL=未知/存量
+  state     String // "done"|"error"|"cancelled"|"paused"(运行态 queued/working 不再入库)
+  reason    String? // error 时填失败原因(最多 200 字)
+  at        DateTime @default(now())
+  seq       Int? // 网关事件 epoch 内序号(非全局唯一,幂等靠 id 主键);NULL=存量/回填行
 
   @@index([at])
   @@index([videoId, kind, at])
