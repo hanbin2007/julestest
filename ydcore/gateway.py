@@ -96,6 +96,10 @@ THUMB_COLS = 10
 THUMB_DIR = os.environ.get("YD_THUMB_DIR") or os.path.join(
     os.path.expanduser("~"), ".youdao_course", "thumbs")
 THUMB_WORKERS = 3
+# ffmpeg 生成超时(秒): proc.wait 无界时一个挂死/慢源会永久占住一个 thumb worker, 整条缩略图队列
+# 卡在 queued/gen 不动(#4)。超时后 terminate→(5s)→kill, 终态落 error reason="ffmpeg timeout %ds"。
+# YD_THUMB_FFMPEG_TIMEOUT 仅供隔离 e2e/单元测试调小(默认 120s 太长); 生产不设此 env 即用默认。
+_THUMB_FFMPEG_TIMEOUT = int(os.environ.get("YD_THUMB_FFMPEG_TIMEOUT") or 120)
 # buf_state 跨重启保留的"终态"(done/cancelled)上限: 防止跨上千讲无限膨胀。
 # 非终态(queued/working/paused/error)永远保留(用户可能要 resume/retry)。
 _BUF_TERMINAL_KEEP = 500
@@ -1028,7 +1032,9 @@ class Gateway:
         # -skip_frame nokey：只解关键帧，配合 fps 过滤器既保持均匀间隔又大幅加速
         # -allowed_extensions ALL + -extension_picky 0：ffmpeg 8 默认按扩展名校验，会拒绝
         # 代理段地址（…&vid=t_xxx，无 .ts 后缀），不加这俩缩略图会 rc=183 失败。
+        # -rw_timeout(微秒): 源 HTTP 读卡住时让 ffmpeg 自身在源头快速失败, 不必干等总超时。
         cmd = ["ffmpeg", "-y", "-nostdin",
+               "-rw_timeout", "30000000",
                "-allowed_extensions", "ALL", "-extension_picky", "0",
                "-skip_frame", "nokey", "-i", proxied,
                "-an", "-vf", vf, "-frames:v", "1", "-q:v", "6", out, "-loglevel", "error"]
@@ -1038,7 +1044,24 @@ class Gateway:
         proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
         with self.thumb_lock:
             self.thumb_procs[vid] = proc
-        rc = proc.wait()
+        # 有界等待(#4): 挂死/慢源不能无限占住一个 thumb worker。超时常量按 env 实时取(隔离测试可调小),
+        # 默认回落模块 _THUMB_FFMPEG_TIMEOUT。超时则 terminate→(5s)→kill, rc 置 -1 走下方 error 分支。
+        timeout = int(os.environ.get("YD_THUMB_FFMPEG_TIMEOUT") or _THUMB_FFMPEG_TIMEOUT)
+        timed_out = False
+        try:
+            rc = proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            try:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=5)
+            except Exception:  # noqa: BLE001
+                _log.debug("缩略图 ffmpeg 超时后清理失败 vid=%s", vid, exc_info=True)
+            rc = -1
         # 取消复查与终态落地必须在同一把锁内：否则二者之间有窗口，刚好取消进来会被 ready/error 覆盖。
         # _save_thumb_index 自身要拿 thumb_lock（不可重入），故用标记、出锁后再存。
         save_idx = False
@@ -1057,7 +1080,13 @@ class Gateway:
                 self._emit_task_event("thumb", vid, "done")
             else:
                 # rc==0 但文件损坏(半截/非 JPEG) 也算 error: 与启动校验同口径。
-                reason = "ffmpeg rc=%d" % rc if rc != 0 else "bad jpeg"
+                # 超时单独成因(reason 含 timeout, 供 web 区分"卡死被砍"vs"ffmpeg 真失败")。
+                if timed_out:
+                    reason = "ffmpeg timeout %ds" % timeout
+                elif rc != 0:
+                    reason = "ffmpeg rc=%d" % rc
+                else:
+                    reason = "bad jpeg"
                 self.thumb_meta[vid] = {"state": "error", "reason": reason}
                 save_idx = True  # error 也落盘,重启后用户看到可重试
                 # [发射点 6] gen->error(ffmpeg rc!=0 或 jpeg 坏)。reason 就地取(R8)。
@@ -1075,7 +1104,8 @@ class Gateway:
             st = self.thumb_meta.get(vid)
             if st and st.get("state") in ("ready", "gen"):
                 return st
-            self.thumb_meta[vid] = {"state": "gen"}
+            # started_ts: watchdog 据此判定卡死(#7); ffmpeg 有界超时也据此口径。
+            self.thumb_meta[vid] = {"state": "gen", "started_ts": time.time()}
             self.thumb_jobs[vid] = (video, m3u8, duration, tier)  # 供重试重新入队
             self.thumb_session.add(vid)                            # 标记为本会话任务
         # 出锁后落 thumb_jobs / thumb_index, 给重启重试上下文。
@@ -1284,7 +1314,7 @@ class Gateway:
             elif verb == "retry":
                 ok = st in ("error", "cancelled") and job is not None
                 if ok:
-                    self.thumb_meta[vid] = {"state": "gen"}
+                    self.thumb_meta[vid] = {"state": "gen", "started_ts": time.time()}
                     self.thumb_session.add(vid)  # 重试也是"本会话任务",否则 UI 会把它从本会话列表丢掉
                     requeue = job
             else:
