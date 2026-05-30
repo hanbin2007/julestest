@@ -1,7 +1,7 @@
 import { prisma } from "@/lib/db";
 import { gatewayGet, gatewayPost } from "@/lib/gateway";
 import { getCatalogRollup, type VidMeta } from "@/lib/catalogRollup";
-import type { CoursesStatus, CourseStatus, GwStatus, TaskItem, VidStatusDetail } from "@/types/api";
+import type { CoursesStatus, CourseStatus, GwStatus, TaskEventsResp, TaskItem, VidStatusDetail } from "@/types/api";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -381,18 +381,81 @@ async function mirror(gw: GwStatus) {
       ops.push(prisma.thumbStatus.upsert({ where: { videoId }, create: { videoId, state: st }, update: { state: st } }));
     }
     if (ops.length) await prisma.$transaction(ops);
-    // 任务历史:每次状态变化 append 一条;同 (vid, kind) 重复 state 自动去重。
-    await appendTaskHistory(gw);
+    // 任务历史:从网关事件日志按 seq 增量拉取写库(替代旧的快照 diff + 字符串去重)。
+    // 网关在每个真实终态落地点 append 带单调 seq 的事件;web 按 seq>游标拉增量,不依赖轮询时机、
+    // 不按状态值去重 → done→working→done 第二个 done 不再被吞(见 2026-05-29 task-event-log 方案)。
+    await ingestTaskEvents();
   } catch {
     /* 镜像失败不影响主返回 */
   }
 }
 
-// 内存:进程级缓存"上次写入的状态",避免每次都查 DB 比对。同 (kind, videoId) 状态不变不重复写。
-// 首次启动:从 TaskHistory 读历史最新态填进来,网关重启不会让旧任务被重复 append 成"新事件"。
-const lastTaskState = new Map<string, string>();
-let lastTaskStateInited = false;
+// 事件日志增量拉取:读游标 since=SyncState['taskEventSeq'] → GET /api/task_events?since
+// → fresh=events.filter(seq>since) → 事务[逐行 upsert 事件('evt-'+seq 幂等) + upsert 游标=res.seq]。
+// 网关掉线/异常:catch 静默,since 不动,下轮续传(不漏不重;靠单调 seq + id='evt-'+seq 幂等 upsert)。
+async function ingestTaskEvents() {
+  try {
+    // 启动一次清理 + 回填(90 天清理 / 存量噪声 / full→done),与拉取解耦但同处触发。
+    await initSyncOnce();
 
+    // 读游标(无则 0)。SyncState 可能尚未建表(首次升级前)→ 防御性 catch 退回 0。
+    let since = 0;
+    try {
+      const cur = await prisma.syncState.findUnique({ where: { key: "taskEventSeq" } });
+      if (cur) since = Number(cur.value) || 0;
+    } catch { /* 表不存在/查询失败,since 保持 0 */ }
+
+    const res = await gatewayGet<TaskEventsResp>(`/api/task_events?since=${since}`, 10000);
+    // R10 可观测:网关日志被重置(seq 回退)能看见,不静默吞。
+    if (res.seq < since) console.warn("网关事件日志疑似被重置");
+
+    // R10 双保险:即便网关 seq 单调,web 仍按 seq>since 过滤 + 'evt-'+seq 幂等 upsert。
+    const fresh = (res.events ?? []).filter((e) => e.seq > since);
+    if (fresh.length === 0) {
+      // 没有新事件:仍把游标推进到网关当前 seq(若它更大),减少下轮重复传输。
+      if (res.seq > since) {
+        await prisma.syncState.upsert({
+          where: { key: "taskEventSeq" },
+          create: { key: "taskEventSeq", value: String(res.seq) },
+          update: { value: String(res.seq) },
+        });
+      }
+      return;
+    }
+
+    // 事件行用 upsert(按 id='evt-'+seq 幂等)而非 createMany({skipDuplicates}):
+    // SQLite provider 的 Prisma createMany 不支持 skipDuplicates(类型为 never)。
+    // 同一事件再次拉到(并发轮询/续传重叠)时 upsert 走 update no-op,不抛 P2002、不毒化游标。
+    // fresh 通常仅个位数(只含 seq>since 的新事件),逐行 upsert 成本可忽略。
+    await prisma.$transaction([
+      ...fresh.map((e) => {
+        const row = {
+          kind: e.kind,
+          videoId: Number(e.vid),
+          state: e.state,
+          reason: e.reason ?? null,
+          at: new Date(e.ts * 1000),
+          seq: e.seq,
+        };
+        return prisma.taskHistory.upsert({
+          where: { id: `evt-${e.seq}` },
+          create: { id: `evt-${e.seq}`, ...row },
+          update: {}, // 已存在则不动(幂等);事件是不可变的,无需覆盖
+        });
+      }),
+      prisma.syncState.upsert({
+        where: { key: "taskEventSeq" },
+        create: { key: "taskEventSeq", value: String(res.seq) },
+        update: { value: String(res.seq) },
+      }),
+    ]);
+  } catch {
+    /* 网关掉线/事务失败:游标不动,下轮按同一 since 续传(不漏不重) */
+  }
+}
+
+// 回填路径用的历史行:随机 id + now(seq=NULL,@unique 允许多 NULL)。
+// 事件路径不用此 helper(它用 id='evt-'+seq + at=new Date(ts*1000),见 ingestTaskEvents)。
 function mkHistRow(kind: string, videoId: number, state: string, reason?: string | null) {
   return {
     id: `${kind}-${videoId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -403,24 +466,13 @@ function mkHistRow(kind: string, videoId: number, state: string, reason?: string
   };
 }
 
-async function initLastTaskStateOnce() {
-  if (lastTaskStateInited) return;
-  lastTaskStateInited = true;
-  // 取每个 (kind, videoId) 在 TaskHistory 里的最新状态填进 Map。
-  // 取最近 2000 行(覆盖 ~500 个唯一任务足够), Set 跟踪已见 (kind,videoId) 跳重。
-  try {
-    const recent = await prisma.taskHistory.findMany({
-      orderBy: { at: "desc" },
-      take: 2000,
-    });
-    const seen = new Set<string>();
-    for (const r of recent) {
-      const key = `${r.kind}:${r.videoId}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      lastTaskState.set(key, r.state);
-    }
-  } catch { /* 表不存在或查询失败,Map 保持空 */ }
+// 进程级一次性启动迁移:90 天清理 + 存量噪声清理 + full→done 回填。与事件拉取解耦。
+// (旧的 lastTaskState diff 逻辑已删:写入侧不再做快照 diff,改由网关事件日志 + seq 增量驱动。)
+let syncInited = false;
+
+async function initSyncOnce() {
+  if (syncInited) return;
+  syncInited = true;
 
   // 启动一次清理: TaskHistory 表 append-only, 半年后膨胀至几 M 行 → 查询慢。
   // 保留最近 90 天足够"全部"标签展示, 旧记录无价值删掉。
@@ -429,9 +481,10 @@ async function initLastTaskStateOnce() {
     await prisma.taskHistory.deleteMany({ where: { at: { lt: cutoff } } });
   } catch { /* 清理失败不致命 */ }
 
-  // 启动幂等清理迁移(2026-05-29 操作历史清理计划 Task 5):清存量噪声,且防 web 重启后回填僵尸。
+  // 启动幂等清理迁移(2026-05-29 操作历史清理计划 Task 5):清存量噪声。
   // 仅删"确定无价值"的:测试桩 + 决策 1 要清的 thumb cancelled + 被更晚终态取代的僵尸 working/queued。
   // 幂等:连跑两次第二次影响 0 行也不报错(deleteMany / DELETE 都天然幂等)。
+  // (事件日志方案后运行态根本不再入库,working/queued 行只会是历史残留。)
   try {
     // (a) e2e 测试桩(合成 vid,grep 仓库无真实引用)
     await prisma.taskHistory.deleteMany({ where: { videoId: { in: [999000111, 888000222, 777000333] } } });
@@ -439,7 +492,6 @@ async function initLastTaskStateOnce() {
     await prisma.taskHistory.deleteMany({ where: { kind: "thumb", state: "cancelled" } });
     // (b) 被更晚终态取代的僵尸 working/queued(append-only 残骸)。用原生 SQL 做 EXISTS 子查询:
     // 只删"同 (kind,videoId) 有更晚行"的 working/queued;没有更晚态的(真·进行中)不删。
-    // Task 1 后运行态根本不再入库,此类行只会是历史残留。
     await prisma.$executeRawUnsafe(
       `DELETE FROM TaskHistory WHERE state IN ('working','queued') AND EXISTS (
          SELECT 1 FROM TaskHistory t2 WHERE t2.kind=TaskHistory.kind
@@ -448,87 +500,31 @@ async function initLastTaskStateOnce() {
   } catch { /* 清理失败不致命 */ }
 
   // 跨会话回填: CacheStatus 里 state='full' (=cached=total 整集已缓存好) 的 vid
-  // 在 TaskHistory 里如果没记录过 "done", 一次性补上 kind='buffer' state='done'。
+  // 在 TaskHistory 里如果没记录过 buffer "done", 一次性补上 kind='buffer' state='done'。
   // 这覆盖了用户在 buf_state.json 持久化之前(老版本)做过的 buffer/prefetch 完成,
   // 让"全部"标签显示的不只是 thumb,而是所有曾整集缓存好的讲。
+  // 回填行 seq=NULL(mkHistRow 不带 seq)+随机 id+now:它们不是事件日志事件,不占 seq 序号。
   try {
     const fullCached = await prisma.cacheStatus.findMany({
       where: { state: "full" },
       select: { videoId: true },
     });
-    const backfill = fullCached
-      .map((c) => c.videoId)
-      .filter((vid) => !lastTaskState.has(`buffer:${vid}`));
-    if (backfill.length > 0) {
-      const data = backfill.map((vid) => mkHistRow("buffer", vid, "done"));
-      await prisma.taskHistory.createMany({ data });
-      backfill.forEach((vid) => lastTaskState.set(`buffer:${vid}`, "done"));
+    const vids = fullCached.map((c) => c.videoId);
+    if (vids.length > 0) {
+      // 已存在 buffer done 的讲不重复回填(直接查库,不再依赖内存 Map)。
+      const existing = await prisma.taskHistory.findMany({
+        where: { kind: "buffer", state: "done", videoId: { in: vids } },
+        select: { videoId: true },
+      });
+      const have = new Set(existing.map((r) => r.videoId));
+      const backfill = vids.filter((vid) => !have.has(vid));
+      if (backfill.length > 0) {
+        await prisma.taskHistory.createMany({
+          data: backfill.map((vid) => mkHistRow("buffer", vid, "done")),
+        });
+      }
     }
   } catch { /* 回填失败不致命 */ }
-}
-
-async function appendTaskHistory(gw: GwStatus) {
-  await initLastTaskStateOnce();
-
-  type Row = { kind: "buffer" | "thumb" | "prefetch"; videoId: number; state: string; reason?: string | null };
-  const rows: Row[] = [];
-
-  // buffer: 只把终态写历史(done/error/cancelled);运行态(working/queued/paused)由实时 tasks 数组展示。
-  // 杜绝"working 进历史→历史里永久转圈"的僵尸行(见 2026-05-29 操作历史清理计划 Task 1/5)。
-  // gw.buffer.states 含全部曾经设过状态的 vid(本进程持续累计;buf_state.json 跨重启回载)。
-  const bufStates = gw.buffer.states ?? {};
-  for (const [vid, st] of Object.entries(bufStates)) {
-    const videoId = Number(vid);
-    if (!videoId || !st) continue;
-    if (st !== "done" && st !== "error" && st !== "cancelled") continue;
-    // error 时 reason 取网关 perVid[vid].reason(仅 error 态带);防御性 ?. ?? 即便类型暂缺也不崩。
-    const reason = st === "error" ? (gw.buffer.perVid?.[vid]?.reason ?? null) : null;
-    rows.push({ kind: "buffer", videoId, state: st, reason });
-  }
-  // thumb: 决策(2026-05-29)缩略图取消完全不进历史 → 只写 ready→done 与 error;且只记本会话
-  // (thSession),避免网关重启回载的非本会话状态被当新事件灌库(那正是 354 行 cancelled 洪水的来源)。
-  // appendTaskHistory 是独立函数,这里重新构造 thSession(gw 已是入参);勿引用 build() 的局部变量。
-  const thSession = new Set(gw.thumb.session ?? []);
-  const thReasons = gw.thumb.reasons ?? {}; // Task 2:网关导出的 thumb error reason(防御性 ?? {})
-  for (const [vid, st] of Object.entries(gw.thumb.states ?? {})) {
-    const videoId = Number(vid);
-    if (!videoId || !st) continue;
-    if (!thSession.has(vid)) continue; // 非本会话(回载态)一律不进历史
-    if (st !== "ready" && st !== "error") continue; // cancelled/gen 都不进
-    rows.push({
-      kind: "thumb",
-      videoId,
-      state: st === "ready" ? "done" : "error",
-      reason: st === "error" ? (thReasons[vid] ?? null) : null,
-    });
-  }
-  // prefetch: gw.live.done = 本会话预缓存满的讲(若网关持久化 pf_done 后跨会话也保留)
-  for (const vid of gw.live?.done ?? []) {
-    const videoId = Number(vid);
-    if (!videoId) continue;
-    rows.push({ kind: "prefetch", videoId, state: "done" });
-  }
-
-  // 去重: 只写"上次不同的"
-  const fresh: Row[] = [];
-  for (const r of rows) {
-    const key = `${r.kind}:${r.videoId}`;
-    if (lastTaskState.get(key) === r.state) continue;
-    lastTaskState.set(key, r.state);
-    fresh.push(r);
-  }
-  if (fresh.length === 0) return;
-  if (fresh.length > 50) {
-    // 异常:单次轮询不该产生 >50 条新历史事件(正常用户操作一次最多个位数)。
-    // 极可能是回载态被误判为新事件(参见 2026-05-28 16:31 那次 353 行 thumb cancelled 批写)。
-    // 治本是上面的 session 过滤,这是安全网:记 warn 并截断,防灌库。
-    console.warn(`[appendTaskHistory] 单次 fresh=${fresh.length} 异常,截断到 50 防灌库`);
-    fresh.length = 50;
-  }
-
-  await prisma.taskHistory.createMany({
-    data: fresh.map((r) => mkHistRow(r.kind, r.videoId, r.state, r.reason)),
-  }).catch(() => { /* 镜像失败不影响主返回 */ });
 }
 
 async function fallback(

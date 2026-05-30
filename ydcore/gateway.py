@@ -15,6 +15,7 @@ Gateway 持有一台网关实例的全部可变状态（原先散在 make_handle
 thumb_meta/thumb_active/thumb_jobs/thumb_procs/thumb_session(thumb_lock)、
 buf_state/buf_jobs(buf_lock)、pf_threads/pf_done(pf_lock)、seg_cache(自带锁)。
 """
+import collections
 import json
 import logging
 import math
@@ -89,12 +90,19 @@ THUMB_INTERVAL = 10   # 每 10 秒一帧
 THUMB_W = 160
 THUMB_H = 90
 THUMB_COLS = 10
-# 缩略图持久化目录（生成后不删，跨会话复用）
-THUMB_DIR = os.path.join(os.path.expanduser("~"), ".youdao_course", "thumbs")
+# 缩略图持久化目录（生成后不删，跨会话复用）。
+# YD_THUMB_DIR 仅供隔离 e2e 重定向到临时目录用(生产绝不设此 env, 故落回默认 ~/.youdao_course/thumbs,
+# 行为与历史完全一致)。隔离测试需要它, 否则隔离网关会把 index.json/.jpg 写进生产 thumbs 目录 = 违约。
+THUMB_DIR = os.environ.get("YD_THUMB_DIR") or os.path.join(
+    os.path.expanduser("~"), ".youdao_course", "thumbs")
 THUMB_WORKERS = 3
 # buf_state 跨重启保留的"终态"(done/cancelled)上限: 防止跨上千讲无限膨胀。
 # 非终态(queued/working/paused/error)永远保留(用户可能要 resume/retry)。
 _BUF_TERMINAL_KEEP = 500
+# 任务事件日志(操作历史真治本): 网关在每个真实终态转换点 append 一条带单调 seq 的事件,
+# web 按 seq>上次拉增量写 TaskHistory。ring 有界 2000 条: web 高频拉取正常永不落后,
+# 数日停机才丢极老事件(由 full->done 回填兜底)。_task_seq 是历史峰值, 跨重启不归零。
+_TASK_EVENTS_KEEP = 2000
 
 
 class Gateway:
@@ -132,6 +140,20 @@ class Gateway:
         # 三档优先级闸门：0=LIVE(观看) > 1=AUTO(自动缓存) > 2=MANUAL(手动缓存)。
         self.gate = PriorityGate()
 
+        # ---- 任务事件日志(操作历史真治本) -----------------------------------
+        # 必须在所有回载(thumb 回载/buf_state 回载)之前就绪: init 阶段唯一"新发生"的
+        # 终态(僵尸 queued->error 309 / thumb gen->error 166)发生在 web 轮询建立之前,
+        # 若 seq/deque/emit 能力没就绪, 这些事件会永久丢(R3)。临界区只取 task_lock,
+        # 绝不嵌套 buf_lock/thumb_lock/pf_lock(调用方已持那些锁, 避免死锁)。
+        self.task_lock = threading.Lock()
+        self._task_seq = 0  # 全局单调序号(历史峰值, 跨重启不归零)
+        self.task_events = collections.deque(maxlen=_TASK_EVENTS_KEEP)
+        self.task_events_path = (
+            os.path.join(self.seg_cache.dir, "task_events.json")
+            if self.seg_cache.persist else None
+        )
+        self._load_task_events()
+
         # 缩略图雪碧图：服务端用 ffmpeg 生成（复用已缓存分片），供 Artplayer 拖动预览。
         self.thumb_dir = THUMB_DIR
         os.makedirs(self.thumb_dir, exist_ok=True)
@@ -164,6 +186,9 @@ class Gateway:
                     elif st == "gen":
                         # 进程被砍时正在跑的 ffmpeg → 算失败,等重试
                         self.thumb_meta[vid] = {"state": "error", "reason": "interrupted"}
+                        # [发射点 9] init 期唯一*新发生*的 thumb 终态(gen->error): 上次被砍中途,
+                        # 这是新转换不是回载快照, 必须发(R3)。回载原样的 ready/error/cancelled 不发(R4)。
+                        self._emit_task_event("thumb", vid, "error", "interrupted")
                     elif st in ("error", "cancelled"):
                         self.thumb_meta[vid] = m
         except FileNotFoundError:
@@ -307,7 +332,12 @@ class Gateway:
                             # 没重试上下文的 queued = 僵尸: 永远跑不起来。转成 error,
                             # 用户能看到"失败"并(若 web 重提 batch)重新排队, 不再卡在 queued。
                             self.buf_state[vid] = "error"
-                            self._last_buf_error[vid] = "重启后丢失任务上下文, 请重新缓存"
+                            reason = "重启后丢失任务上下文, 请重新缓存"
+                            self._last_buf_error[vid] = reason
+                            # [发射点 4] init 期唯一*新发生*的 buffer 终态(僵尸 queued->error):
+                            # 发生在 web 轮询建立之前, seq/emit 已在 init 早期就绪故能发(R3)。
+                            # 其它回载原样态(done/cancelled/paused/error/queued)一律不发(R4)。
+                            self._emit_task_event("buffer", vid, "error", reason)
                     else:
                         self.buf_state[vid] = actual
             except Exception:  # noqa: BLE001
@@ -458,6 +488,71 @@ class Gateway:
             return
         self._atomic_write_json(self.pf_done_path, sorted(self.pf_done))
 
+    # ---- 任务事件日志 ----------------------------------------------------
+    def _load_task_events(self):
+        """回载 task_events.json: {seq: 峰值, events: [...]}。
+        _task_seq = max(顶层 seq, events 内 max seq), 永不倒退(防文件被部分篡改/截断)。
+        损坏走 _quarantine_corrupt 隔离 + 内存重置 seq=0。
+        临时缓存目录(task_events_path=None)无文件可载, 直接 return。"""
+        path = self.task_events_path
+        if not path or not os.path.isfile(path):
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                loaded = json.load(f) or {}
+            top_seq = int(loaded.get("seq") or 0)
+            events = loaded.get("events") or []
+            max_ev = 0
+            for ev in events:
+                if not isinstance(ev, dict):
+                    continue
+                try:
+                    s = int(ev.get("seq"))
+                except (TypeError, ValueError):
+                    continue
+                if s > max_ev:
+                    max_ev = s
+                self.task_events.append(ev)
+            self._task_seq = max(top_seq, max_ev)
+        except Exception:  # noqa: BLE001
+            self._quarantine_corrupt(path, "task_events")
+            self.task_events.clear()
+            self._task_seq = 0
+
+    def _save_task_events(self):
+        """落盘 task_events. 调用方已持 task_lock(_emit 内)或确保无并发。
+        persist=False 时 task_events_path=None, 静默跳过不落盘(R9)。
+        写 {seq: 历史峰值 _task_seq, events: [...有界 deque 内容, 旧->新]}。"""
+        if not self.task_events_path:
+            return
+        self._atomic_write_json(
+            self.task_events_path,
+            {"seq": self._task_seq, "events": list(self.task_events)},
+        )
+
+    def _emit_task_event(self, kind, vid, state, reason=None):
+        """在一个真实终态转换点 append 一条事件并落盘。
+
+        kind ∈ {buffer, thumb, prefetch}; state 按 kind 取值
+        (buffer: done|error|paused|cancelled / thumb: done|error / prefetch: done);
+        reason 仅 error 携带, 截 200 字符。
+
+        临界区只取 task_lock, 绝不嵌套 buf_lock/thumb_lock/pf_lock:
+        调用方(worker/act/init)往往已持有那些锁, 在此再取会死锁。_task_seq 单调递增
+        是内存权威(即便落盘被掉盘跳过), web 靠 seq 区分事件、两侧绝不按状态值去重(R1)。"""
+        with self.task_lock:
+            self._task_seq += 1
+            ev = {
+                "seq": self._task_seq,
+                "ts": time.time(),
+                "kind": kind,
+                "vid": str(vid),
+                "state": state,
+                "reason": (reason[:200] if reason else None),
+            }
+            self.task_events.append(ev)
+            self._save_task_events()
+
     def _save_playhead(self):
         """落盘 playhead + protect_vid. 由 _playhead_flush_loop 节流调用,不直接在
         /p 处理线程里调(每秒可能多次写盘,无价值)。"""
@@ -505,6 +600,8 @@ class Gateway:
                     self._save_pf_done()
                     self._save_playhead()
                     self._save_thumb_index()
+                    with self.task_lock:
+                        self._save_task_events()  # 掉盘窗口内的事件也重刷, 否则丢
                     with self.buf_lock:
                         self._save_buf_state()
                         self._save_buf_jobs()
@@ -666,6 +763,9 @@ class Gateway:
                     # 取消已是终态：别用 error 覆盖
                     if (self.thumb_meta.get(vid) or {}).get("state") != "cancelled":
                         self.thumb_meta[vid] = {"state": "error", "reason": str(e)}
+                        # [发射点 8] worker except 落地 error(沿用上面 !=cancelled 守卫: cancel
+                        # 已是终态时不发, 避免与 act 的 cancel 重复)。reason 取 str(e)(emit 内截 200)。
+                        self._emit_task_event("thumb", vid, "error", str(e))
             finally:
                 with self.thumb_lock:
                     self.thumb_active.discard(vid)
@@ -684,6 +784,9 @@ class Gateway:
         if not th:
             with self.thumb_lock:
                 self.thumb_meta[vid] = {"state": "error", "reason": "no headers"}
+                # [发射点 7] 缺低清流头 -> 早 return error(不抛异常, worker except 抓不到,
+                # 必须在此就地发)。终态落地, 非回载快照。
+                self._emit_task_event("thumb", vid, "error", "no headers")
             return
         # 生成期间保护 tvid: 缩略图源段(t_前缀)在共享 DiskLRU 里, 不加保护时一个大缩略图批
         # 可能把刚缓冲好的播放段挤出(_pick_victim 只保护 LIVE+_extra_protect)。这里把 tvid
@@ -750,11 +853,16 @@ class Gateway:
                                         "number": number, "column": THUMB_COLS,
                                         "width": THUMB_W, "height": THUMB_H}
                 save_idx = True
+                # [发射点 5] gen->ready 终态落地(thumb 历史的"完成"用 done 表示)。
+                # 在 cancelled 守卫之内: 被取消的不会进这支, 故不与 act cancel 重复(R7)。
+                self._emit_task_event("thumb", vid, "done")
             else:
                 # rc==0 但文件损坏(半截/非 JPEG) 也算 error: 与启动校验同口径。
                 reason = "ffmpeg rc=%d" % rc if rc != 0 else "bad jpeg"
                 self.thumb_meta[vid] = {"state": "error", "reason": reason}
                 save_idx = True  # error 也落盘,重启后用户看到可重试
+                # [发射点 6] gen->error(ffmpeg rc!=0 或 jpeg 坏)。reason 就地取(R8)。
+                self._emit_task_event("thumb", vid, "error", reason)
         if save_idx:
             self._save_thumb_index()
 
@@ -882,6 +990,16 @@ class Gateway:
                     if result != "error":
                         self._last_buf_error.pop(vid, None)
                     self._save_buf_errors()
+                    # [发射点 1] worker 终态落地(守卫 buf_state==working): working->done/error。
+                    # done->working->done 物理上两次进到这里, 各发一条不同 seq 的事件(R1)。
+                    # 仅 done/error 在此发(R2: paused/cancelled 由 act_buffer 发; 若被 act 改走
+                    # state, 上面守卫为 False 不会进来)。error reason 此刻读 _last_buf_error(R8:
+                    # 分片/key 失败已写到最终值)。emit 仍在 buf_lock 内, 只嵌套 task_lock 不冲突。
+                    if result in ("done", "error"):
+                        self._emit_task_event(
+                            "buffer", vid, result,
+                            self._last_buf_error.get(vid) if result == "error" else None,
+                        )
                 self._save_buf_state()
             self.buf_q.task_done()
 
@@ -913,17 +1031,25 @@ class Gateway:
                 ok = st == "working"
                 if ok:
                     self.buf_state[vid] = "paused"  # 缓冲循环下一片处复查后收手
+                    # [发射点 2] working->paused 由 act 发(R2): worker 此后复查到 paused 收手,
+                    # 其终态守卫 buf_state==working 不成立, 不会重复发。
+                    self._emit_task_event("buffer", vid, "paused")
             elif verb == "resume":
                 ok = st == "paused" and job is not None
                 if ok:
                     self.buf_state[vid] = "queued"
                     self._last_buf_error.pop(vid, None)
                     requeue = job
+                    # resume 转入 queued(非终态), 不发: 真正完成时 worker 会发 done/error。
             elif verb == "cancel":
                 ok = st in ("queued", "working", "paused")
                 if ok:
                     self.buf_state[vid] = "cancelled"  # 排队中的靠出队复查丢弃；working 靠循环复查
                     self.buf_jobs.pop(vid, None)
+                    # [发射点 3] q/w/p->cancelled 由 act 发(R2)。排队条目残留在 buf_q 会被
+                    # worker 出队复查丢弃(不产生 state 变化), 那条路径绝不再补发(R7), 否则一次
+                    # cancel 出两条。
+                    self._emit_task_event("buffer", vid, "cancelled")
             elif verb == "retry":
                 ok = st == "error" and job is not None
                 if ok:
@@ -1056,8 +1182,13 @@ class Gateway:
                     # 整集都在缓存里 = 这讲预缓存完成：记进 pf_done(供"已完成"+任务历史显示),
                     # 落盘 pf_done.json 跨重启保留, 然后退出本线程。
                     with self.pf_lock:
+                        was_done = vid in self.pf_done  # [R6] 幂等守卫: 已 done 过不重发
                         self.pf_done.add(vid)
                     self._save_pf_done()
+                    # [发射点 10] 整集满 ->done。仅首次(not was_done)才发: 同讲反复看满
+                    # pf_done.add 是 no-op, 无条件发会重复(R6)。emit 在 pf_lock 外, 只取 task_lock。
+                    if not was_done:
+                        self._emit_task_event("prefetch", vid, "done")
                     return
         finally:
             with self.pf_lock:
@@ -1132,6 +1263,8 @@ def make_handler(gateway):
                 self._api_thumb(qs)
             elif path == "/api/status":
                 self._api_status(qs)
+            elif path == "/api/task_events":
+                self._api_task_events(qs)
             elif path == "/api/buffer/segments":
                 self._api_buffer_segments(qs)
             elif path.startswith("/thumbs/"):
@@ -1176,6 +1309,8 @@ def make_handler(gateway):
                 self._api_set_cache_dir()
             elif parsed.path == "/api/warm":
                 self._api_warm()
+            elif parsed.path == "/api/_test_emit":
+                self._api_test_emit()
             else:
                 self._send_bytes(404, b"not found", "text/plain")
 
@@ -1270,6 +1405,33 @@ def make_handler(gateway):
                     _log.debug("warm 失败 vid=%s", vid, exc_info=True)
                     errors.append({"videoId": video["videoId"], "reason": str(e)[:200]})
             self._send_json({"warmed": warmed, "skipped": skipped, "errors": errors})
+
+        def _api_test_emit(self):
+            """仅测试用: 直接驱动 _emit_task_event, 不依赖真实网络/分片下载。
+            生产绝不启用: 必须设环境变量 YD_TEST_EMIT=1 才暴露, 否则恒 404。
+            隔离 e2e 用它精确制造 done→cancel→done 等终态序列, 复刻"两条不同 seq done"
+            的核心失败信号(旧字符串-diff 方案此处只剩 1 条 = FAIL)。
+            body: {"events": [{"kind","vid","state","reason"?}, ...]} 顺序逐条 emit。"""
+            if os.environ.get("YD_TEST_EMIT") != "1":
+                self._send_bytes(404, b"not found", "text/plain")
+                return
+            try:
+                payload = self._read_json()
+            except Exception as e:  # noqa: BLE001
+                self._send_json({"error": str(e)}, 400)
+                return
+            if payload is None:
+                return  # _read_json 已回 413
+            n = 0
+            for ev in (payload.get("events") or []):
+                kind = ev.get("kind")
+                vid = ev.get("vid")
+                state = ev.get("state")
+                if not (isinstance(kind, str) and state and vid is not None):
+                    continue
+                self.gw._emit_task_event(kind, vid, state, ev.get("reason"))
+                n += 1
+            self._send_json({"emitted": n, "seq": self.gw._task_seq})
 
         def _api_buffer_batch(self):
             try:
@@ -1409,10 +1571,6 @@ def make_handler(gateway):
             gw = self.gw
             with gw.thumb_lock:
                 tstates = {k: v.get("state") for k, v in gw.thumb_meta.items()}
-                # treasons: 仅 error 态附原因(thumb_meta[vid].reason),供 web 写历史/展示失败原因用。
-                # 与 tstates 共用同一持锁快照,避免二次取锁竞态;不改 tstates 形状(多消费者)。
-                treasons = {v: m.get("reason") for v, m in gw.thumb_meta.items()
-                            if isinstance(m, dict) and m.get("state") == "error" and m.get("reason")}
                 tactive = set(gw.thumb_active)
                 tsession = sorted(gw.thumb_session)  # 本会话排过队的缩略图任务
             with gw.buf_lock:
@@ -1465,8 +1623,6 @@ def make_handler(gateway):
                           # 由 queued_vids 推数：thumb_q.qsize() 会把已取消/在途的也算进去而高报。
                           "queued": len(tqueued), "errors": terr,
                           "session": tsession,
-                          # reasons: 仅 error 态 vid → 失败原因(供 web 历史写 thumb error reason)
-                          "reasons": treasons,
                           # 缩略图源段在磁盘的总字节(thumb 桶汇总): 取代已删的 /api/thumbs/status。
                           "bytes": sum((d.get("bytes", 0) for d in thumbb.values()), 0)},
                 "buffer": {"perVid": buffer, "bytes": gw.seg_cache.size, "limit": gw.seg_cache.max,
@@ -1482,7 +1638,25 @@ def make_handler(gateway):
                 "ffmpeg": gw.have_ffmpeg, "thumbDir": gw.thumb_dir,
                 "cacheDir": gw.seg_cache.dir if gw.seg_cache.persist else "",
                 "cacheDirOk": gw.seg_cache.dir_ok(),
+                # 任务事件日志当前峰值 seq(hint): web 可先判 maxSeq 没涨就跳过拉增量,省一次请求。
+                # 单 int 读取 GIL 原子, 不取锁(仅作提示, 真增量由 /api/task_events 按 seq 兜底)。
+                "tasks": {"maxSeq": gw._task_seq},
             })
+
+        def _api_task_events(self, qs):
+            """任务事件增量拉取: ?since=N → {"seq": 当前峰值, "events": [seq>N 升序]}。
+            web 用 since=上次游标拉增量写 TaskHistory(按 seq 区分, 不漏不重)。
+            只取 task_lock 快照(与 _emit 同锁), 保证 cur 与 events 一致。"""
+            try:
+                since = int((qs.get("since") or ["0"])[0])
+            except (ValueError, TypeError):
+                since = 0
+            gw = self.gw
+            with gw.task_lock:
+                cur = gw._task_seq
+                # deque 天然按 seq 升序 append, 过滤 seq>since 保持升序
+                evs = [e for e in gw.task_events if e["seq"] > since]
+            self._send_json({"seq": cur, "events": evs})
 
         def _thumb_video(self, d):
             """从 dict 取出生成缩略图需要的字段，返回 (video, m3u8_low, duration) 或 None。"""

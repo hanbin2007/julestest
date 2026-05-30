@@ -87,6 +87,8 @@ export interface GwStatus {
   thumbDir: string;
   cacheDir?: string;
   cacheDirOk?: boolean;
+  // 任务事件日志当前峰值序号。web 先判 maxSeq 未涨则跳过拉增量(省一次请求)。
+  tasks?: { maxSeq: number };
 }
 
 export interface BatchResult {
@@ -167,6 +169,22 @@ export interface TaskItem {
   at?: number;
   // 失败原因（state=error 时由网关 reason 透传）；其它态为 null/undefined。
   reason?: string | null;
+}
+
+// ---- 任务事件日志(网关 /api/task_events)：真终态转换点 append,带单调 seq ----
+// 网关单条事件。vid 为字符串(网关 str(vid));写库时 videoId=Number(ev.vid)、at=new Date(ev.ts*1000)。
+export interface TaskEvent {
+  seq: number; // 全局单调序号(跨重启不归零)
+  kind: string; // 'buffer' | 'thumb' | 'prefetch'
+  vid: string; // 网关侧 str(vid)
+  state: string; // buffer: done|error|paused|cancelled / thumb: done|error / prefetch: done
+  reason: string | null; // 仅 error 填(最多 200 字)
+  ts: number; // time.time() 浮点秒
+}
+// 网关 /api/task_events?since=N 的返回:seq=当前峰值序号,events=seq>N 的事件(升序)。
+export interface TaskEventsResp {
+  events: TaskEvent[];
+  seq: number;
 }
 
 // 网关 /api/tasks/action 的返回：操作后即时复查到的最新状态（成功 ok=true）。

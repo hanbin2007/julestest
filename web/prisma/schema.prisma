@@ -135,15 +135,26 @@ model SyncMeta {
   at    DateTime @updatedAt
 }
 
-// 任务历史:每次 (vid,kind) 状态转换 append 一条;网关重启 buf_state 清空也不丢历史。
+// 增量同步游标(单例)。区别于 SyncMeta(value 可空、历史目录同步用):此处 value 非空,
+// 专存网关事件日志拉取的 lastSeq。单例 key='taskEventSeq'(存 int 字符串,初值 '0')。
+model SyncState {
+  key   String   @id
+  value String
+  at    DateTime @updatedAt
+}
+
+// 任务历史:网关在每个真实终态转换点 append 带单调 seq 的事件,web 按 seq>上次拉增量写入。
 // 设置页"全部"标签从这里倒序读;cap 后端 500 条够看。
+// seq: 来自网关事件日志的全局单调序号;事件行 id='evt-'+seq、seq=该序号(@unique 让二次插入被
+// skipDuplicates 拦=幂等)。存量随机-id 行 / full→done 回填行 seq=NULL(SQLite UNIQUE 允许多 NULL)。
 model TaskHistory {
   id      String   @id
   kind    String // "buffer" | "thumb" | "prefetch"
   videoId Int
-  state   String // "queued"|"working"|"paused"|"done"|"error"|"cancelled"
+  state   String // "done"|"error"|"cancelled"|"paused"(运行态 queued/working 不再入库)
   reason  String? // error 时填失败原因(最多 200 字)
   at      DateTime @default(now())
+  seq     Int?     @unique // 网关事件序号;NULL=存量/回填行
 
   @@index([at])
   @@index([videoId, kind, at])
