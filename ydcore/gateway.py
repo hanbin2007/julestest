@@ -140,6 +140,14 @@ class Gateway:
         # 三档优先级闸门：0=LIVE(观看) > 1=AUTO(自动缓存) > 2=MANUAL(手动缓存)。
         self.gate = PriorityGate()
 
+        # 掉盘恢复守卫(#2): 区分"运行中掉盘(内存权威, 盘回来后刷回盘)"
+        # vs "启动即掉盘/从未成功载入(盘是真相, 盘回来后必须重载而非用空内存覆盖)"。
+        # 必须在任何回载之前置 False; 全部 *.json 成功载入后才置 True。
+        self._ever_loaded = False
+        # _recover_flush_loop 与 _reload_all_persist 都会动同一批持久化态, 串行化避免
+        # 恢复 tick 与并发 flush 交错(#19 治本在 Task 14, 此处先给恢复路径自己一把锁)。
+        self._recover_lock = threading.Lock()
+
         # ---- 任务事件日志(操作历史真治本) -----------------------------------
         # 必须在所有回载(thumb 回载/buf_state 回载)之前就绪: init 阶段唯一"新发生"的
         # 终态(僵尸 queued->error 309 / thumb gen->error 166)发生在 web 轮询建立之前,
@@ -168,46 +176,6 @@ class Gateway:
         self.thumb_lock = threading.Lock()
         self.thumb_q = queue.Queue()
         self.have_ffmpeg = which("ffmpeg") is not None
-        # 回载 thumb_index.json: 现在存全部状态(ready/gen/error/cancelled),
-        # ready 校验 .jpg 文件存在 + 有效(开头 magic bytes 是 JPEG SOI 0xFFD8 + 非 0 字节),
-        # 网关被砍中 ffmpeg 时 .jpg 可能半截,仅 exists 会误认 ready, 前端展示 broken image。
-        # 启动回载用同一个 SOI 校验(已提为实例方法 _jpeg_ok)。
-        _jpeg_ok = self._jpeg_ok
-        # 启动时若是 gen 状态(网关被砍时正在生成的) → 回退成 error,等用户手动重试。
-        try:
-            with open(self.thumb_index_path, "r", encoding="utf-8") as f:
-                for vid, m in (json.load(f) or {}).items():
-                    st = (m or {}).get("state")
-                    if st == "ready":
-                        jpg = os.path.join(self.thumb_dir, "%s.jpg" % vid)
-                        if _jpeg_ok(jpg):
-                            self.thumb_meta[vid] = m
-                        # .jpg 缺失/损坏 → 不进 thumb_meta, 重新触发 thumb 会真重启
-                    elif st == "gen":
-                        # 进程被砍时正在跑的 ffmpeg → 算失败,等重试
-                        self.thumb_meta[vid] = {"state": "error", "reason": "interrupted"}
-                        # [发射点 9] init 期唯一*新发生*的 thumb 终态(gen->error): 上次被砍中途,
-                        # 这是新转换不是回载快照, 必须发(R3)。回载原样的 ready/error/cancelled 不发(R4)。
-                        self._emit_task_event("thumb", vid, "error", "interrupted")
-                    elif st in ("error", "cancelled"):
-                        self.thumb_meta[vid] = m
-        except FileNotFoundError:
-            pass   # 首次运行：尚无缩略图索引，正常
-        except Exception:  # noqa: BLE001
-            self._quarantine_corrupt(self.thumb_index_path, "缩略图")
-        # thumb_jobs.json: 重试上下文 (vid → [video_dict, m3u8, duration, tier])
-        if os.path.isfile(self.thumb_jobs_path):
-            try:
-                with open(self.thumb_jobs_path, "r", encoding="utf-8") as f:
-                    raw = json.load(f) or {}
-                for vid, payload in raw.items():
-                    # 兼容 [v, m, dur, tier] 4-tuple
-                    if isinstance(payload, list) and len(payload) == 4:
-                        v, m, dur, tier = payload
-                        if isinstance(v, dict) and isinstance(m, str) and m:
-                            self.thumb_jobs[str(vid)] = (v, m, int(dur or 0), int(tier or 2))
-            except Exception:  # noqa: BLE001
-                self._quarantine_corrupt(self.thumb_jobs_path, "thumb_jobs")
 
         # 整集缓冲（把整节课分片下到服务端磁盘缓存）：批量预缓冲 + 状态
         # 总数真相恒为 len(seg_urls[vid])；不再维护冗余 seg_total（旧版会与 seg_urls 漂移）。
@@ -225,16 +193,6 @@ class Gateway:
             os.path.join(self.seg_cache.dir, "seg_urls.json")
             if self.seg_cache.persist else None
         )
-        if self.seg_urls_path and os.path.isfile(self.seg_urls_path):
-            try:
-                with open(self.seg_urls_path, "r", encoding="utf-8") as f:
-                    loaded = json.load(f) or {}
-                for vid, urls in loaded.items():
-                    if isinstance(urls, list) and urls:
-                        self.seg_urls[str(vid)] = list(urls)
-            except Exception:  # noqa: BLE001
-                self._quarantine_corrupt(self.seg_urls_path, "seg_urls")
-                self.seg_urls = {}
 
         # buf_state.json / buf_jobs.json：缓冲任务状态 + 重试上下文落盘,
         # 重启后用户排好队的整集缓冲、暂停态、失败状态都还在,可以 resume/retry。
@@ -260,6 +218,133 @@ class Gateway:
             os.path.join(self.seg_cache.dir, "video_metadata.json")
             if self.seg_cache.persist else None
         )
+        # 自动预缓存：以"播放头"为中心向前后双向补未缓存分片。
+        self.pf_lock = threading.Lock()
+        self.pf_active = {"vid": None}
+        self.pf_done = set()     # 预缓存到「整集已满」的 vid（供设置页「已完成」+任务历史用)
+        self.pf_threads = {}     # vid -> (thread, stop_event)
+        self.pf_segidx = {}      # vid -> {seg_url: index}
+        self.playhead = {}       # vid -> 最近一次直播请求到的分片下标
+        # pf_done.json: 跨会话保留预缓存完成的讲, 让任务历史里 prefetch:done 不会丢。
+        self.pf_done_path = (
+            os.path.join(self.seg_cache.dir, "pf_done.json")
+            if self.seg_cache.persist else None
+        )
+
+        # playhead.json: 预缓存中心点持久化。直播分片每秒触发,如果每次都落盘 IO 太多;
+        # 用 _playhead_dirty 标志 + 后台 _playhead_flush 线程 5s 一刷,丢的最大值 = 5 秒位置漂移,
+        # 网关重启后预缓存从 5 秒前的位置继续,完全可接受。
+        # 同时含 _protect_vid 字段(嵌入同一文件): cache LRU "保护集"。
+        self.playhead_path = (
+            os.path.join(self.seg_cache.dir, "playhead.json")
+            if self.seg_cache.persist else None
+        )
+        self._playhead_dirty = False
+
+        # 所有持久化路径/dict/锁都就绪后, 一次性回载全部 *.json 持久化表(顺序见方法内)。
+        # 抽成 _load_persist_tables 让掉盘恢复守卫(#2)能在盘回来后复用同一回载路径,
+        # 而不是用空内存覆盖磁盘。emit_init_events=True: init 期允许发僵尸终态事件。
+        self._load_persist_tables(emit_init_events=True)
+
+        # 启动时若做了僵尸修正/终态裁剪, 立刻回写一次, 让下次启动不再重复处理同样的僵尸。
+        # (init 阶段还没启 buffer worker, 无并发, 不需 buf_lock。)
+        self._save_buf_state()
+        self._save_buf_errors()
+
+        # 全部 *.json 已成功载入(或本就无盘/无文件): 此后内存即权威, 掉盘恢复走"刷回盘"。
+        # 注意: 启动时若 seg_cache.ok=False(盘没挂), 上面所有 isfile/open 读盘均落空 ->
+        # 内存全空; 这种情况下不能置 _ever_loaded(否则盘回来会用空内存覆盖, 即本 bug)。
+        if self.seg_cache.ok:
+            self._ever_loaded = True
+
+        for _ in range(max(1, THUMB_WORKERS)):
+            threading.Thread(target=self._thumb_worker, daemon=True).start()
+        threading.Thread(target=self._buffer_worker, daemon=True).start()
+        # 后台 flush 线程: playhead 节流落盘(5s/次),只在 dirty 时写。
+        threading.Thread(target=self._playhead_flush_loop, daemon=True).start()
+        # 后台 flush 线程: 掉盘恢复后重刷全部持久化状态(防丢掉盘窗口内的变更)。
+        threading.Thread(target=self._recover_flush_loop, daemon=True).start()
+
+    def pri_fetch(self, t, hdrs, url, range_header=None):
+        """按优先级档位回源（委托给闸门）。"""
+        return self.gate.fetch(t, hdrs, url, range_header)
+
+    def _load_persist_tables(self, emit_init_events=True):
+        """从磁盘回载全部 *.json 持久化表到内存(thumb_index/thumb_jobs/seg_urls/
+        video_meta+video_headers/buf_jobs/buf_state/buf_errors/pf_done/playhead)。
+
+        __init__ 与掉盘恢复守卫(_reload_all_persist) 共用此一处回载逻辑, 避免两份漂移。
+        所有目标容器在方法开头重置为空再载: __init__ 路径本就是空, 恢复路径只在
+        "从未载入(_ever_loaded=False)"时调(内存也是空), 故重置安全、且保证幂等。
+
+        emit_init_events: 仅 __init__ 期为 True —— 上次被砍中途留下的僵尸终态
+        (gen->error / 僵尸 queued->error)是"新发生"的转换, 必须发(R3)。掉盘恢复重载
+        不是新转换, 传 False 不重发, 避免同一僵尸在盘抖动时反复刷历史。"""
+        # 目标容器重置(幂等 + 防 reload 路径累积旧态)
+        self.thumb_meta = {}
+        self.thumb_jobs = {}
+        self.seg_urls = {}
+        self.video_meta = {}
+        self.buf_jobs = {}
+        self.buf_state = {}
+        self._last_buf_error = {}
+        self.pf_done = set()
+        self.playhead = {}
+
+        _jpeg_ok = self._jpeg_ok
+        # 回载 thumb_index.json: 现在存全部状态(ready/gen/error/cancelled),
+        # ready 校验 .jpg 文件存在 + 有效(开头 magic bytes 是 JPEG SOI 0xFFD8 + 非 0 字节),
+        # 网关被砍中 ffmpeg 时 .jpg 可能半截,仅 exists 会误认 ready, 前端展示 broken image。
+        # 启动时若是 gen 状态(网关被砍时正在生成的) → 回退成 error,等用户手动重试。
+        try:
+            with open(self.thumb_index_path, "r", encoding="utf-8") as f:
+                for vid, m in (json.load(f) or {}).items():
+                    st = (m or {}).get("state")
+                    if st == "ready":
+                        jpg = os.path.join(self.thumb_dir, "%s.jpg" % vid)
+                        if _jpeg_ok(jpg):
+                            self.thumb_meta[vid] = m
+                        # .jpg 缺失/损坏 → 不进 thumb_meta, 重新触发 thumb 会真重启
+                    elif st == "gen":
+                        # 进程被砍时正在跑的 ffmpeg → 算失败,等重试
+                        self.thumb_meta[vid] = {"state": "error", "reason": "interrupted"}
+                        # [发射点 9] init 期唯一*新发生*的 thumb 终态(gen->error): 上次被砍中途,
+                        # 这是新转换不是回载快照, 必须发(R3)。回载原样的 ready/error/cancelled 不发(R4)。
+                        if emit_init_events:
+                            self._emit_task_event("thumb", vid, "error", "interrupted")
+                    elif st in ("error", "cancelled"):
+                        self.thumb_meta[vid] = m
+        except FileNotFoundError:
+            pass   # 首次运行：尚无缩略图索引，正常
+        except Exception:  # noqa: BLE001
+            self._quarantine_corrupt(self.thumb_index_path, "缩略图")
+        # thumb_jobs.json: 重试上下文 (vid → [video_dict, m3u8, duration, tier])
+        if os.path.isfile(self.thumb_jobs_path):
+            try:
+                with open(self.thumb_jobs_path, "r", encoding="utf-8") as f:
+                    raw = json.load(f) or {}
+                for vid, payload in raw.items():
+                    # 兼容 [v, m, dur, tier] 4-tuple
+                    if isinstance(payload, list) and len(payload) == 4:
+                        v, m, dur, tier = payload
+                        if isinstance(v, dict) and isinstance(m, str) and m:
+                            self.thumb_jobs[str(vid)] = (v, m, int(dur or 0), int(tier or 2))
+            except Exception:  # noqa: BLE001
+                self._quarantine_corrupt(self.thumb_jobs_path, "thumb_jobs")
+
+        # seg_urls.json：把"该 vid 的分片有序列表"持久化到缓存目录。重启后回载,
+        # 让设置页的"总数 / 缓冲条 buckets"立刻能复原（不必等用户再点一次回放/缓冲）。
+        if self.seg_urls_path and os.path.isfile(self.seg_urls_path):
+            try:
+                with open(self.seg_urls_path, "r", encoding="utf-8") as f:
+                    loaded = json.load(f) or {}
+                for vid, urls in loaded.items():
+                    if isinstance(urls, list) and urls:
+                        self.seg_urls[str(vid)] = list(urls)
+            except Exception:  # noqa: BLE001
+                self._quarantine_corrupt(self.seg_urls_path, "seg_urls")
+                self.seg_urls = {}
+
         # 启动时回载 3 张表(先 video_meta, 再 buf_jobs, 再 buf_state):
         # buf_state 引用 buf_jobs 的 (video, m3u8), 顺序错会 resume/retry 跑空。
         if self.video_meta_path and os.path.isfile(self.video_meta_path):
@@ -271,7 +356,7 @@ class Gateway:
                 self.video_meta = {}
         # 重建 video_headers: video_headers 本身不持久化(含 session 字段 Cookie/UA,跨重启
         # 由 req.txt 重新加载),但 per-vid 部分(Url/Videoid/Cardpackageid/Liveid)能从
-        # video_meta 派生。启动时 play_headers(self.session, meta, m3u8) 重建一遍, 这样
+        # video_meta 派生。play_headers(self.session, meta, m3u8) 重建一遍, 这样
         # 网关脱离 web 启动后,所有曾见过的 vid 立刻能直接观看(不必先打 /api/play)。
         # tvid="t_"+vid (缩略图源,低清流)等到自动 thumb 时再按当时的低清 m3u8 重建。
         for vid, meta in self.video_meta.items():
@@ -337,7 +422,8 @@ class Gateway:
                             # [发射点 4] init 期唯一*新发生*的 buffer 终态(僵尸 queued->error):
                             # 发生在 web 轮询建立之前, seq/emit 已在 init 早期就绪故能发(R3)。
                             # 其它回载原样态(done/cancelled/paused/error/queued)一律不发(R4)。
-                            self._emit_task_event("buffer", vid, "error", reason)
+                            if emit_init_events:
+                                self._emit_task_event("buffer", vid, "error", reason)
                     else:
                         self.buf_state[vid] = actual
             except Exception:  # noqa: BLE001
@@ -359,23 +445,7 @@ class Gateway:
                 self._quarantine_corrupt(self.buf_errors_path, "buf_errors")
                 self._last_buf_error = {}
 
-        # 启动时若做了僵尸修正/终态裁剪, 立刻回写一次, 让下次启动不再重复处理同样的僵尸。
-        # (init 阶段还没启 buffer worker, 无并发, 不需 buf_lock。)
-        self._save_buf_state()
-        self._save_buf_errors()
-
-        # 自动预缓存：以"播放头"为中心向前后双向补未缓存分片。
-        self.pf_lock = threading.Lock()
-        self.pf_active = {"vid": None}
-        self.pf_done = set()     # 预缓存到「整集已满」的 vid（供设置页「已完成」+任务历史用)
-        self.pf_threads = {}     # vid -> (thread, stop_event)
-        self.pf_segidx = {}      # vid -> {seg_url: index}
-        self.playhead = {}       # vid -> 最近一次直播请求到的分片下标
         # pf_done.json: 跨会话保留预缓存完成的讲, 让任务历史里 prefetch:done 不会丢。
-        self.pf_done_path = (
-            os.path.join(self.seg_cache.dir, "pf_done.json")
-            if self.seg_cache.persist else None
-        )
         if self.pf_done_path and os.path.isfile(self.pf_done_path):
             try:
                 with open(self.pf_done_path, "r", encoding="utf-8") as f:
@@ -387,15 +457,7 @@ class Gateway:
                 self._quarantine_corrupt(self.pf_done_path, "pf_done")
                 self.pf_done = set()
 
-        # playhead.json: 预缓存中心点持久化。直播分片每秒触发,如果每次都落盘 IO 太多;
-        # 用 _playhead_dirty 标志 + 后台 _playhead_flush 线程 5s 一刷,丢的最大值 = 5 秒位置漂移,
-        # 网关重启后预缓存从 5 秒前的位置继续,完全可接受。
-        # 同时含 _protect_vid 字段(嵌入同一文件): cache LRU "保护集"。
-        self.playhead_path = (
-            os.path.join(self.seg_cache.dir, "playhead.json")
-            if self.seg_cache.persist else None
-        )
-        self._playhead_dirty = False
+        # playhead.json: 预缓存中心点 + protect_vid + extra_protect 回载。
         if self.playhead_path and os.path.isfile(self.playhead_path):
             try:
                 with open(self.playhead_path, "r", encoding="utf-8") as f:
@@ -416,18 +478,6 @@ class Gateway:
             except Exception:  # noqa: BLE001
                 self._quarantine_corrupt(self.playhead_path, "playhead")
                 self.playhead = {}
-
-        for _ in range(max(1, THUMB_WORKERS)):
-            threading.Thread(target=self._thumb_worker, daemon=True).start()
-        threading.Thread(target=self._buffer_worker, daemon=True).start()
-        # 后台 flush 线程: playhead 节流落盘(5s/次),只在 dirty 时写。
-        threading.Thread(target=self._playhead_flush_loop, daemon=True).start()
-        # 后台 flush 线程: 掉盘恢复后重刷全部持久化状态(防丢掉盘窗口内的变更)。
-        threading.Thread(target=self._recover_flush_loop, daemon=True).start()
-
-    def pri_fetch(self, t, hdrs, url, range_header=None):
-        """按优先级档位回源（委托给闸门）。"""
-        return self.gate.fetch(t, hdrs, url, range_header)
 
     def _atomic_write_json(self, path, data):
         """tmp + os.replace 原子落盘 JSON。返回是否真的写成功(掉盘/跳过/异常都 False)。
@@ -579,10 +629,76 @@ class Gateway:
                 except Exception:  # noqa: BLE001
                     _log.debug("playhead 节流落盘失败", exc_info=True)
 
-    def _recover_flush_loop(self):
-        """监测掉盘恢复: seg_cache.ok 由 False→True 时, 把所有内存态强制重刷一遍。
+    def _flush_all_persist(self):
+        """掉盘恢复后把全部内存态强制重刷回盘(运行中掉盘: 内存权威)。
         掉盘期间 _atomic_write_json 全被跳过, 盘回来后磁盘 JSON 还停在掉盘前快照,
-        不重刷的话此后一次 kill -9 会丢掉整个掉盘窗口内的状态变更。"""
+        不重刷的话此后一次 kill -9 会丢掉整个掉盘窗口内的状态变更。
+        各 _save_* 自带掉盘守卫 + 持各自锁的约定, 此处遵从原有锁序。"""
+        self._save_seg_urls()
+        self._save_video_meta()
+        self._save_pf_done()
+        self._save_playhead()
+        self._save_thumb_index()
+        with self.task_lock:
+            self._save_task_events()  # 掉盘窗口内的事件也重刷, 否则丢
+        with self.buf_lock:
+            self._save_buf_state()
+            self._save_buf_jobs()
+            self._save_buf_errors()
+        self._save_thumb_jobs()  # 自持 thumb_lock 快照, 调用方不得持锁
+        self.seg_cache._dirty = True  # 让 cache 的 _flush_loop 也重写 index.json
+
+    def _reload_all_persist(self):
+        """启动即掉盘(从未载入)后盘回来: 盘才是真相, 从磁盘重载全部持久化态到内存,
+        而不是用空内存覆盖磁盘(本 bug #2 的治本)。重跑 cache 索引 + 全部 *.json 回载。
+
+        与 __init__ 回载共用底层 _load_persist_tables; 只补 cache 索引重载 + 重建
+        video_headers(派生态, 让重载后立刻能直接观看)。不在此重入队 buffer/thumb worker
+        (它们已在跑, 见到回载好的 buf_q/thumb 状态会自然推进), 也不重发 init 期事件
+        (那是一次性僵尸修正, 重载不是新转换)。"""
+        # 1) cache 自身索引(index.json -> meta/size): 启动时 ok=False 跳过了 _load_index。
+        if self.seg_cache.persist and self.seg_cache.ok:
+            try:
+                self.seg_cache._load_index()
+            except Exception:  # noqa: BLE001
+                _log.warning("掉盘恢复重载 cache 索引失败", exc_info=True)
+        # 2) 全部 *.json 持久化表回载到内存。
+        self._load_task_events()
+        self._load_persist_tables()
+        # 3) 重建 video_headers(派生态): 让重载后曾见过的 vid 立刻能直接观看。
+        for vid, meta in self.video_meta.items():
+            m3u8 = meta.get("m3u8")
+            if not m3u8:
+                continue
+            try:
+                self.video_headers[str(vid)] = play_headers(self.session, meta, m3u8)
+            except Exception:  # noqa: BLE001
+                _log.debug("掉盘恢复重建 video_headers 失败 vid=%s", vid, exc_info=True)
+
+    def _recover_once(self):
+        """掉盘恢复的单次 tick(从 _recover_flush_loop 抽出, 供单元测试直接调)。
+        语义:
+          · ok 仍 False(盘没回来) -> 不动作。
+          · ok True 且从未载入(_ever_loaded=False, 即启动即掉盘) -> 重载磁盘(盘是真相)。
+          · ok True 且曾载入(运行中掉盘后回来) -> 刷回内存(内存是真相)。
+        ok 的 False->True 触发判定由 _recover_flush_loop 负责(prev_ok); _recover_once
+        只看当前 ok + _ever_loaded, 故重复调用幂等(刷/载都可安全重做)。"""
+        if not self.seg_cache.ok:
+            return
+        with self._recover_lock:
+            if not self._ever_loaded:
+                # 启动即掉盘、从未载入: 盘才是真相, 重载而非覆盖。
+                _log.warning("启动即掉盘后缓存盘回来, 从磁盘重载持久化态(防空内存覆盖)")
+                self._reload_all_persist()
+                self._ever_loaded = True
+                return
+            # 运行中掉盘后回来: 内存态权威, 刷回盘。
+            _log.warning("缓存盘恢复可写, 重刷全部持久化状态")
+            self._flush_all_persist()
+
+    def _recover_flush_loop(self):
+        """监测掉盘恢复: seg_cache.ok 由 False→True 时跑一次 _recover_once。
+        启动即掉盘 -> 重载磁盘; 运行中掉盘 -> 刷回内存(见 _recover_once)。"""
         prev_ok = self.seg_cache.ok
         while True:
             time.sleep(5)
@@ -593,24 +709,83 @@ class Gateway:
                 self.seg_cache.ok = True
                 now_ok = True
             if now_ok and not prev_ok:
-                _log.warning("缓存盘恢复可写, 重刷全部持久化状态")
                 try:
-                    self._save_seg_urls()
-                    self._save_video_meta()
-                    self._save_pf_done()
-                    self._save_playhead()
-                    self._save_thumb_index()
-                    with self.task_lock:
-                        self._save_task_events()  # 掉盘窗口内的事件也重刷, 否则丢
-                    with self.buf_lock:
-                        self._save_buf_state()
-                        self._save_buf_jobs()
-                        self._save_buf_errors()
-                    self._save_thumb_jobs()  # 自持 thumb_lock 快照, 调用方不得持锁
-                    self.seg_cache._dirty = True  # 让 cache 的 _flush_loop 也重写 index.json
+                    self._recover_once()
                 except Exception:  # noqa: BLE001
-                    _log.warning("掉盘恢复重刷失败", exc_info=True)
+                    _log.warning("掉盘恢复处理失败", exc_info=True)
             prev_ok = now_ok
+
+    def _init_persist_min(self, cache_dir, ok=True):
+        """[测试 seam] 不走真实网络/不起 worker, 只搭出掉盘恢复路径(_recover_once /
+        _reload_all_persist / _flush_all_persist)所需的最小持久化骨架。
+
+        构造方式: 调用方 Gateway.__new__(Gateway) 后调本方法。设:
+          · 一个真实 DiskLRU(cache_dir) 作 seg_cache(故 ok/dir_ok/_load_index/persist 都真)。
+          · 全部 *.json 持久化路径指向 cache_dir; thumb_dir 隔离到 cache_dir/_thumb(不碰生产)。
+          · 全部内存态空 dict/set + 必要的锁 + 空 task_events 基础设施。
+          · _ever_loaded=False(模拟"启动即掉盘从未载入"; 运行中掉盘测试自行置 True)。
+          · seg_cache.ok 被强制设为传入的 ok(模拟启动时盘可用/不可用)。
+        生产代码不依赖本方法; 仅单元测试用。"""
+        self.base_headers = {}
+        self.session = {}
+        self.video_headers = {}
+        self.vh_lock = threading.Lock()
+        self.seg_cache = DiskLRU(SEG_CACHE_BYTES, cache_dir)
+        self.seg_cache.set_namespace_splitter(
+            lambda vid: ("thumb", vid[2:]) if isinstance(vid, str) and vid.startswith("t_") else ("real", vid)
+        )
+        self.seg_cache.ok = ok  # 模拟启动时盘(不)可用
+
+        self._ever_loaded = False
+        self._recover_lock = threading.Lock()
+
+        # task_events 基础设施
+        self.task_lock = threading.Lock()
+        self._task_seq = 0
+        self.task_events = collections.deque(maxlen=_TASK_EVENTS_KEEP)
+        self.task_events_path = os.path.join(cache_dir, "task_events.json")
+
+        # thumb 隔离目录(不碰生产 THUMB_DIR)
+        self.thumb_dir = os.path.join(cache_dir, "_thumb")
+        os.makedirs(self.thumb_dir, exist_ok=True)
+        self.thumb_index_path = os.path.join(self.thumb_dir, "index.json")
+        self.thumb_jobs_path = os.path.join(self.thumb_dir, "thumb_jobs.json")
+        self.thumb_meta = {}
+        self.thumb_active = set()
+        self.thumb_jobs = {}
+        self.thumb_procs = {}
+        self.thumb_session = set()
+        self.thumb_lock = threading.Lock()
+        self.thumb_q = queue.Queue()
+        self.have_ffmpeg = False
+
+        # 整集缓冲
+        self.seg_urls = {}
+        self.buf_state = {}
+        self.buf_jobs = {}
+        self._last_buf_error = {}
+        self.buf_lock = threading.Lock()
+        self.buf_q = queue.Queue()
+        self.meta_lock = threading.Lock()
+        self.video_meta = {}
+
+        # 预缓存
+        self.pf_lock = threading.Lock()
+        self.pf_active = {"vid": None}
+        self.pf_done = set()
+        self.pf_threads = {}
+        self.pf_segidx = {}
+        self.playhead = {}
+        self._playhead_dirty = False
+
+        # 全部持久化路径
+        self.seg_urls_path = os.path.join(cache_dir, "seg_urls.json")
+        self.buf_state_path = os.path.join(cache_dir, "buf_state.json")
+        self.buf_jobs_path = os.path.join(cache_dir, "buf_jobs.json")
+        self.buf_errors_path = os.path.join(cache_dir, "buf_errors.json")
+        self.video_meta_path = os.path.join(cache_dir, "video_metadata.json")
+        self.pf_done_path = os.path.join(cache_dir, "pf_done.json")
+        self.playhead_path = os.path.join(cache_dir, "playhead.json")
 
     def _remember_video(self, video, m3u8):
         """从一次 thumb/buffer/warm/play 调用记下该 vid 的元数据。
