@@ -60,6 +60,16 @@ const VERB_BTN: Record<TaskVerb, { title: string; Icon: typeof PauseRoundedIcon;
   cancel: { title: "取消", Icon: CloseRoundedIcon, color: "error" },
 };
 
+// 历史时间线时间戳格式化:今天显示 HH:mm,跨天显示 MM-DD HH:mm(本地时间)。
+function fmtHistTime(ms: number): string {
+  const d = new Date(ms);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const hm = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  const now = new Date();
+  const sameDay = d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
+  return sameDay ? hm : `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${hm}`;
+}
+
 // 取消按钮的标签/提示按 kind 区分：缓冲取消是「暂停并保留已缓存片段」(可恢复)，
 // 缩略图取消是「终止」(单次 ffmpeg 无部分续传，取消后不可恢复)。
 function cancelMeta(kind: TaskItem["kind"]) {
@@ -85,7 +95,8 @@ function TaskRow({
   // 直接 CHIP[st]/KIND[kind] 取到 undefined 再读 .color 会抛错把整页 unmount(白屏)。
   const k = KIND[task.kind] ?? { label: task.kind, Icon: DownloadRoundedIcon, color: "primary" as const };
   const st = task.state;
-  const working = st === "working";
+  // 历史是冻结快照:非终态(残留 working)不转圈,降级成静态点(dotColor 落到 text.disabled 灰点)。
+  const working = st === "working" && !isHistory;
   const pct = task.cached != null && task.total ? Math.min(100, (task.cached / task.total) * 100) : null;
   const chip = CHIP[st] ?? { label: String(st), color: "default" as ChipColor };
   const chipColor: ChipColor = working ? k.color : chip.color;
@@ -118,7 +129,15 @@ function TaskRow({
         <Typography variant="caption" color="text.secondary" noWrap title={task.courseName}>
           {task.courseName}
           {isPrefetch ? " · 由播放自动触发，不可手动操作" : ""}
+          {/* 历史模式:在课程名后追加该终态事件的发生时间(全屏完整时间线靠它区分同任务多行)。 */}
+          {isHistory && task.at != null ? ` · ${fmtHistTime(task.at)}` : ""}
         </Typography>
+        {/* 历史模式失败原因:有值才渲染,灰色小字。 */}
+        {isHistory && task.reason ? (
+          <Typography variant="caption" color="text.disabled" noWrap title={task.reason} sx={{ display: "block" }}>
+            {task.reason}
+          </Typography>
+        ) : null}
         {pct != null && (
           <LinearProgress variant="determinate" value={pct} sx={{ mt: 0.5, height: 4, borderRadius: (t) => t.radius.full }} />
         )}

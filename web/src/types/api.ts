@@ -62,11 +62,13 @@ export interface GwStatus {
     errors: number;
     session?: string[];
     bytes?: number;
+    // 仅 error 态附原因（网关 thumb_meta[vid].reason），供 web 写历史/展示失败原因用。
+    reasons?: Record<string, string | null>;
   };
   buffer: {
     perVid: Record<
       string,
-      { cached: number; total: number | null; state: string | null; bytes: number; thumbBytes: number }
+      { cached: number; total: number | null; state: string | null; bytes: number; thumbBytes: number; reason?: string | null }
     >;
     bytes: number;
     limit: number;
@@ -161,6 +163,10 @@ export interface TaskItem {
   state: TaskState;
   cached?: number;
   total?: number | null;
+  // 历史时间线：TaskHistory.at 的毫秒时间戳（全屏完整时间线显示时间、区分同任务多行）。实时任务无此值。
+  at?: number;
+  // 失败原因（state=error 时由网关 reason 透传）；其它态为 null/undefined。
+  reason?: string | null;
 }
 
 // 网关 /api/tasks/action 的返回：操作后即时复查到的最新状态（成功 ok=true）。

@@ -47,10 +47,26 @@ function TaskQueuePanel({
     [onAction],
   );
 
+  // 历史标签客户端折叠：每 (kind,vid) 只保留最新一行。API 已按 at desc 返回完整时间线,
+  // 首见即最新。折叠只作用于面板概览;全屏(TaskQueueFullscreenDialog)直接吃 allTasks 全量=完整时间线,不折叠。
+  const collapseLatest = (rows: TaskItem[]) => {
+    const seen = new Set<string>();
+    const out: TaskItem[] = [];
+    for (const t of rows) {
+      const k = `${t.kind}:${t.vid}`;
+      if (seen.has(k)) continue;
+      seen.add(k);
+      out.push(t);
+    }
+    return out;
+  };
+
   const lists = [tasks, allTasks];
   const current = lists[tab] ?? [];
-  const shown = current.slice(0, PANEL_CAP);
   const isHistoryTab = tab === 1;
+  // 历史标签(tab===1)在面板里折叠成每任务最新态;进行中标签不折叠。
+  const display = isHistoryTab ? collapseLatest(current) : current;
+  const shown = display.slice(0, PANEL_CAP);
 
   return (
     <Box sx={{ display: "flex", flexDirection: "column", minHeight: 0 }}>
@@ -115,7 +131,7 @@ function TaskQueuePanel({
           px: 0.5,
         }}
       >
-        {current.length === 0 ? (
+        {display.length === 0 ? (
           <Box sx={{ height: "100%", minHeight: 80, display: "flex", alignItems: "center", justifyContent: "center" }}>
             <Typography variant="caption" color="text.disabled">
               {TASK_TABS[tab].empty}
@@ -132,10 +148,10 @@ function TaskQueuePanel({
                 isHistory={isHistoryTab}
               />
             ))}
-            {current.length > shown.length && (
+            {display.length > shown.length && (
               <Box sx={{ py: 0.5, textAlign: "center" }}>
                 <Typography variant="caption" color="primary" sx={{ cursor: "pointer" }} onClick={() => onFsOpenChange(true)}>
-                  还有 {current.length - shown.length} 条，展开全屏查看全部
+                  还有 {display.length - shown.length} 条，展开全屏查看全部
                 </Typography>
               </Box>
             )}

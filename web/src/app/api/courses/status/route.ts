@@ -318,6 +318,8 @@ async function build(): Promise<CoursesStatus> {
         state: h.state as TaskItem["state"],
         cached: showSegs ? b?.cached : undefined,
         total: showSegs ? (b?.total ?? null) : null,
+        at: h.at.getTime(), // 全屏时间线显示时间;面板折叠后同任务只一行,但全屏需 at 区分同任务多行
+        reason: h.reason ?? null, // 失败原因透传(配合 Task 2);非失败为 null
       };
     });
   } catch { /* 查询失败返回空数组 */ }
@@ -427,6 +429,24 @@ async function initLastTaskStateOnce() {
     await prisma.taskHistory.deleteMany({ where: { at: { lt: cutoff } } });
   } catch { /* 清理失败不致命 */ }
 
+  // 启动幂等清理迁移(2026-05-29 操作历史清理计划 Task 5):清存量噪声,且防 web 重启后回填僵尸。
+  // 仅删"确定无价值"的:测试桩 + 决策 1 要清的 thumb cancelled + 被更晚终态取代的僵尸 working/queued。
+  // 幂等:连跑两次第二次影响 0 行也不报错(deleteMany / DELETE 都天然幂等)。
+  try {
+    // (a) e2e 测试桩(合成 vid,grep 仓库无真实引用)
+    await prisma.taskHistory.deleteMany({ where: { videoId: { in: [999000111, 888000222, 777000333] } } });
+    // (c) 决策 2026-05-29:缩略图取消完全不进历史 → 清存量 354 行
+    await prisma.taskHistory.deleteMany({ where: { kind: "thumb", state: "cancelled" } });
+    // (b) 被更晚终态取代的僵尸 working/queued(append-only 残骸)。用原生 SQL 做 EXISTS 子查询:
+    // 只删"同 (kind,videoId) 有更晚行"的 working/queued;没有更晚态的(真·进行中)不删。
+    // Task 1 后运行态根本不再入库,此类行只会是历史残留。
+    await prisma.$executeRawUnsafe(
+      `DELETE FROM TaskHistory WHERE state IN ('working','queued') AND EXISTS (
+         SELECT 1 FROM TaskHistory t2 WHERE t2.kind=TaskHistory.kind
+         AND t2.videoId=TaskHistory.videoId AND t2.at > TaskHistory.at)`,
+    );
+  } catch { /* 清理失败不致命 */ }
+
   // 跨会话回填: CacheStatus 里 state='full' (=cached=total 整集已缓存好) 的 vid
   // 在 TaskHistory 里如果没记录过 "done", 一次性补上 kind='buffer' state='done'。
   // 这覆盖了用户在 buf_state.json 持久化之前(老版本)做过的 buffer/prefetch 完成,
@@ -453,22 +473,34 @@ async function appendTaskHistory(gw: GwStatus) {
   type Row = { kind: "buffer" | "thumb" | "prefetch"; videoId: number; state: string; reason?: string | null };
   const rows: Row[] = [];
 
-  // buffer: gw.buffer.states 含全部曾经设过状态的 vid(本进程持续累计;buf_state.json 跨重启回载)
+  // buffer: 只把终态写历史(done/error/cancelled);运行态(working/queued/paused)由实时 tasks 数组展示。
+  // 杜绝"working 进历史→历史里永久转圈"的僵尸行(见 2026-05-29 操作历史清理计划 Task 1/5)。
+  // gw.buffer.states 含全部曾经设过状态的 vid(本进程持续累计;buf_state.json 跨重启回载)。
   const bufStates = gw.buffer.states ?? {};
   for (const [vid, st] of Object.entries(bufStates)) {
     const videoId = Number(vid);
     if (!videoId || !st) continue;
-    rows.push({ kind: "buffer", videoId, state: st });
+    if (st !== "done" && st !== "error" && st !== "cancelled") continue;
+    // error 时 reason 取网关 perVid[vid].reason(仅 error 态带);防御性 ?. ?? 即便类型暂缺也不崩。
+    const reason = st === "error" ? (gw.buffer.perVid?.[vid]?.reason ?? null) : null;
+    rows.push({ kind: "buffer", videoId, state: st, reason });
   }
-  // thumb: gw.thumb.states {vid: "ready"|"gen"|"error"|"cancelled"}
-  // 启动时回载的 ready 状态借助 lastTaskState 去重不会重复 append;真正的转换才会进。
+  // thumb: 决策(2026-05-29)缩略图取消完全不进历史 → 只写 ready→done 与 error;且只记本会话
+  // (thSession),避免网关重启回载的非本会话状态被当新事件灌库(那正是 354 行 cancelled 洪水的来源)。
+  // appendTaskHistory 是独立函数,这里重新构造 thSession(gw 已是入参);勿引用 build() 的局部变量。
+  const thSession = new Set(gw.thumb.session ?? []);
+  const thReasons = gw.thumb.reasons ?? {}; // Task 2:网关导出的 thumb error reason(防御性 ?? {})
   for (const [vid, st] of Object.entries(gw.thumb.states ?? {})) {
     const videoId = Number(vid);
     if (!videoId || !st) continue;
-    // gen 是"生成中"瞬态,不是历史事件:写进历史会冻结一条无意义的"生成中",且 gen 不在
-    // TaskState 枚举内,渲染取色会崩(白屏)。只把终态写入历史(ready→done / error / cancelled)。
-    if (st !== "ready" && st !== "error" && st !== "cancelled") continue;
-    rows.push({ kind: "thumb", videoId, state: st === "ready" ? "done" : st });
+    if (!thSession.has(vid)) continue; // 非本会话(回载态)一律不进历史
+    if (st !== "ready" && st !== "error") continue; // cancelled/gen 都不进
+    rows.push({
+      kind: "thumb",
+      videoId,
+      state: st === "ready" ? "done" : "error",
+      reason: st === "error" ? (thReasons[vid] ?? null) : null,
+    });
   }
   // prefetch: gw.live.done = 本会话预缓存满的讲(若网关持久化 pf_done 后跨会话也保留)
   for (const vid of gw.live?.done ?? []) {
@@ -486,6 +518,13 @@ async function appendTaskHistory(gw: GwStatus) {
     fresh.push(r);
   }
   if (fresh.length === 0) return;
+  if (fresh.length > 50) {
+    // 异常:单次轮询不该产生 >50 条新历史事件(正常用户操作一次最多个位数)。
+    // 极可能是回载态被误判为新事件(参见 2026-05-28 16:31 那次 353 行 thumb cancelled 批写)。
+    // 治本是上面的 session 过滤,这是安全网:记 warn 并截断,防灌库。
+    console.warn(`[appendTaskHistory] 单次 fresh=${fresh.length} 异常,截断到 50 防灌库`);
+    fresh.length = 50;
+  }
 
   await prisma.taskHistory.createMany({
     data: fresh.map((r) => mkHistRow(r.kind, r.videoId, r.state, r.reason)),

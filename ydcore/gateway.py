@@ -1409,6 +1409,10 @@ def make_handler(gateway):
             gw = self.gw
             with gw.thumb_lock:
                 tstates = {k: v.get("state") for k, v in gw.thumb_meta.items()}
+                # treasons: 仅 error 态附原因(thumb_meta[vid].reason),供 web 写历史/展示失败原因用。
+                # 与 tstates 共用同一持锁快照,避免二次取锁竞态;不改 tstates 形状(多消费者)。
+                treasons = {v: m.get("reason") for v, m in gw.thumb_meta.items()
+                            if isinstance(m, dict) and m.get("state") == "error" and m.get("reason")}
                 tactive = set(gw.thumb_active)
                 tsession = sorted(gw.thumb_session)  # 本会话排过队的缩略图任务
             with gw.buf_lock:
@@ -1461,6 +1465,8 @@ def make_handler(gateway):
                           # 由 queued_vids 推数：thumb_q.qsize() 会把已取消/在途的也算进去而高报。
                           "queued": len(tqueued), "errors": terr,
                           "session": tsession,
+                          # reasons: 仅 error 态 vid → 失败原因(供 web 历史写 thumb error reason)
+                          "reasons": treasons,
                           # 缩略图源段在磁盘的总字节(thumb 桶汇总): 取代已删的 /api/thumbs/status。
                           "bytes": sum((d.get("bytes", 0) for d in thumbb.values()), 0)},
                 "buffer": {"perVid": buffer, "bytes": gw.seg_cache.size, "limit": gw.seg_cache.max,

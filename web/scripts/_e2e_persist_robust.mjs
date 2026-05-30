@@ -15,10 +15,18 @@ import { execSync, spawn } from "node:child_process";
 const ROOT = "/Users/zhb/Documents/julestest";
 const CACHE_DIR = "/Volumes/Samsung - Data/youdao-course-cache";
 const THUMB_DIR = "/Users/zhb/.youdao_course/thumbs";
+// 注意: CACHE_DIR 是外置盘, 但 SQLite DB 在 ~/.youdao_course/app.db(web 的 DATABASE_URL)。
+// 测试桩(假 vid)经 web 轮询会沉淀进生产 TaskHistory, teardown 必须连 DB 一起清(见 2026-05-29 操作历史清理计划 Task 6)。
+const DB = process.env.DATABASE_FILE || "/Users/zhb/.youdao_course/app.db";
+// 本测试用到的所有合成 vid(含旧版遗留 777000333), DB teardown 统一删除。
+const TEST_VIDS = [999000111, 888000222, 777000333];
 const GW = "http://127.0.0.1:8808";
 const HOST = "http://127.0.0.1:3000";
 // 合成测试 vid: 不依赖真实课程, 直接写进持久化文件再重启验证回载。
 const TEST_VID = "999000111";
+
+// TODO(方案 B, 后续根治): 测试用独立临时 CACHE_DIR + 独立 test DATABASE_URL(env 覆盖),
+// fixture 跑完整目录删除, 彻底不碰生产 app.db / 生产缓存目录。本次仅实现方案 A(teardown 清生产桩)。
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -100,6 +108,13 @@ async function cleanupSeed() {
     ph.extra_protect = ph.extra_protect.filter((v) => v !== TEST_VID && v !== "888000222");
     await writeJson(`${CACHE_DIR}/playhead.json`, ph);
   }
+  // teardown: 清测试桩在 TaskHistory 的沉淀(否则每跑一次多 N 条假 error 行污染生产历史)。
+  // 用 sqlite3 桩行直删, 不引 Prisma(脚本无 web 依赖上下文)。删除失败不致命(DB 可能暂时锁)。
+  try {
+    execSync(`sqlite3 "${DB}" "DELETE FROM TaskHistory WHERE videoId IN (${TEST_VIDS.join(",")});"`);
+  } catch (e) {
+    console.warn(`[cleanupSeed] sqlite3 teardown 失败(忽略): ${e?.message ?? e}`);
+  }
 }
 
 const results = [];
@@ -110,6 +125,10 @@ function check(name, ok, detail) {
 
 async function main() {
   await waitReady();
+
+  // 开头先清一遍(缓存 JSON + DB 桩行): 保证可重复运行, 不受上一轮残留(含异常退出未 teardown)影响。
+  // 结尾 main() 末尾再清一遍 → 开头清 + 结尾清, 两次连跑幂等。
+  await cleanupSeed();
 
   // 1) 注入合成状态 → kill -9 → 重启 → 断言回载。
   await seedState();
