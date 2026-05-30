@@ -12,7 +12,7 @@ import {
   type RectPx,
 } from "./selection";
 import { extractSamples, isDrawingPointer, type RawSample } from "./inputPipeline";
-import { StrokeSmoother } from "./oneEuro";
+import { InkStrokeProcessor } from "./inkProcessor";
 import { tuning } from "./inkTuning";
 import { videoContentRect } from "./videoFit";
 import type { AnnotationApi } from "./useAnnotation";
@@ -34,7 +34,21 @@ type Drag =
   | { mode: "rotate"; snap: Map<string, Transform>; center: Pt; startAng: number }
   | { mode: "scale"; snap: Map<string, Transform>; center: Pt; startDist: number };
 
-export default function AnnotationLayer({ api, video }: { api: AnnotationApi; video?: HTMLVideoElement | null }) {
+export default function AnnotationLayer({
+  api,
+  video,
+  onCommitStroke,
+}: {
+  api: AnnotationApi;
+  video?: HTMLVideoElement | null;
+  // 提供时:落笔提交墨迹改为发出原始数据(供 /ink-tune 录制),且【不再 api.push】(让调参台独占对象真源)。
+  // 不提供时:维持现状 api.push —— 生产零行为变化。仅作用于 pen/marker;形状不受影响。
+  onCommitStroke?: (
+    raw: RawSample[],
+    frame: { w: number; h: number },
+    meta: { tool: "pen" | "marker"; color: string; width: number }
+  ) => void;
+}) {
   const wrapRef = React.useRef<HTMLDivElement>(null);
   const committedRef = React.useRef<HTMLCanvasElement>(null);
   const liveRef = React.useRef<HTMLCanvasElement>(null);
@@ -49,36 +63,11 @@ export default function AnnotationLayer({ api, video }: { api: AnnotationApi; vi
   const lastEraseRef = React.useRef<Pt | null>(null);
   const eraserCursorRef = React.useRef<{ x: number; y: number; r: number } | null>(null); // px
   const pendingRef = React.useRef<InkSample[]>([]);
-  const lastSampleRef = React.useRef<Pt | null>(null); // 抽稀用：上一个被接受的采样
-  const smootherRef = React.useRef(new StrokeSmoother()); // One Euro 去抖 + 保角，每笔重置
+  const processorRef = React.useRef<InkStrokeProcessor | null>(null); // 当前一笔的输入阶段处理器,onDown 建、onUp/onCancel 清
+  const rawStrokeRef = React.useRef<RawSample[]>([]); // 当前一笔的原始样本累积(供 onCommitStroke 录制)
   const rafRef = React.useRef<number | null>(null);
   const apiRef = React.useRef(api);
   apiRef.current = api;
-
-  // 处理一批原始采样：① 对每个样本跑 One Euro 去抖（位置 x/y + 压感）——抖动主要在这里消除；
-  // ② 再按最小间距抽稀（120Hz+240Hz 聚合会塞大量近重合点，抽稀后每帧 getStroke 成本与笔长解耦）。
-  // 滤波对【每个】原始样本都跑（维持滤波器状态连续），抽稀只决定输出哪些。
-  const acceptSamples = (raw: RawSample[]): InkSample[] => {
-    const { w, h } = sizeRef.current;
-    const sm = smootherRef.current;
-    const out: InkSample[] = [];
-    let last = lastSampleRef.current;
-    for (const s of raw) {
-      // 在【像素空间】去抖+保角——One Euro 的 minCutoff(Hz)/beta(对 px/s) 才有物理意义；
-      // 若在归一化 0–1 上滤，速度数值被画布尺寸缩小上千倍 → 误判为「慢」→ 过度平滑、笔迹严重滞后。
-      const pt = sm.point(s.x * w, s.y * h, s.t);
-      const fx = pt.x / w;
-      const fy = pt.y / h;
-      const fp = s.p === undefined ? undefined : sm.pressure(s.p, s.t);
-      if (!last || Math.hypot((fx - last.x) * w, (fy - last.y) * h) >= tuning.minSampleDist) {
-        const samp: InkSample = fp === undefined ? { x: fx, y: fy } : { x: fx, y: fy, p: fp };
-        out.push(samp);
-        last = samp;
-      }
-    }
-    lastSampleRef.current = last;
-    return out;
-  };
 
   const redrawCommitted = React.useCallback(() => {
     const ctx = committedRef.current?.getContext("2d");
@@ -207,8 +196,8 @@ export default function AnnotationLayer({ api, video }: { api: AnnotationApi; vi
       sizeRef.current = { w, h };
       // 平滑器在像素空间工作（基于 sizeRef），样本却按 rectOf() 归一化；中途改尺寸会让
       // 滤波基准与采样基准错位。尺寸真正变化时重置进行中的平滑器，避免混入旧基准的历史。
-      smootherRef.current.reset();
-      lastSampleRef.current = null;
+      // 进行中的一笔:尺寸变了重建处理器(像素空间基准变),等价于原来的 reset + 清抽稀基准。空闲(null)时无操作。
+      if (processorRef.current) processorRef.current = new InkStrokeProcessor(tuning, w, h);
       redrawCommitted();
       drawLive();
     };
@@ -382,13 +371,11 @@ export default function AnnotationLayer({ api, video }: { api: AnnotationApi; vi
       return;
     }
     if (tool === "pen" || tool === "marker") {
-      lastSampleRef.current = null; // 新一笔，重置抽稀基准（首点必被接受）
-      smootherRef.current.configure(
-        tuning.posMinCutoff, tuning.posBeta, tuning.dCutoff,
-        tuning.pressMinCutoff, tuning.pressBeta, tuning.cornerStrength
-      );
-      smootherRef.current.reset();
-      const samples = acceptSamples(extractSamples(e.nativeEvent, rectOf()));
+      const { w, h } = sizeRef.current;
+      const raw = extractSamples(e.nativeEvent, rectOf());
+      rawStrokeRef.current = [...raw]; // 新一笔:原始样本从首批开始累积
+      processorRef.current = new InkStrokeProcessor(tuning, w, h); // 构造即 configure+reset(读当前 tuning)
+      const samples = processorRef.current.push(raw);
       drawingRef.current = { kind: "ink", id: newId(), tool, color, width, samples, transform: identity() };
     } else if (tool === "line" || tool === "rect" || tool === "ellipse" || tool === "arrow") {
       const p = ptFrom(e);
@@ -459,8 +446,11 @@ export default function AnnotationLayer({ api, video }: { api: AnnotationApi; vi
     const d = drawingRef.current;
     if (!d) return;
     if (!isDrawingPointer(e.pointerType)) return;
-    if (d.kind === "ink") pendingRef.current.push(...acceptSamples(extractSamples(e.nativeEvent, rectOf())));
-    else d.b = ptFrom(e);
+    if (d.kind === "ink") {
+      const raw = extractSamples(e.nativeEvent, rectOf());
+      rawStrokeRef.current.push(...raw);
+      pendingRef.current.push(...(processorRef.current?.push(raw) ?? []));
+    } else d.b = ptFrom(e);
     scheduleRaf();
   };
 
@@ -527,10 +517,27 @@ export default function AnnotationLayer({ api, video }: { api: AnnotationApi; vi
     if (d && d.kind === "ink" && pendingRef.current.length) d.samples.push(...pendingRef.current);
     pendingRef.current.length = 0;
     drawLive();
-    if (!d) return;
-    if (d.kind === "ink" && d.samples.length < 1) return;
-    if (d.kind === "shape" && d.a.x === d.b.x && d.a.y === d.b.y) return;
-    apiRef.current.push(d);
+    const finishInk = () => {
+      rawStrokeRef.current = [];
+      processorRef.current = null;
+    };
+    if (!d) {
+      finishInk();
+      return;
+    }
+    if (d.kind === "ink" && d.samples.length < 1) {
+      finishInk();
+      return;
+    }
+    if (d.kind === "shape" && d.a.x === d.b.x && d.a.y === d.b.y) return; // 形状不涉及原始累积
+    if (d.kind === "ink" && onCommitStroke) {
+      // 调参台模式:发原始数据给页面,不进 api(让调参台独占真源、撤销历史干净)
+      onCommitStroke(rawStrokeRef.current, { ...sizeRef.current }, { tool: d.tool, color: d.color, width: d.width });
+      finishInk();
+      return;
+    }
+    finishInk();
+    apiRef.current.push(d); // 生产:照旧 push
   };
 
   // pointercancel：系统手势（下拉通知、浏览器滚动接管等）取消指针时放弃进行中的操作，不提交。
@@ -568,6 +575,8 @@ export default function AnnotationLayer({ api, video }: { api: AnnotationApi; vi
       rafRef.current = null;
     }
     pendingRef.current.length = 0;
+    rawStrokeRef.current = [];
+    processorRef.current = null;
     drawLive();
   };
 
