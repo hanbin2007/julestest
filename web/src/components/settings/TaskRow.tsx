@@ -26,10 +26,15 @@ export const TASK_TABS = [
 // 任务稳定标识：React key 与 busy 集合键统一走它，TaskItem 形状变了只改这一处。
 export const taskKey = (t: TaskItem) => `${t.kind}-${t.vid}`;
 
-// 某任务在当前状态下可执行的操作。prefetch 由播放驱动、切走自停 → 只读；
+// 某任务在当前状态下可执行的操作。
+// prefetch（自动·随播放）：现可控——pause/resume/cancel（无 retry：切回该讲即自动重新预缓存）。
 // 缩略图是单次原子 ffmpeg，无部分续传 → 只能取消/重试，没有暂停/继续。
 export function availableVerbs(kind: TaskItem["kind"], state: TaskState): TaskVerb[] {
-  if (kind === "prefetch") return [];
+  if (kind === "prefetch") {
+    if (state === "working") return ["pause", "cancel"];
+    if (state === "paused") return ["resume", "cancel"];
+    return []; // cancelled/done 等终态：无操作（切回该讲会自动重启预缓存）
+  }
   if (kind === "buffer") {
     if (state === "working") return ["pause", "cancel"];
     if (state === "paused") return ["resume", "cancel"];
@@ -71,11 +76,12 @@ function fmtHistTime(ms: number): string {
 }
 
 // 取消按钮的标签/提示按 kind 区分：缓冲取消是「暂停并保留已缓存片段」(可恢复)，
-// 缩略图取消是「终止」(单次 ffmpeg 无部分续传，取消后不可恢复)。
+// 缩略图取消是「终止」(单次 ffmpeg 无部分续传，取消后不可恢复)，
+// 预缓存取消是「停止本讲自动预缓存」(已缓存片段保留；切回该讲会自动重新预缓存)。
 function cancelMeta(kind: TaskItem["kind"]) {
-  return kind === "thumb"
-    ? { label: "终止", tip: "缩略图取消后不可恢复" }
-    : { label: "取消", tip: "取消会暂停并保留已缓存片段" };
+  if (kind === "thumb") return { label: "终止", tip: "缩略图取消后不可恢复" };
+  if (kind === "prefetch") return { label: "取消", tip: "停止本讲自动预缓存（已缓存片段保留；切回该讲会自动重新预缓存）" };
+  return { label: "取消", tip: "取消会暂停并保留已缓存片段" };
 }
 
 function TaskRow({
@@ -107,7 +113,7 @@ function TaskRow({
     st === "paused" ? "warning.main" : st === "error" ? "error.main" : st === "done" ? "success.main" : "text.disabled";
 
   return (
-    <Box sx={{ display: "flex", alignItems: "center", gap: 1, py: 0.5, px: 0.5, opacity: isPrefetch ? 0.7 : 1 }}>
+    <Box sx={{ display: "flex", alignItems: "center", gap: 1, py: 0.5, px: 0.5 }}>
       {/* 状态指示：进行中转圈，其余用对应颜色的点 */}
       {working ? (
         <CircularProgress size={14} thickness={6} />
@@ -128,7 +134,7 @@ function TaskRow({
         </Typography>
         <Typography variant="caption" color="text.secondary" noWrap title={task.courseName}>
           {task.courseName}
-          {isPrefetch ? " · 由播放自动触发，不可手动操作" : ""}
+          {isPrefetch ? " · 自动·随播放（可暂停 / 取消）" : ""}
           {/* 历史模式:在课程名后追加该终态事件的发生时间(全屏完整时间线靠它区分同任务多行)。 */}
           {isHistory && task.at != null ? ` · ${fmtHistTime(task.at)}` : ""}
         </Typography>
@@ -145,7 +151,7 @@ function TaskRow({
       {/* 状态徽标 + 分片计数（缩略图为单次 ffmpeg，段数无意义 → 不显示） */}
       <Box sx={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 0.5, flexShrink: 0 }}>
         {isPrefetch && (
-          <Chip size="small" variant="outlined" color="info" label="自动" sx={{ height: 22, fontSize: 11 }} />
+          <Chip size="small" variant="outlined" color="info" label="自动·随播放" sx={{ height: 22, fontSize: 11 }} />
         )}
         <Chip size="small" variant="outlined" color={chipColor} label={chip.label} sx={{ height: 22, fontSize: 11 }} />
         {!isThumb && task.cached != null && (

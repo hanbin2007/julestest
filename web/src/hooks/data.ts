@@ -61,7 +61,20 @@ export interface BpsSample {
   series: number[];
 }
 
+/** 刚发起控制动作后的「快刷窗口」时长（ms）：动作落地后状态可能正在迁移，
+ *  这段时间内强制 1s 刷新，让 UI 立刻看到 暂停/继续/取消/重试 的结果。 */
+const RECENT_ACTION_WINDOW_MS = 4000;
+// 模块级时间戳：动作处理器调用 markRecentAction() 写入，useCoursesStatus 的轮询谓词读取。
+let recentActionAt = 0;
+
+/** 任一缓存控制动作（pause/resume/cancel/retry，含批量提交）发起后调用一次，
+ *  让设置页状态轮询在接下来 ~4s 内回到 1s 快刷，避免动作看起来「没反应」。 */
+export function markRecentAction(): void {
+  recentActionAt = Date.now();
+}
+
 /** 设置页：每门课实时状态。忙时 1s、闲时 5s（闲时不停摆，仍低频刷新）。
+ *  「忙」= 队列有活 / 有任意非终态任务(working|queued|paused) / 刚发起过控制动作。
  *  另外按相邻两次 bufferBytes 差分出下载速率(bytes/s)，给活动面板做迷你折线。 */
 export function useCoursesStatus() {
   const { data, mutate } = useSWR<CoursesStatus>("/api/courses/status", () => getCoursesStatus(), {
@@ -70,10 +83,15 @@ export function useCoursesStatus() {
     dedupingInterval: 800,
     refreshInterval: (d) => {
       if (!d) return 1000;
-      // 仅「真正在跑」的任务算忙；纯暂停的稳态回落到 5s（暂停不消耗、无需 1s 刷新）。
+      // 刚发起动作的快刷窗口内强制 1s，让 暂停/继续/取消/重试 立刻可见。
+      if (Date.now() - recentActionAt < RECENT_ACTION_WINDOW_MS) return 1000;
+      // 任一非终态任务(working|queued|paused)都算忙——暂停的任务仍需 1s 刷新，
+      // 否则切到 5s 会让它看起来「冻住」。只有全部终态(done/cancelled/error)且队列空才回落 5s。
       const busy =
         d.activity.queue.thumb + d.activity.queue.buffer > 0 ||
-        d.tasks.some((t) => t.state === "working");
+        d.tasks.some(
+          (t) => t.state === "working" || t.state === "queued" || t.state === "paused",
+        );
       return busy ? 1000 : 5000;
     },
   });

@@ -264,6 +264,9 @@ async function build(): Promise<CoursesStatus> {
   const liveVid = gw.live?.active ?? null;
   const livePer = liveVid ? perVidGw[liveVid] : undefined;
   const liveFull = !!livePer && livePer.total != null && livePer.cached >= livePer.total;
+  // 预缓存逐讲控制态（pf_control 镜像）：{ [vid]: "paused"|"cancelled" }；不在表中 = running（常态）。
+  const pfControl = gw.live?.control ?? {};
+  // 当前会话在缓存那讲：缓存满即视为完成、不再列任务。其控制态决定任务行展示态（running→working）。
   const activePrefetch = liveVid && !liveFull ? liveVid : null;
 
   // 进行中：缓冲 working/queued/paused + 预缓存(只读) + 缩略图 working/queued。
@@ -274,7 +277,19 @@ async function build(): Promise<CoursesStatus> {
   for (const [v, st] of Object.entries(bufStates)) {
     if (st === "paused") tasks.push(mk(v, "buffer", "paused"));
   }
-  if (activePrefetch) tasks.push(mk(activePrefetch, "prefetch", "working"));
+  // 预缓存任务行：当前会话在缓存那讲（未满）按控制态展示——paused→已暂停（可继续/取消），
+  // 否则 working（自动·随播放）；cancelled 是终态不列进行中（切回该讲会自动重启预缓存）。
+  if (activePrefetch) {
+    const ctl = pfControl[activePrefetch];
+    if (ctl !== "cancelled") {
+      tasks.push(mk(activePrefetch, "prefetch", ctl === "paused" ? "paused" : "working"));
+    }
+  }
+  // 跨重启残留：kill-9 后 worker 没了但 pf_control 持久化了 paused，且该讲非当前 active——
+  // 仍列为可继续的暂停预缓存行（resume 时网关按 video_meta 重启 worker 续缓存）。
+  for (const [v, ctl] of Object.entries(pfControl)) {
+    if (ctl === "paused" && v !== activePrefetch) tasks.push(mk(v, "prefetch", "paused"));
+  }
   for (const v of thWorking) tasks.push(mk(v, "thumb", "working"));
   for (const v of bufQueued) tasks.push(mk(v, "buffer", "queued"));
   for (const v of thQueued) tasks.push(mk(v, "thumb", "queued"));
@@ -387,6 +402,8 @@ async function build(): Promise<CoursesStatus> {
       updatedAt: Date.now(),
       cacheDir: gw.cacheDir ?? "",
       cacheDirOk: gw.cacheDirOk ?? true,
+      // 全局后台缓存开关：网关 /api/status 顶层 bgPaused 透传（旧网关无此字段时缺省 false）。
+      bgPaused: gw.bgPaused ?? false,
     },
     orphans,
   };
@@ -650,6 +667,7 @@ async function fallback(
       updatedAt: Date.now(),
       cacheDir: "",
       cacheDirOk: true,
+      bgPaused: false, // 网关离线：开关态未知，按未暂停显示（避免误导）。
     },
     orphans: [],
   };

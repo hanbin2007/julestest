@@ -270,9 +270,27 @@ class Gateway:
         self.pf_threads = {}     # vid -> (thread, stop_event, token)  # token: #11 per-worker
         self.pf_segidx = {}      # vid -> {seg_url: index}
         self.playhead = {}       # vid -> 最近一次直播请求到的分片下标
+        # pf_control: 预缓存(自动)任务的用户控制态(pf_lock 保护)。缺省(absent)= running。
+        # vid -> "paused" | "cancelled"。running 态不存(省盘 + 缺省即 running);
+        # worker 每片复查: paused 则原地空转不前进也不退出, cancelled 等同 stop.is_set()。
+        # act_prefetch 改它并落盘, 跨 kill-9 保留。
+        self.pf_control = {}
         # pf_done.json: 跨会话保留预缓存完成的讲, 让任务历史里 prefetch:done 不会丢。
         self.pf_done_path = (
             os.path.join(self.seg_cache.dir, "pf_done.json")
+            if self.seg_cache.persist else None
+        )
+        # pf_control.json: 预缓存控制态(paused/cancelled)跨重启保留(G5)。
+        self.pf_control_path = (
+            os.path.join(self.seg_cache.dir, "pf_control.json")
+            if self.seg_cache.persist else None
+        )
+        # 全局后台缓存开关(G3): True = 三种后台任务(buffer/thumb/prefetch)全体暂停推进,
+        # 但不改各自 per-task 状态。落盘 bg_state.json 跨重启保留。bg_lock 保护单字段读写。
+        self._bg_paused = False
+        self.bg_lock = threading.Lock()
+        self.bg_state_path = (
+            os.path.join(self.seg_cache.dir, "bg_state.json")
             if self.seg_cache.persist else None
         )
 
@@ -342,6 +360,7 @@ class Gateway:
         self.buf_state = {}
         self._last_buf_error = {}
         self.pf_done = set()
+        self.pf_control = {}
         self.playhead = {}
 
         _jpeg_ok = self._jpeg_ok
@@ -512,6 +531,31 @@ class Gateway:
                 self._quarantine_corrupt(self.pf_done_path, "pf_done")
                 self.pf_done = set()
 
+        # pf_control.json: 预缓存控制态(paused/cancelled)跨重启保留(G5)。缺省=running 不存。
+        # 重启后 paused/cancelled 的讲不会有 worker 在跑(worker 是会话级线程, 进程死了线程也没了);
+        # 用户 resume 时 act_prefetch 才会按需重启 worker。故只需把控制态回载即可。
+        if self.pf_control_path and os.path.isfile(self.pf_control_path):
+            try:
+                with open(self.pf_control_path, "r", encoding="utf-8") as f:
+                    loaded = json.load(f) or {}
+                for vid, ctl in loaded.items():
+                    if isinstance(ctl, str) and ctl in ("paused", "cancelled"):
+                        self.pf_control[str(vid)] = ctl
+            except Exception:  # noqa: BLE001
+                self._quarantine_corrupt(self.pf_control_path, "pf_control")
+                self.pf_control = {}
+
+        # bg_state.json: 全局后台缓存开关(G3)跨重启保留。
+        self._bg_paused = False
+        if self.bg_state_path and os.path.isfile(self.bg_state_path):
+            try:
+                with open(self.bg_state_path, "r", encoding="utf-8") as f:
+                    loaded = json.load(f) or {}
+                self._bg_paused = bool(loaded.get("paused"))
+            except Exception:  # noqa: BLE001
+                self._quarantine_corrupt(self.bg_state_path, "bg_state")
+                self._bg_paused = False
+
         # playhead.json: 预缓存中心点 + protect_vid + extra_protect 回载。
         if self.playhead_path and os.path.isfile(self.playhead_path):
             try:
@@ -628,6 +672,19 @@ class Gateway:
         if not self.pf_done_path:
             return
         self._atomic_write_json(self.pf_done_path, sorted(self.pf_done))
+
+    def _save_pf_control(self):
+        """落盘 pf_control(预缓存 paused/cancelled 控制态)。调用方持 pf_lock。
+        paused/cancelled 跨 kill-9 保留(G5): act_prefetch 改完即落盘。"""
+        if not self.pf_control_path:
+            return
+        self._atomic_write_json(self.pf_control_path, dict(self.pf_control))
+
+    def _save_bg_state(self):
+        """落盘全局后台缓存开关(G3)。调用方持 bg_lock。"""
+        if not self.bg_state_path:
+            return
+        self._atomic_write_json(self.bg_state_path, {"paused": bool(self._bg_paused)})
 
     # ---- 任务事件日志 ----------------------------------------------------
     def _load_task_events(self):
@@ -812,6 +869,10 @@ class Gateway:
         self._save_seg_urls()
         self._save_video_meta()
         self._save_pf_done()
+        with self.pf_lock:
+            self._save_pf_control()
+        with self.bg_lock:
+            self._save_bg_state()
         self._save_playhead()
         self._save_thumb_index()
         with self.task_lock:
@@ -989,11 +1050,15 @@ class Gateway:
         self.pf_active = {"vid": None, "token": 0}  # #11: owner = vid+token
         self.pf_next_token = 0
         self.pf_done = set()
+        self.pf_control = {}  # G1: 预缓存控制态(paused/cancelled), 缺省=running
         self.pf_threads = {}
         self.pf_segidx = {}
         self.playhead = {}
         self._playhead_dirty = False
         # #19 治本后: playhead 专用锁退役(唯一 tmp 名根上堵撕裂洞), 与生产 __init__ 同构。
+        # G3: 全局后台缓存开关 + 锁(与生产 __init__ 同构)
+        self._bg_paused = False
+        self.bg_lock = threading.Lock()
 
         # 全部持久化路径
         self.seg_urls_path = os.path.join(cache_dir, "seg_urls.json")
@@ -1002,6 +1067,8 @@ class Gateway:
         self.buf_errors_path = os.path.join(cache_dir, "buf_errors.json")
         self.video_meta_path = os.path.join(cache_dir, "video_metadata.json")
         self.pf_done_path = os.path.join(cache_dir, "pf_done.json")
+        self.pf_control_path = os.path.join(cache_dir, "pf_control.json")  # G5
+        self.bg_state_path = os.path.join(cache_dir, "bg_state.json")      # G3
         self.playhead_path = os.path.join(cache_dir, "playhead.json")
 
     def _remember_video(self, video, m3u8):
@@ -1144,6 +1211,12 @@ class Gateway:
     def _thumb_worker(self):
         while True:
             vid, m3u8, duration, tier = self.thumb_q.get()
+            # 全局后台开关(G3): _bg_paused 时不开工生成, 原地空转等待解除(不改 thumb_meta,
+            # 该任务仍是 gen, 不入队不消失)。每圈复查取消, 让 per-task cancel 期间照样生效。
+            while self._bg_paused:
+                if (self.thumb_meta.get(vid) or {}).get("state") == "cancelled":
+                    break
+                time.sleep(0.3)
             with self.thumb_lock:
                 # 出队复查：排队期间被取消的，直接跳过本次生成
                 if (self.thumb_meta.get(vid) or {}).get("state") == "cancelled":
@@ -1357,6 +1430,14 @@ class Gateway:
                 st = self.buf_state.get(vid)
             if st in ("paused", "cancelled"):
                 return st
+            # 全局后台开关(G3): _bg_paused 时原地空转(不前进、不改 buf_state, 仍留 working),
+            # 解除后从本片续。期间仍每圈复查 buf_state, 让 per-task pause/cancel 照样即时生效。
+            while self._bg_paused:
+                with self.buf_lock:
+                    st = self.buf_state.get(vid)
+                if st in ("paused", "cancelled"):
+                    return st
+                time.sleep(0.3)
             if self.seg_cache.has((u, vid)):
                 continue
             # 主动让 LIVE: 若现在有用户在看视频(LIVE 档活跃), MANUAL 暂停一下,
@@ -1546,6 +1627,75 @@ class Gateway:
         reason = None if ok else "状态 %s 下不能执行 %s" % (st, verb)
         return {"ok": ok, "vid": vid, "kind": "thumb", "state": new_state, "reason": reason}
 
+    def act_prefetch(self, vid, verb):
+        """预缓存(自动)任务：pause/resume/cancel。返回 {ok,vid,kind,state,reason?}。
+
+        pf_control[vid] ∈ {paused, cancelled}; 缺省(absent)= running。镜像 act_buffer 的
+        即时复查 + 幂等约定: 非法转换返回 ok=False(reason 为人话中文), 不抛错。
+
+        - pause:  running -> paused。worker 下一片复查到 paused 即原地空转(不前进不退出),
+                  resume 时不必重新 /api/play。
+        - resume: paused -> running。删除控制态; 若 worker 线程已不在(如 kill-9 重启后),
+                  按 video_meta 里的 m3u8 重启 worker 续缓存。
+        - cancel: running/paused -> cancelled。set 该讲 worker 的 stop-Event(等同 stop.is_set),
+                  worker 收手退出; 控制态留 cancelled, 直到再次 /api/play(切回该讲)清掉重来。
+        """
+        vid = str(vid)
+        restart_m3u8 = None
+        with self.pf_lock:
+            cur = self.pf_control.get(vid)  # None=running / "paused" / "cancelled"
+            cur_state = cur or "running"
+            thread_entry = self.pf_threads.get(vid)
+            has_ctx = bool(
+                (thread_entry and thread_entry[0].is_alive())
+                or self.pf_active.get("vid") == vid
+                or (self.video_meta.get(vid) or {}).get("m3u8")
+            )
+            if verb == "pause":
+                # running 才能暂停; 缺上下文(从没预缓存过这讲)无从暂停。
+                ok = cur_state == "running" and has_ctx
+                if ok:
+                    self.pf_control[vid] = "paused"
+            elif verb == "resume":
+                # 只有 paused 能继续; 需要 m3u8 才能(必要时)重启 worker。
+                m3u8 = (self.video_meta.get(vid) or {}).get("m3u8")
+                ok = cur_state == "paused" and bool(m3u8)
+                if ok:
+                    self.pf_control.pop(vid, None)  # 回到缺省 running
+                    alive = bool(thread_entry and thread_entry[0].is_alive()
+                                 and not thread_entry[1].is_set())
+                    if not alive:
+                        restart_m3u8 = m3u8  # worker 没了(kill-9 重启等): 出锁后重启
+            elif verb == "cancel":
+                ok = cur_state in ("running", "paused") and has_ctx
+                if ok:
+                    self.pf_control[vid] = "cancelled"
+                    if thread_entry:
+                        thread_entry[1].set()  # 等同 stop.is_set(): worker 复查后退出
+            else:
+                return {"ok": False, "vid": vid, "kind": "prefetch",
+                        "state": cur_state, "reason": "未知操作 %s" % verb}
+            if ok:
+                self._save_pf_control()
+            new_state = self.pf_control.get(vid) or "running"
+        if restart_m3u8 is not None:
+            # start_prefetch 自带 pf_lock, 放锁外调(避免重入); 它会分配新 token + 起新线程,
+            # worker 复查 pf_control 见缺省=running 正常推进。
+            self.start_prefetch(vid, restart_m3u8)
+        if ok:
+            reason = None
+        elif verb not in ("pause", "resume", "cancel"):
+            reason = "未知操作 %s" % verb
+        elif verb == "resume" and cur_state != "paused":
+            reason = "该讲未处于暂停状态，无法继续"
+        elif verb == "resume":
+            reason = "该讲未在预缓存，无法继续"
+        elif not has_ctx:
+            reason = "该讲未在预缓存"
+        else:
+            reason = "状态 %s 下不能执行 %s" % (cur_state, verb)
+        return {"ok": ok, "vid": vid, "kind": "prefetch", "state": new_state, "reason": reason}
+
     # ---- 自动预缓存 ------------------------------------------------------
     def _pf_new_token(self, vid):
         """[#11] 分配一个唯一 token 并把 pf_active 的 owner 设为 (vid, token)。
@@ -1614,13 +1764,30 @@ class Gateway:
         def _is_owner():
             a = self.pf_active
             return a.get("vid") == vid and a.get("token") == token
+
+        def _idle():
+            # 暂停: 本讲被 pause(pf_control=paused) 或全局后台开关 _bg_paused。
+            # 二者都让 worker 原地空转(不前进、不退出), 解除后从原位置续(无需重新 /api/play)。
+            # cancelled 不在此 —— 它由 _cancelled() 走 stop 同款退出路径。
+            return self.pf_control.get(vid) == "paused" or self._bg_paused
+
+        def _cancelled():
+            return self.pf_control.get(vid) == "cancelled"
         try:
-            while not stop.is_set() and _is_owner():
+            while not stop.is_set() and _is_owner() and not _cancelled():
+                # 暂停态(本讲 paused 或全局 bg_paused): 原地空转, 不前进也不退出, 不动 pf_done。
+                if _idle():
+                    time.sleep(0.3)
+                    continue
                 center = self.playhead.get(vid, 0)
                 fetched = recenter = False
                 for idx in _order(center):
-                    if stop.is_set() or not _is_owner():
-                        return  # 被切走 -> 停（已缓存的保留，回来可续）
+                    if stop.is_set() or not _is_owner() or _cancelled():
+                        return  # 被切走/被取消 -> 停（已缓存的保留，回来可续）
+                    # 每片复查暂停: 与 buffer 逐片复查 buf_state 同口径, 即时收手。
+                    if _idle():
+                        recenter = True  # 跳出 for, 回到外层 while 进入 idle 空转
+                        break
                     if self.playhead.get(vid, 0) != center:
                         recenter = True
                         break  # 播放头移动了 -> 重新居中
@@ -1654,6 +1821,11 @@ class Gateway:
 
     def start_prefetch(self, vid, m3u8):
         with self.pf_lock:
+            # 切回该讲(/api/play 触发)= 新一轮预缓存会话: 清掉旧的 cancelled/paused 控制态,
+            # 让新 worker 正常推进(否则一旦 cancel 过, 重看也永远不预缓存)。act_prefetch.resume
+            # 不走这里(它显式保留语义, 自己 pop paused)。
+            if self.pf_control.pop(vid, None) is not None:
+                self._save_pf_control()
             # 清掉已死线程(老 vid 的 worker 跑完早退): 否则 pf_threads 随会话无限膨胀。
             # 只删非当前 vid 且线程已不 alive 的; 当前 vid 下面单独判活/复用。
             dead = [ov for ov, (t, _ev, _tk) in self.pf_threads.items()
@@ -1775,6 +1947,8 @@ def make_handler(gateway):
                 self._api_buffer_batch()
             elif parsed.path == "/api/tasks/action":
                 self._api_tasks_action()
+            elif parsed.path == "/api/bg/pause":
+                self._api_bg_pause()
             elif parsed.path == "/api/cache-dir":
                 self._api_set_cache_dir()
             elif parsed.path == "/api/warm":
@@ -1923,22 +2097,37 @@ def make_handler(gateway):
             if payload is None:
                 return  # _read_json 已回 413
             queued = skipped = 0
+            # skippedReasons(G4): {vid: 人话中文原因}, 让 web 能说清"哪几讲为何没排进去"。
+            skipped_reasons = {}
             for d in payload.get("videos") or []:
                 bv = self._buffer_video(d)
                 if not bv:
                     skipped += 1
+                    vk = str(d.get("videoId") or "?")
+                    skipped_reasons[vk] = "参数无效或地址不在白名单"
                     continue
                 # start_buffer 在 buf_lock 内判重并入队，返回是否真排入（避免无锁预读 buf_state）。
                 if self.gw.start_buffer(*bv):
                     queued += 1
                 else:
                     skipped += 1
-            self._send_json({"queued": queued, "skipped": skipped})
+                    vk = str(bv[0].get("videoId"))
+                    with self.gw.buf_lock:
+                        st = self.gw.buf_state.get(vk)
+                    skipped_reasons[vk] = {
+                        "done": "整集已缓存完成",
+                        "working": "正在缓存中",
+                        "queued": "已在缓存队列",
+                        "paused": "已暂停(去任务列表继续)",
+                    }.get(st, "已在缓存中")
+            self._send_json({"queued": queued, "skipped": skipped,
+                             "skippedReasons": skipped_reasons})
 
         def _api_tasks_action(self):
             """任务操作统一入口：{verb, kind, vid}。verb∈pause/resume/cancel/retry。
             网关侧即时复查当前状态再决策；返回操作后的最新状态（成功 200，非法转换 409）。
-            prefetch（正在看那讲的自动预缓存）由播放驱动、切走自停，故只读、不接受操作。"""
+            kind∈buffer/thumb/prefetch。prefetch(自动预缓存)支持 pause/resume/cancel(不支持
+            retry: 切回该讲即重新预缓存); thumb 仅 cancel/retry(ffmpeg 原子无续传)。"""
             try:
                 payload = self._read_json()
             except Exception as e:  # noqa: BLE001
@@ -1959,10 +2148,35 @@ def make_handler(gateway):
                     self._send_json({"error": "缩略图不支持暂停/继续"}, 400)
                     return
                 res = self.gw.act_thumb(vid, verb)
+            elif kind == "prefetch":
+                if verb == "retry":
+                    self._send_json({"error": "预缓存不支持重试(切回该讲即重新预缓存)"}, 400)
+                    return
+                res = self.gw.act_prefetch(vid, verb)
             else:
                 self._send_json({"error": "该任务不可操作"}, 400)
                 return
             self._send_json(res, 200 if res.get("ok") else 409)
+
+        def _api_bg_pause(self):
+            """全局后台缓存开关(G3): body {paused: bool} -> {ok, paused}。
+            置位即落盘 bg_state.json 跨重启保留; 三种后台 worker(buffer/thumb/prefetch)
+            读 self._bg_paused 决定是否原地空转, 不改各自 per-task 状态。"""
+            try:
+                payload = self._read_json()
+            except Exception as e:  # noqa: BLE001
+                self._send_json({"error": str(e)}, 400)
+                return
+            if payload is None:
+                return  # _read_json 已回 413
+            if "paused" not in payload or not isinstance(payload.get("paused"), bool):
+                self._send_json({"error": "需要 boolean 字段 paused"}, 400)
+                return
+            paused = bool(payload["paused"])
+            with self.gw.bg_lock:
+                self.gw._bg_paused = paused
+                self.gw._save_bg_state()
+            self._send_json({"ok": True, "paused": paused})
 
         def _api_buffer_segments(self, qs):
             """逐片缓存 bitmap（"已缓存的地方"）。可传多个 vid；用 buckets 把分片压成
@@ -2057,6 +2271,7 @@ def make_handler(gateway):
                 bstates = dict(gw.buf_state)  # 一次持锁快照，避免并发遍历崩溃 + 供任务标签全量态
             with gw.pf_lock:
                 pf_done = sorted(gw.pf_done)  # 本会话预缓存满的讲（供「已完成」）
+                pf_control = dict(gw.pf_control)  # {vid: paused|cancelled}; 供 web 渲染控制态
             real = gw.seg_cache.vid_stats()["real"]  # 播放段磁盘真相(thumb 桶已物理迁出)
             # 缩略图源段已物理隔离到独立桶 thumb_seg_cache(#1,#8): per-vid thumbBytes 与
             # 聚合 thumb.bytes 都从它读, 不再从 seg_cache 的 thumb 桶(那桶现已恒空)。
@@ -2117,8 +2332,13 @@ def make_handler(gateway):
                          "playhead": ({gw.pf_active["vid"]: gw.playhead.get(gw.pf_active["vid"])}
                                       if gw.pf_active["vid"] else {}),
                          "done": pf_done,
+                         # 预缓存控制态(G1): {vid: "paused"|"cancelled"}; 缺省(不在此)= running。
+                         # web 据此给 prefetch 任务行渲染 pause/resume/cancel 当前态。
+                         "control": pf_control,
                          "inFlight": {"live": gw.gate.n[0], "auto": gw.gate.n[1], "manual": gw.gate.n[2]}},
                 "ffmpeg": gw.have_ffmpeg, "thumbDir": gw.thumb_dir,
+                # 全局后台缓存开关(G3): web 据此渲染"暂停所有后台缓存"toggle 的状态。
+                "bgPaused": gw._bg_paused,
                 "cacheDir": gw.seg_cache.dir if gw.seg_cache.persist else "",
                 "cacheDirOk": gw.seg_cache.dir_ok(),
                 # 任务事件日志当前峰值 seq(hint): web 可先判 maxSeq 没涨就跳过拉增量,省一次请求。
@@ -2185,6 +2405,8 @@ def make_handler(gateway):
             if payload is None:
                 return  # _read_json 已回 413
             queued = skipped = 0
+            # skippedReasons(G4): {vid: 人话中文原因}。
+            skipped_reasons = {}
             for d in payload.get("videos") or []:
                 tv = self._thumb_video(d)
                 if tv:
@@ -2206,13 +2428,17 @@ def make_handler(gateway):
                         cur_state = None
                 if cur_state in ("ready", "gen"):
                     skipped += 1
+                    skipped_reasons[vid_key] = (
+                        "已有缩略图" if cur_state == "ready" else "正在生成中")
                     continue
                 if tv:
                     self.gw.start_thumbs(*tv, tier=2)  # 手动批量 → MANUAL
                     queued += 1
                 else:
                     skipped += 1
-            self._send_json({"queued": queued, "skipped": skipped})
+                    skipped_reasons[vid_key] = "参数无效或地址不在白名单"
+            self._send_json({"queued": queued, "skipped": skipped,
+                             "skippedReasons": skipped_reasons})
 
         def _serve_thumb(self, path):
             name = os.path.basename(path)

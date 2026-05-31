@@ -73,15 +73,36 @@ async function postJson<T>(url: string, body: unknown): Promise<T> {
   return r.json() as Promise<T>;
 }
 
+// 像 postJson，但 4xx/409 也返回解析后的 JSON 体（不抛错）。用于任务操作：网关把
+// 「非法转换」编码为 HTTP 409 + {ok:false,reason} 而非纯错误，调用方要读 reason 给人话提示。
+// 仅当 body 不是 JSON（真·网络/解析失败）才抛错。
+async function postJsonAllowFail<T>(url: string, body: unknown): Promise<T> {
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return r.json() as Promise<T>;
+}
+
 export const batchThumbs = (videos: BatchThumbVideo[]) =>
   postJson<BatchResult>("/api/thumbs/batch", { videos });
 export const batchBuffer = (videos: BatchBufferVideo[]) =>
   postJson<BatchResult>("/api/buffer/batch", { videos });
 
 // 任务操作（暂停/继续/取消/重试）：转发网关 /api/tasks/action，返回操作后的最新状态。
-// 网关侧即时复查当前状态后再决策，幂等；非法转换返回 HTTP 409（postJson 会抛错）。
-export const taskAction = (kind: "buffer" | "thumb", vid: number, verb: TaskVerb) =>
-  postJson<TaskActionResult>("/api/tasks/action", { kind, vid, verb });
+// 网关侧即时复查当前状态后再决策，幂等。返回 {ok,vid,kind,state,reason}：ok=false 时
+// HTTP 409 但仍带 JSON 体，调用方需读 reason 给人话提示——所以这里不抛错，直接回 body。
+// prefetch（自动·随播放）支持 pause|resume|cancel；retry 仅 buffer/thumb（网关对 prefetch+retry 返 400）。
+export const taskAction = (
+  kind: "buffer" | "thumb" | "prefetch",
+  vid: number,
+  verb: TaskVerb,
+): Promise<TaskActionResult> => postJsonAllowFail<TaskActionResult>("/api/tasks/action", { kind, vid, verb });
+
+// 全局后台缓存开关：暂停/恢复 buffer/thumb/prefetch 三 worker。网关持久化 bg_state.json，跨重启保留。
+export const bgPause = (paused: boolean) =>
+  postJson<{ ok: boolean; paused: boolean }>("/api/bg/pause", { paused });
 
 export const proxiedPlayUrl = (url: string) => url; // /api/play 已返回 /p?... 同源路径
 export { pickM3u8 };

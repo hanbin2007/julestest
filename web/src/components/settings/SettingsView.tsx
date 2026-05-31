@@ -4,17 +4,21 @@ import {
   Box,
   Button,
   Card,
+  FormControlLabel,
   MenuItem,
   Stack,
+  Switch,
   Tab,
   Tabs,
   TextField,
   ToggleButton,
   ToggleButtonGroup,
+  Tooltip,
   Typography,
 } from "@mui/material";
+import PauseCircleOutlineRoundedIcon from "@mui/icons-material/PauseCircleOutlineRounded";
 import { useSWRConfig } from "swr";
-import { useCourses, useAllCourseVideos, useCoursesStatus } from "@/hooks/data";
+import { useCourses, useAllCourseVideos, useCoursesStatus, markRecentAction } from "@/hooks/data";
 import { usePrefs } from "@/hooks/persist";
 import { useToast } from "@/components/common/Toast";
 import LectureGrid, { type GridRow } from "./LectureGrid";
@@ -26,9 +30,17 @@ import CacheDirCard from "./CacheDirCard";
 import AssistantCard from "./AssistantCard";
 import CourseStatusGrid, { type CourseSort } from "./CourseStatusGrid";
 import CourseDetailDrawer from "./CourseDetailDrawer";
-import { batchThumbs, batchBuffer, getCourseVideos, syncYoudaoProgress, taskAction } from "@/lib/api";
+import { batchThumbs, batchBuffer, bgPause, getCourseVideos, syncYoudaoProgress, taskAction } from "@/lib/api";
 import { pickLow, pickM3u8 } from "@/lib/media";
-import type { CourseStatus, TaskItem, TaskVerb, Video, VideoRow } from "@/types/api";
+import type { CoursesStatus, CourseStatus, TaskItem, TaskState, TaskVerb, Video, VideoRow } from "@/types/api";
+
+// 操作成功后的人话反馈（按 verb 映射）：暂停/继续/取消/重试 都给即时 toast，避免「点了没反应」。
+const VERB_DONE: Record<TaskVerb, string> = {
+  pause: "已暂停",
+  resume: "已继续",
+  cancel: "已取消",
+  retry: "已重试",
+};
 
 // 缩略图源：点播取最低清晰度（解码更快）；直播回放无清晰度档 → 回退到 m3u8 (即 downloadUrl)。
 // liveId 给网关拼 Liveid 头取 AES key；点播为 null。
@@ -62,6 +74,8 @@ export default function SettingsView() {
   const [busyIds, setBusyIds] = React.useState<Set<number>>(new Set());
   const [drawer, setDrawer] = React.useState<CourseStatus | null>(null);
   const [tasksFsOpen, setTasksFsOpen] = React.useState(false);
+  const [bgBusy, setBgBusy] = React.useState(false);
+  const bgPaused = !!data?.health.bgPaused;
 
   const flatActive = tab === 1;
   const { rows: allRows, loaded, total } = useAllCourseVideos(flatActive ? courses : []);
@@ -127,7 +141,21 @@ export default function SettingsView() {
     submittingRef.current = true;
     try {
       const r = kind === "thumb" ? await batchThumbs(t.map(MK_THUMB)) : await batchBuffer(t.map(MK_BUF));
-      toast(`已加入队列 ${r.queued}（跳过 ${r.skipped}）`, { severity: "success" });
+      markRecentAction(); // 批量提交也算一次动作 → 状态轮询提速到 1s，让排队/进行中立即可见。
+      // 跳过原因汇总：把 { [vid]: 原因 } 反向聚成 { 原因: 计数 }，告诉用户「哪几讲为何没排进去」而非只报数字。
+      const reasons = r.skippedReasons ?? {};
+      const byReason = new Map<string, number>();
+      for (const why of Object.values(reasons)) byReason.set(why, (byReason.get(why) ?? 0) + 1);
+      const reasonText =
+        byReason.size > 0
+          ? "（跳过：" + Array.from(byReason.entries()).map(([why, n]) => `${why} ${n}`).join("、") + "）"
+          : r.skipped > 0
+            ? `（跳过 ${r.skipped}）`
+            : "";
+      // 全部被跳过(无新入队)时给 info/warning，避免「已加入队列 0」让人误以为成功；有入队则 success。
+      toast(`已加入队列 ${r.queued}${reasonText}`, {
+        severity: r.queued > 0 ? "success" : r.skipped > 0 ? "warning" : "info",
+      });
       refresh();
     } catch (e) {
       toast("提交失败：" + (e as Error).message, { severity: "error" });
@@ -136,16 +164,61 @@ export default function SettingsView() {
     }
   };
 
-  // 任务操作（暂停/继续/取消/重试）。prefetch 只读不会触发。无论成败都立即刷新一次，
-  // 让面板即时反映网关复查后的真实状态（轮询有 ~1s 延迟，操作后不等它）。
+  // 任务操作（暂停/继续/取消/重试）：buffer/thumb/prefetch 均可控（prefetch 不支持 retry）。
+  // 关键：不丢弃 TaskActionResult——成功即按返回的真实 state 乐观回填该任务行 + 人话 toast；
+  // 失败则弹网关给的人话 reason（绝不再用泛化「操作未生效」）。markRecentAction 让轮询提速到 1s
+  // 兜底确认，refresh 触发一次即时重拉。
   const handleTaskAction = async (task: TaskItem, verb: TaskVerb) => {
-    if (task.kind === "prefetch") return;
+    markRecentAction(); // 无论成败都标记：让轮询在接下来 ~4s 提速到 1s，捕捉状态迁移。
+    let res;
     try {
-      await taskAction(task.kind, task.vid, verb);
-    } catch {
-      // 409=任务状态已变化（即时核查否决），刷新即可看到真实态，不弹错；其余网络错误同样靠刷新兜底。
-      toast("操作未生效，任务状态可能已变化", { severity: "info" });
+      res = await taskAction(task.kind, task.vid, verb);
+    } catch (e) {
+      // 真·网络/解析失败（非 409 业务否决）。靠刷新兜底，给可见错误。
+      toast("操作失败：" + (e as Error).message, { severity: "error" });
+      refresh();
+      return;
+    }
+    if (res.ok) {
+      // 乐观回填：把该任务行的 state 立即换成网关复查后返回的真实 state（不等 1s 轮询）。
+      // res.state 可能为 null（如 cancel 后任务移出进行中列表）；此时不强行改 state，靠 refresh 拉走它。
+      const newState = res.state as TaskState | null;
+      if (newState) {
+        refresh(
+          (cur: CoursesStatus | undefined) => {
+            if (!cur) return cur;
+            const patch = (arr: TaskItem[]) =>
+              arr.map((t) => (t.kind === task.kind && t.vid === task.vid ? { ...t, state: newState } : t));
+            return { ...cur, tasks: patch(cur.tasks) };
+          },
+          { revalidate: false },
+        );
+      }
+      toast(VERB_DONE[verb], { severity: "success" });
+    } else {
+      // 网关人话否决（HTTP 409 / 400）：直接展示 reason；没有 reason 时给保守提示。
+      toast(res.reason || "操作未生效，任务状态可能已变化", { severity: "warning" });
+    }
+    refresh(); // 即时重拉确认真实态（乐观回填只是抢在轮询前的临时态）。
+  };
+
+  // 全局后台缓存开关：暂停/恢复 buffer/thumb/prefetch 三 worker。乐观回填 health.bgPaused，
+  // 失败回滚 + 错误 toast。网关持久化 bg_state.json，跨重启保留。
+  const toggleBgPause = async (next: boolean) => {
+    if (bgBusy) return;
+    setBgBusy(true);
+    refresh(
+      (cur: CoursesStatus | undefined) =>
+        cur ? { ...cur, health: { ...cur.health, bgPaused: next } } : cur,
+      { revalidate: false },
+    );
+    try {
+      const r = await bgPause(next);
+      toast(r.paused ? "已暂停所有后台缓存" : "已恢复后台缓存", { severity: "success" });
+    } catch (e) {
+      toast("切换失败：" + (e as Error).message, { severity: "error" });
     } finally {
+      setBgBusy(false);
       refresh();
     }
   };
@@ -238,6 +311,45 @@ export default function SettingsView() {
         working={(data?.tasks ?? []).filter((t) => t.state === "working").length}
         onOpenTasks={() => setTasksFsOpen(true)}
       />
+
+      {/* 全局后台缓存开关：一处暂停 buffer/thumb/prefetch 三 worker（网关持久化、跨重启保留）。 */}
+      <Card sx={{ p: 1.5, mb: 2, display: "flex", alignItems: "center", flexWrap: "wrap", gap: 1 }}>
+        <PauseCircleOutlineRoundedIcon
+          sx={{ fontSize: 20, color: bgPaused ? "warning.main" : "text.disabled" }}
+        />
+        <Box sx={{ minWidth: 0, flex: 1 }}>
+          <Typography variant="body2" sx={{ fontWeight: 500 }}>
+            暂停所有后台缓存
+          </Typography>
+          <Typography variant="caption" color="text.secondary">
+            {bgPaused
+              ? "已暂停：缓冲 / 缩略图 / 预缓存全部停工（不丢已缓存片段），重启后仍保持暂停"
+              : "正常：后台按优先级自动缓冲 / 生成缩略图 / 预缓存"}
+          </Typography>
+        </Box>
+        <Tooltip title={data?.health.gatewayOnline ? "" : "网关离线，无法切换"}>
+          <span>
+            <FormControlLabel
+              sx={{ m: 0 }}
+              labelPlacement="start"
+              control={
+                <Switch
+                  color="warning"
+                  checked={bgPaused}
+                  disabled={bgBusy || !data?.health.gatewayOnline}
+                  onChange={(_e, v) => toggleBgPause(v)}
+                  inputProps={{ "aria-label": "暂停所有后台缓存" }}
+                />
+              }
+              label={
+                <Typography variant="caption" color="text.secondary" sx={{ mr: 0.5 }}>
+                  {bgPaused ? "已暂停" : "运行中"}
+                </Typography>
+              }
+            />
+          </span>
+        </Tooltip>
+      </Card>
 
       {/* 工具栏 */}
       <Card sx={{ p: 2, mb: 2 }}>

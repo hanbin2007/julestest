@@ -81,9 +81,15 @@ export interface GwStatus {
     active: string | null;
     playhead: Record<string, number | null>;
     done?: string[];
+    // 预缓存（自动·随播放）逐讲控制态：{ [vid]: "paused" | "cancelled" }；vid 不在表中 = running（常态）。
+    // web 据此给 prefetch 任务行渲染当前态 + 可用操作（pause/resume/cancel）。网关持久化 pf_control.json。
+    control?: Record<string, "paused" | "cancelled">;
     inFlight: { live: number; auto: number; manual: number };
   };
   ffmpeg: boolean;
+  // 全局后台缓存开关：true=用户已暂停所有后台缓存（buffer/thumb/prefetch 三 worker 空转不推进）。
+  // 网关持久化于 bg_state.json，跨 kill -9 保留；web 据此反映「暂停所有后台缓存」开关状态。
+  bgPaused?: boolean;
   thumbDir: string;
   cacheDir?: string;
   cacheDirOk?: boolean;
@@ -97,6 +103,9 @@ export interface GwStatus {
 export interface BatchResult {
   queued: number;
   skipped: number;
+  // 被跳过的讲及其原因（plain-language 中文）：{ [vid]: 原因 }，由网关批量入队时逐讲填。
+  // 供 web 提交后告诉用户「哪几讲为何没排进去」（如「已整集缓存」「未在预缓存」）而非只报数字。
+  skippedReasons?: Record<string, string>;
 }
 
 export interface BatchThumbVideo {
@@ -156,7 +165,7 @@ export interface CourseStatus {
 }
 // 任务在面板里的呈现态：进行中(working/queued/paused) / 已完成(done/cancelled) / 失败(error)。
 export type TaskState = "working" | "queued" | "paused" | "done" | "cancelled" | "error";
-// 可对任务执行的操作（prefetch 只读、不接受任何操作）。
+// 可对任务执行的操作。buffer/thumb 支持全部；prefetch（自动·随播放）支持 pause|resume|cancel（不支持 retry）。
 export type TaskVerb = "pause" | "resume" | "cancel" | "retry";
 
 export interface TaskItem {
@@ -195,10 +204,11 @@ export interface TaskEventsResp {
 }
 
 // 网关 /api/tasks/action 的返回：操作后即时复查到的最新状态（成功 ok=true）。
+// reason 为 plain-language 中文失败原因（非法转换时填，如「任务已完成，无法暂停」「该讲未在预缓存」）。
 export interface TaskActionResult {
   ok: boolean;
   vid: string;
-  kind: "buffer" | "thumb";
+  kind: "buffer" | "thumb" | "prefetch";
   state: TaskState | null;
   reason?: string | null;
 }
@@ -243,6 +253,9 @@ export interface CoursesStatus {
     updatedAt: number;
     cacheDir: string; // 当前生效的缓存目录（空=临时/未知）
     cacheDirOk: boolean; // 该目录当前是否存在且可写（丢失/掉盘=false）
+    // 全局后台缓存开关：true=用户已暂停所有后台缓存（buffer/thumb/prefetch 三 worker 空转）。
+    // 网关持久化 bg_state.json 跨重启保留；web 据此反映「暂停所有后台缓存」开关状态。网关离线时缺省 false。
+    bgPaused: boolean;
   };
   orphans: { vid: number; segments: number; bytes: number }[];
 }

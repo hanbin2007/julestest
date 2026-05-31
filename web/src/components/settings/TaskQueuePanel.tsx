@@ -6,6 +6,7 @@ import TaskRow, { TASK_TABS, taskKey } from "./TaskRow";
 import TaskQueueFullscreenDialog from "./TaskQueueFullscreenDialog";
 
 const PANEL_CAP = 20; // 面板每标签只显示前 20 条，更多走「展开全屏」
+const FAILED_CAP = 5; // 失败区内联只显示前 5 条可重试行，更多走「展开全屏」
 
 function TaskQueuePanel({
   tasks,
@@ -72,29 +73,43 @@ function TaskQueuePanel({
     <Box sx={{ display: "flex", flexDirection: "column", minHeight: 0 }}>
       <Typography variant="subtitle2" sx={{ mb: 0.5 }}>任务队列</Typography>
 
-      {/* 失败横幅：仅当有失败任务时出现，把被埋的失败提到最顶。点「重试」走第一条失败任务。 */}
+      {/* 失败区：有失败任务时直接把可重试的失败行内联到面板最顶（不再只给数字横幅 + 埋进全屏）。
+          每行带「重试」按钮，用户在第一眼能看到的地方就能直接重试。多于上限时折叠到全屏。 */}
       {failedTasks.length > 0 && (
-        <Alert
-          severity="warning"
-          sx={{ mb: 1, py: 0, alignItems: "center" }}
-          action={
-            <Typography
-              variant="caption"
-              color="warning.dark"
-              role="button"
-              tabIndex={0}
-              onClick={() => onFsOpenChange(true)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" || e.key === " ") onFsOpenChange(true);
-              }}
-              sx={{ cursor: "pointer", textDecoration: "underline", pr: 1 }}
-            >
-              查看
-            </Typography>
-          }
-        >
-          {failedTasks.length} 个任务失败
-        </Alert>
+        <Box sx={{ mb: 1 }}>
+          <Alert severity="warning" sx={{ py: 0, mb: 0.5, alignItems: "center" }} icon={false}>
+            {failedTasks.length} 个任务失败 · 点右侧重试
+          </Alert>
+          <Box
+            sx={{
+              border: (t) => `1px solid ${t.palette.warning.light}`,
+              borderRadius: (t) => t.radius.md,
+              px: 0.5,
+              bgcolor: (t) => t.palette.warning.light + "14", // 极淡警示底色
+            }}
+          >
+            {failedTasks.slice(0, FAILED_CAP).map((t) => (
+              <TaskRow
+                key={taskKey(t)}
+                task={t}
+                busy={busy.has(taskKey(t))}
+                onAction={(verb) => run(t, verb)}
+              />
+            ))}
+            {failedTasks.length > FAILED_CAP && (
+              <Box sx={{ py: 0.5, textAlign: "center" }}>
+                <Typography
+                  variant="caption"
+                  color="primary"
+                  sx={{ cursor: "pointer" }}
+                  onClick={() => onFsOpenChange(true)}
+                >
+                  还有 {failedTasks.length - FAILED_CAP} 个失败任务，展开全屏查看全部
+                </Typography>
+              </Box>
+            )}
+          </Box>
+        </Box>
       )}
 
       {/* 标签：进行中 / 操作历史 */}
