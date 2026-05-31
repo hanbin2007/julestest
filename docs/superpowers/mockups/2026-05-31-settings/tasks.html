@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>设置 · 任务 · 历史（高保真）</title>
+<style>
+  :root{
+    --bg:#0e1116; --surface:#131619; --s-low:#181b1f; --s-cont:#1c1f23;
+    --s-high:#23262b; --s-highest:#2b2f34;
+    --on:#e4e2e6; --on-var:#c2c7cf; --dim:#8b9099; --outline:#3a3f46;
+    --primary:#b0c6ff; --primary-strong:#4f8cff; --primary-cont:#274879;
+    --success:#3ecf8e; --warning:#e0a33e; --error:#ffb4ab; --info:#cbbfff;
+    --r-sm:8px; --r-md:12px; --r-lg:20px; --r-full:999px;
+    --font:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--on);font-family:var(--font);font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased}
+  .appbar{height:52px;display:flex;align-items:center;gap:12px;padding:0 18px;background:var(--surface);border-bottom:1px solid var(--outline);font-weight:700}
+  .appbar .crumb{color:var(--dim);font-weight:600}
+  .appbar .sp{flex:1}
+  .appbar .seg{font-size:12px;color:var(--dim);border:1px solid var(--outline);border-radius:var(--r-full);padding:4px 12px;font-weight:600}
+  .strip{display:flex;align-items:center;gap:18px;padding:10px 18px;background:var(--s-low);border-bottom:1px solid var(--outline);font-size:13px;flex-wrap:wrap}
+  .dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:6px;vertical-align:middle}
+  .dot.ok{background:var(--success);animation:pulse 2.4s infinite}
+  @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(62,207,142,.45)}70%{box-shadow:0 0 0 6px rgba(62,207,142,0)}100%{box-shadow:0 0 0 0 rgba(62,207,142,0)}}
+  .strip .meta{color:var(--on-var)}
+  .strip .div{width:1px;height:18px;background:var(--outline)}
+  .strip .store{color:var(--on-var);font-variant-numeric:tabular-nums}
+  .strip .store b{color:var(--on)}
+  .toggle{margin-left:auto;display:flex;align-items:center;gap:8px;color:var(--on-var);font-weight:600}
+  .switch{width:38px;height:22px;border-radius:var(--r-full);background:var(--s-highest);position:relative;border:1px solid var(--outline)}
+  .switch::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:var(--dim)}
+
+  .shell{display:flex;min-height:calc(100vh - 52px - 41px)}
+  .nav{width:234px;flex-shrink:0;padding:20px 12px;border-right:1px solid var(--outline);background:var(--surface)}
+  .nav .grp{font-size:11px;letter-spacing:.6px;color:var(--dim);font-weight:700;text-transform:uppercase;padding:0 14px 8px}
+  .nav a{display:flex;align-items:center;gap:10px;padding:9px 14px;border-radius:var(--r-full);color:var(--on-var);font-weight:600;margin-bottom:2px;cursor:pointer;white-space:nowrap}
+  .nav a:hover{background:var(--s-cont)}
+  .nav a.active{background:var(--primary-cont);color:#dbe6ff}
+  .nav a .ico{width:18px;height:18px;display:inline-flex;align-items:center;justify-content:center;opacity:.9;flex-shrink:0}
+  .i{width:18px;height:18px;display:block;flex-shrink:0}
+  .nav a .label{flex:1;overflow:hidden;text-overflow:ellipsis}
+  .nav a .badge{flex-shrink:0;font-size:11px;font-weight:700;border-radius:var(--r-full);padding:1px 8px;background:var(--s-highest);color:var(--on-var);white-space:nowrap}
+  .nav a .badge.warn{background:rgba(255,180,171,.16);color:var(--error)}
+
+  .content{flex:1;display:flex;flex-direction:column;gap:16px;padding:20px 26px;overflow:auto;max-width:960px}
+  .h-page{font-size:1.5rem;font-weight:700;letter-spacing:-.3px;margin:0 0 3px}
+  .sub{color:var(--dim);font-size:13px;margin:0}
+
+  /* 失败横幅 */
+  .fbanner{border:1px solid rgba(224,163,62,.5);border-radius:var(--r-md);overflow:hidden;background:rgba(224,163,62,.06)}
+  .fhead{padding:10px 16px;color:var(--warning);font-weight:700;font-size:13px;border-bottom:1px solid rgba(224,163,62,.25)}
+
+  /* 视图标签 */
+  .vtabs{display:flex;gap:4px;background:var(--s-low);border:1px solid var(--outline);border-radius:var(--r-full);padding:3px;width:fit-content}
+  .vtabs .t{padding:6px 20px;border-radius:var(--r-full);font-size:13px;font-weight:600;color:var(--on-var);cursor:pointer;display:flex;align-items:center;gap:7px}
+  .vtabs .t.on{background:var(--primary-cont);color:#dbe6ff}
+  .vtabs .t .n{font-size:11px;background:var(--s-highest);color:var(--on-var);border-radius:var(--r-full);padding:0 7px;font-weight:700}
+
+  /* 任务列表 */
+  .tlist{background:var(--s-low);border:1px solid var(--outline);border-radius:var(--r-md);overflow:hidden}
+  .trow{display:flex;align-items:center;gap:13px;padding:13px 16px;border-bottom:1px solid var(--outline)}
+  .trow:last-child{border-bottom:none}
+  .tst{width:16px;height:16px;flex-shrink:0;display:flex;align-items:center;justify-content:center}
+  .tst .pt{width:7px;height:7px;border-radius:50%}
+  .spin{width:15px;height:15px;border-radius:50%;border:2.5px solid var(--s-highest);border-top-color:var(--primary);animation:sp .8s linear infinite}
+  @keyframes sp{to{transform:rotate(360deg)}}
+  .ticon{font-size:15px;flex-shrink:0;width:18px;text-align:center;display:flex;align-items:center;justify-content:center}
+  .ticon svg{width:18px;height:18px}
+  .ib svg{width:18px;height:18px}
+  .tmain{flex:1;min-width:0}
+  .ttitle{font-weight:600;font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .tcourse{color:var(--dim);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .tbar{height:5px;border-radius:var(--r-full);background:var(--s-highest);overflow:hidden;margin-top:7px;max-width:340px}
+  .tbar>i{display:block;height:100%;border-radius:var(--r-full);background:var(--primary-strong)}
+  .tbar.indet{background-image:repeating-linear-gradient(45deg,#6f93e6 0 9px,#4f6fb0 9px 18px);animation:flow .9s linear infinite}
+  @keyframes flow{from{background-position:0 0}to{background-position:25.456px 0}}
+  .tright{display:flex;flex-direction:column;align-items:flex-end;gap:5px;flex-shrink:0}
+  .chip{font-size:11px;font-weight:700;border-radius:var(--r-full);padding:2px 11px;white-space:nowrap;border:1px solid transparent}
+  .chip.work{background:rgba(79,140,255,.16);color:var(--primary)}
+  .chip.pause{background:rgba(224,163,62,.16);color:var(--warning)}
+  .chip.queue{background:var(--s-highest);color:var(--on-var)}
+  .chip.err{background:rgba(255,180,171,.16);color:var(--error)}
+  .chip.auto{background:transparent;border-color:var(--outline);color:var(--info)}
+  .seg{font-size:11.5px;color:var(--dim);font-variant-numeric:tabular-nums}
+  .tact{display:flex;gap:6px;flex-shrink:0}
+  .ib{width:32px;height:32px;border-radius:var(--r-sm);border:none;background:transparent;color:var(--on-var);display:flex;align-items:center;justify-content:center;cursor:pointer}
+  .ib:hover{background:var(--s-cont)}
+  .ib.danger{color:var(--error)}
+  .ib.go{color:var(--primary)}
+  .qdepth{color:var(--dim);font-size:12px;font-variant-numeric:tabular-nums}
+
+  .stagger>*{opacity:0;transform:translateY(8px);animation:rise .5s ease forwards}
+  .stagger>*:nth-child(1){animation-delay:.04s}.stagger>*:nth-child(2){animation-delay:.10s}
+  .stagger>*:nth-child(3){animation-delay:.16s}.stagger>*:nth-child(4){animation-delay:.22s}.stagger>*:nth-child(5){animation-delay:.28s}
+  @keyframes rise{to{opacity:1;transform:none}}
+</style>
+</head>
+<body>
+  <div class="appbar"><span>设置</span><span class="crumb">/ 任务 · 历史</span><span class="sp"></span><span class="seg">深色</span></div>
+  <div class="strip">
+    <span><span class="dot ok"></span><span class="meta">网关在线</span></span>
+    <span class="div"></span><span class="meta">ffmpeg ✓</span>
+    <span class="div"></span><span class="meta">数据实时 · 1s</span>
+    <span class="div"></span><span class="store">播放 <b>6.4</b> / 20 GB</span>
+    <span class="toggle">暂停所有后台 <span class="switch"></span></span>
+  </div>
+
+  <div class="shell">
+    <nav class="nav">
+      <div class="grp">设置</div>
+      <a href="overview.html"><span class="ico"><svg class="i" viewBox="0 0 24 24" fill="currentColor"><path d="M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z"/></svg></span><span class="label">概览</span></a>
+      <a href="cache.html"><span class="ico"><svg class="i" viewBox="0 0 24 24" fill="currentColor"><path d="M12 3C7.58 3 4 4.79 4 7s3.58 4 8 4 8-1.79 8-4-3.58-4-8-4zM4 9v3c0 2.21 3.58 4 8 4s8-1.79 8-4V9c0 2.21-3.58 4-8 4s-8-1.79-8-4zm0 5v3c0 2.21 3.58 4 8 4s8-1.79 8-4v-3c0 2.21-3.58 4-8 4s-8-1.79-8-4z"/></svg></span><span class="label">缓存管理</span><span class="badge">128</span></a>
+      <a class="active" href="tasks.html"><span class="ico"><svg class="i" viewBox="0 0 24 24" fill="currentColor"><path d="M4 10.5c-.83 0-1.5.67-1.5 1.5s.67 1.5 1.5 1.5 1.5-.67 1.5-1.5-.67-1.5-1.5-1.5zm0-6c-.83 0-1.5.67-1.5 1.5S3.17 7.5 4 7.5 5.5 6.83 5.5 6 4.83 4.5 4 4.5zm0 12c-.83 0-1.5.68-1.5 1.5s.68 1.5 1.5 1.5 1.5-.68 1.5-1.5-.67-1.5-1.5-1.5zM7 19h14v-2H7v2zm0-6h14v-2H7v2zm0-8v2h14V5H7z"/></svg></span><span class="label">任务 · 历史</span><span class="badge warn">2 失败</span></a>
+      <a href="system.html"><span class="ico"><svg class="i" viewBox="0 0 24 24" fill="currentColor"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg></span><span class="label">系统配置</span></a>
+    </nav>
+
+    <main class="content stagger">
+      <div>
+        <h1 class="h-page">任务 · 历史</h1>
+        <p class="sub">缓冲 / 预缓存 / 缩略图任务的实时进度与操作，历史只读冻结快照。</p>
+      </div>
+
+      <div class="fbanner">
+        <div class="fhead">2 个任务失败 · 点右侧重试或清除</div>
+        <div class="trow">
+          <span class="tst"><span class="pt" style="background:var(--error)"></span></span>
+          <span class="ticon" style="color:var(--primary)"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11m-4.5-4.5L12 15l4.5-4.5M5 20h14"/></svg></span>
+          <div class="tmain"><div class="ttitle">第 99 讲 · 句法长难句</div><div class="tcourse">考研英语·长难句精讲 · 源返回 404</div></div>
+          <div class="tright"><span class="chip err">失败</span></div>
+          <div class="tact"><button class="ib" title="重试"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12a8 8 0 108-8 8 8 0 00-6 2.7M4 4v4h4"/></svg></button><button class="ib danger" title="清除"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 7h14M10 7V5h4v2M6 7l1 13h10l1-13"/></svg></button></div>
+        </div>
+        <div class="trow">
+          <span class="tst"><span class="pt" style="background:var(--error)"></span></span>
+          <span class="ticon" style="color:var(--info)"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="5" width="16" height="14" rx="2"/><circle cx="9" cy="10" r="1.4"/><path d="M5 17l5-4 3.5 3L16 13l3 3"/></svg></span>
+          <div class="tmain"><div class="ttitle">第 3 讲 · 导数应用</div><div class="tcourse">数学一·高数全程 · ffmpeg 退出码 1</div></div>
+          <div class="tright"><span class="chip err">失败</span></div>
+          <div class="tact"><button class="ib" title="重试"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12a8 8 0 108-8 8 8 0 00-6 2.7M4 4v4h4"/></svg></button><button class="ib danger" title="清除"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 7h14M10 7V5h4v2M6 7l1 13h10l1-13"/></svg></button></div>
+        </div>
+      </div>
+
+      <div class="vtabs">
+        <span class="t on">进行中 <span class="n">5</span></span>
+        <span class="t">操作历史 <span class="n">312</span></span>
+      </div>
+
+      <div class="tlist">
+        <!-- working determinate -->
+        <div class="trow">
+          <span class="tst"><span class="spin"></span></span>
+          <span class="ticon" style="color:var(--primary)"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11m-4.5-4.5L12 15l4.5-4.5M5 20h14"/></svg></span>
+          <div class="tmain">
+            <div class="ttitle">第 12 讲 · 虚拟语气</div>
+            <div class="tcourse">考研英语·长难句精讲</div>
+            <div class="tbar"><i style="width:60%"></i></div>
+          </div>
+          <div class="tright"><span class="chip work">进行中</span><span class="seg">142 / 237 段</span></div>
+          <div class="tact"><button class="ib" title="暂停"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 5v14M16 5v14"/></svg></button><button class="ib danger" title="取消"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
+        </div>
+        <!-- prefetch indeterminate -->
+        <div class="trow">
+          <span class="tst"><span class="spin"></span></span>
+          <span class="ticon" style="color:var(--info)"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 3l-7 10h5l-1 8 8-11h-5z"/></svg></span>
+          <div class="tmain">
+            <div class="ttitle">第 13 讲 · 倒装句</div>
+            <div class="tcourse">考研英语·长难句精讲 · 自动·随播放</div>
+            <div class="tbar indet"></div>
+          </div>
+          <div class="tright"><span class="chip auto">自动·随播放</span><span class="seg">已 19 段 · 总数待确认</span></div>
+          <div class="tact"><button class="ib" title="暂停"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 5v14M16 5v14"/></svg></button><button class="ib danger" title="取消"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
+        </div>
+        <!-- thumb working, no bar -->
+        <div class="trow">
+          <span class="tst"><span class="spin"></span></span>
+          <span class="ticon" style="color:var(--info)"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="5" width="16" height="14" rx="2"/><circle cx="9" cy="10" r="1.4"/><path d="M5 17l5-4 3.5 3L16 13l3 3"/></svg></span>
+          <div class="tmain">
+            <div class="ttitle">第 8 讲 · 定语从句</div>
+            <div class="tcourse">考研英语·长难句精讲 · 缩略图生成</div>
+          </div>
+          <div class="tright"><span class="chip work">进行中</span></div>
+          <div class="tact"><button class="ib danger" title="终止"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
+        </div>
+        <!-- paused -->
+        <div class="trow">
+          <span class="tst"><span class="pt" style="background:var(--warning)"></span></span>
+          <span class="ticon" style="color:var(--primary)"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11m-4.5-4.5L12 15l4.5-4.5M5 20h14"/></svg></span>
+          <div class="tmain">
+            <div class="ttitle">第 5 讲 · 名词性从句</div>
+            <div class="tcourse">考研英语·长难句精讲</div>
+            <div class="tbar"><i style="width:30%"></i></div>
+          </div>
+          <div class="tright"><span class="chip pause">已暂停</span><span class="seg">70 / 237 段</span></div>
+          <div class="tact"><button class="ib go" title="继续"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 5l12 7-12 7z"/></svg></button><button class="ib danger" title="取消"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
+        </div>
+        <!-- queued -->
+        <div class="trow">
+          <span class="tst"><span class="pt" style="background:var(--dim)"></span></span>
+          <span class="ticon" style="color:var(--primary)"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11m-4.5-4.5L12 15l4.5-4.5M5 20h14"/></svg></span>
+          <div class="tmain">
+            <div class="ttitle">第 20 讲 · 强调句</div>
+            <div class="tcourse">考研英语·长难句精讲</div>
+          </div>
+          <div class="tright"><span class="chip queue">排队</span></div>
+          <div class="tact"><button class="ib danger" title="取消"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
+        </div>
+      </div>
+
+      <div class="qdepth">队列深度：缓冲 3 · 缩略图 1</div>
+    </main>
+  </div>
+</body>
+</html>

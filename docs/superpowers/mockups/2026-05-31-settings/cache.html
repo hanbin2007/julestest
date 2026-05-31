@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>设置 · 缓存管理（高保真）</title>
+<style>
+  :root{
+    --bg:#0e1116; --surface:#131619; --s-low:#181b1f; --s-cont:#1c1f23;
+    --s-high:#23262b; --s-highest:#2b2f34;
+    --on:#e4e2e6; --on-var:#c2c7cf; --dim:#8b9099; --outline:#3a3f46;
+    --primary:#b0c6ff; --primary-strong:#4f8cff; --primary-cont:#274879;
+    --success:#3ecf8e; --warning:#e0a33e; --error:#ffb4ab; --info:#cbbfff;
+    --r-sm:8px; --r-md:12px; --r-lg:20px; --r-full:999px;
+    --font:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--on);font-family:var(--font);font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased}
+  .appbar{height:52px;display:flex;align-items:center;gap:12px;padding:0 18px;background:var(--surface);border-bottom:1px solid var(--outline);font-weight:700}
+  .appbar .crumb{color:var(--dim);font-weight:600}
+  .appbar .sp{flex:1}
+  .appbar .seg{font-size:12px;color:var(--dim);border:1px solid var(--outline);border-radius:var(--r-full);padding:4px 12px;font-weight:600}
+  .strip{display:flex;align-items:center;gap:18px;padding:10px 18px;background:var(--s-low);border-bottom:1px solid var(--outline);font-size:13px;flex-wrap:wrap}
+  .dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:6px;vertical-align:middle}
+  .dot.ok{background:var(--success);animation:pulse 2.4s infinite}
+  @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(62,207,142,.45)}70%{box-shadow:0 0 0 6px rgba(62,207,142,0)}100%{box-shadow:0 0 0 0 rgba(62,207,142,0)}}
+  .strip .meta{color:var(--on-var)}
+  .strip .div{width:1px;height:18px;background:var(--outline)}
+  .strip .store{color:var(--on-var);font-variant-numeric:tabular-nums}
+  .strip .store b{color:var(--on)}
+  .toggle{margin-left:auto;display:flex;align-items:center;gap:8px;color:var(--on-var);font-weight:600}
+  .switch{width:38px;height:22px;border-radius:var(--r-full);background:var(--s-highest);position:relative;border:1px solid var(--outline)}
+  .switch::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:var(--dim)}
+
+  .shell{display:flex;min-height:calc(100vh - 52px - 41px)}
+  .nav{width:234px;flex-shrink:0;padding:20px 12px;border-right:1px solid var(--outline);background:var(--surface)}
+  .nav .grp{font-size:11px;letter-spacing:.6px;color:var(--dim);font-weight:700;text-transform:uppercase;padding:0 14px 8px}
+  .nav a{display:flex;align-items:center;gap:10px;padding:9px 14px;border-radius:var(--r-full);color:var(--on-var);font-weight:600;margin-bottom:2px;cursor:pointer;white-space:nowrap}
+  .nav a:hover{background:var(--s-cont)}
+  .nav a.active{background:var(--primary-cont);color:#dbe6ff}
+  .nav a .ico{width:18px;height:18px;display:inline-flex;align-items:center;justify-content:center;opacity:.9;flex-shrink:0}
+  .i{width:18px;height:18px;display:block;flex-shrink:0}
+  .nav a .label{flex:1;overflow:hidden;text-overflow:ellipsis}
+  .nav a .badge{flex-shrink:0;font-size:11px;font-weight:700;border-radius:var(--r-full);padding:1px 8px;background:var(--s-highest);color:var(--on-var);white-space:nowrap}
+  .nav a .badge.warn{background:rgba(255,180,171,.16);color:var(--error)}
+
+  .content{flex:1;display:flex;flex-direction:column;gap:16px;padding:20px 26px;overflow:auto}
+  .h-page{font-size:1.5rem;font-weight:700;letter-spacing:-.3px;margin:0 0 3px}
+  .sub{color:var(--dim);font-size:13px;margin:0}
+
+  /* 工具栏 */
+  .toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .search{flex:1;min-width:200px;height:38px;border-radius:var(--r-md);border:1px solid var(--outline);background:var(--s-low);color:var(--on);padding:0 14px;font-size:13px;font-family:var(--font)}
+  .search::placeholder{color:var(--dim)}
+  .selpill{height:38px;display:inline-flex;align-items:center;gap:7px;border-radius:var(--r-md);border:1px solid var(--outline);background:var(--s-low);color:var(--on-var);padding:0 13px;font-size:13px;font-weight:600;cursor:pointer}
+  .selpill .v{color:var(--on)}
+  .selpill .ar{color:var(--dim);display:inline-flex;align-items:center}
+  .btn{display:inline-flex;align-items:center;gap:7px;border-radius:var(--r-full);padding:9px 18px;font-weight:600;font-size:13px;cursor:pointer;border:1px solid var(--outline);background:transparent;color:var(--primary);height:38px}
+  .btn.filled{background:var(--primary-strong);color:#06224d;border-color:transparent}
+
+  /* 视图标签 */
+  .vtabs{display:flex;gap:4px;background:var(--s-low);border:1px solid var(--outline);border-radius:var(--r-full);padding:3px;width:fit-content}
+  .vtabs .t{padding:6px 18px;border-radius:var(--r-full);font-size:13px;font-weight:600;color:var(--on-var);cursor:pointer}
+  .vtabs .t.on{background:var(--primary-cont);color:#dbe6ff}
+
+  /* 课程卡网格 */
+  .cards{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+  .ccard{background:var(--s-low);border:1px solid var(--outline);border-radius:var(--r-md);padding:16px;display:flex;flex-direction:column;gap:12px}
+  .ctop{display:flex;gap:14px;align-items:center}
+  .dial{width:74px;height:74px;flex-shrink:0}
+  .dial .track{fill:none;stroke:var(--s-highest);stroke-width:7}
+  .dial .arc{fill:none;stroke-width:7;stroke-linecap:round;transform:rotate(-90deg);transform-origin:center}
+  .dial .arc.cache{stroke:var(--primary-strong)}
+  .dial .arc.watch{stroke:var(--success)}
+  .dlabel{font-size:14px;font-weight:700;fill:var(--on);text-anchor:middle;font-variant-numeric:tabular-nums}
+  .dsub{font-size:.46rem;fill:var(--dim);text-anchor:middle;letter-spacing:.05em}
+  .cinfo{min-width:0;flex:1}
+  .cname{font-weight:700;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .cmeta{color:var(--dim);font-size:12px;margin-top:3px;font-variant-numeric:tabular-nums}
+  .legend2{display:flex;gap:14px;margin-top:8px;font-size:11.5px;color:var(--on-var)}
+  .legend2 .l{display:flex;align-items:center;gap:6px}
+  .legend2 .sw{width:8px;height:8px;border-radius:2px}
+  .cact{display:flex;gap:8px;border-top:1px solid var(--outline);padding-top:12px}
+  .cact .mini{flex:1;text-align:center;padding:7px 0;border-radius:var(--r-sm);background:var(--s-cont);font-size:12px;font-weight:600;color:var(--on-var);cursor:pointer}
+  .cact .mini:hover{background:var(--s-high)}
+
+  .stagger>*{opacity:0;transform:translateY(8px);animation:rise .5s ease forwards}
+  .stagger>*:nth-child(1){animation-delay:.04s}.stagger>*:nth-child(2){animation-delay:.10s}
+  .stagger>*:nth-child(3){animation-delay:.16s}.stagger>*:nth-child(4){animation-delay:.22s}
+  @keyframes rise{to{opacity:1;transform:none}}
+</style>
+</head>
+<body>
+  <div class="appbar"><span>设置</span><span class="crumb">/ 缓存管理</span><span class="sp"></span><span class="seg">深色</span></div>
+  <div class="strip">
+    <span><span class="dot ok"></span><span class="meta">网关在线</span></span>
+    <span class="div"></span><span class="meta">ffmpeg ✓</span>
+    <span class="div"></span><span class="meta">数据实时 · 1s</span>
+    <span class="div"></span><span class="store">播放 <b>6.4</b> / 20 GB</span>
+    <span class="toggle">暂停所有后台 <span class="switch"></span></span>
+  </div>
+
+  <div class="shell">
+    <nav class="nav">
+      <div class="grp">设置</div>
+      <a href="overview.html"><span class="ico"><svg class="i" viewBox="0 0 24 24" fill="currentColor"><path d="M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z"/></svg></span><span class="label">概览</span></a>
+      <a class="active" href="cache.html"><span class="ico"><svg class="i" viewBox="0 0 24 24" fill="currentColor"><path d="M12 3C7.58 3 4 4.79 4 7s3.58 4 8 4 8-1.79 8-4-3.58-4-8-4zM4 9v3c0 2.21 3.58 4 8 4s8-1.79 8-4V9c0 2.21-3.58 4-8 4s-8-1.79-8-4zm0 5v3c0 2.21 3.58 4 8 4s8-1.79 8-4v-3c0 2.21-3.58 4-8 4s-8-1.79-8-4z"/></svg></span><span class="label">缓存管理</span><span class="badge">128</span></a>
+      <a href="tasks.html"><span class="ico"><svg class="i" viewBox="0 0 24 24" fill="currentColor"><path d="M4 10.5c-.83 0-1.5.67-1.5 1.5s.67 1.5 1.5 1.5 1.5-.67 1.5-1.5-.67-1.5-1.5-1.5zm0-6c-.83 0-1.5.67-1.5 1.5S3.17 7.5 4 7.5 5.5 6.83 5.5 6 4.83 4.5 4 4.5zm0 12c-.83 0-1.5.68-1.5 1.5s.68 1.5 1.5 1.5 1.5-.68 1.5-1.5-.67-1.5-1.5-1.5zM7 19h14v-2H7v2zm0-6h14v-2H7v2zm0-8v2h14V5H7z"/></svg></span><span class="label">任务 · 历史</span><span class="badge warn">2 失败</span></a>
+      <a href="system.html"><span class="ico"><svg class="i" viewBox="0 0 24 24" fill="currentColor"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg></span><span class="label">系统配置</span></a>
+    </nav>
+
+    <main class="content stagger">
+      <div>
+        <h1 class="h-page">缓存管理</h1>
+        <p class="sub">浏览课程与讲次的缓存状态，按需缓冲 / 生成缩略图。</p>
+      </div>
+
+      <div class="toolbar">
+        <input class="search" placeholder="搜索课程 / 讲次…">
+        <span class="selpill">课程 <span class="v">全部</span><span class="ar"><svg class="i" viewBox="0 0 24 24" fill="currentColor"><path d="M7 10l5 5 5-5z"/></svg></span></span>
+        <span class="selpill">排序 <span class="v">缓存量</span><span class="ar"><svg class="i" viewBox="0 0 24 24" fill="currentColor"><path d="M7 10l5 5 5-5z"/></svg></span></span>
+        <span class="selpill">缩略图 <span class="v">全部</span><span class="ar"><svg class="i" viewBox="0 0 24 24" fill="currentColor"><path d="M7 10l5 5 5-5z"/></svg></span></span>
+        <span class="btn"><svg class="i" viewBox="0 0 24 24" fill="currentColor"><path d="M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z"/></svg>批量缩略图</span>
+        <span class="btn filled"><svg class="i" viewBox="0 0 24 24" fill="currentColor"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>批量缓冲</span>
+      </div>
+
+      <div class="vtabs">
+        <span class="t on">按课程</span>
+        <span class="t">全部讲次</span>
+      </div>
+
+      <div class="cards">
+        <!-- card 1 -->
+        <div class="ccard">
+          <div class="ctop">
+            <svg class="dial" viewBox="0 0 80 80">
+              <circle class="track" cx="40" cy="40" r="34"></circle>
+              <circle class="arc cache" cx="40" cy="40" r="34" stroke-dasharray="166.6 213.6"></circle>
+              <circle class="track" cx="40" cy="40" r="24" style="stroke-width:6"></circle>
+              <circle class="arc watch" cx="40" cy="40" r="24" stroke-dasharray="67.8 150.8" style="stroke-width:6"></circle>
+              <text class="dlabel" x="40" y="40">78%</text>
+              <text class="dsub" x="40" y="52">缓存</text>
+            </svg>
+            <div class="cinfo">
+              <div class="cname">考研英语·长难句精讲</div>
+              <div class="cmeta">24 讲 · 已缓存 19 · 缩略图 17</div>
+              <div class="legend2">
+                <span class="l"><span class="sw" style="background:var(--primary-strong)"></span>缓存 78%</span>
+                <span class="l"><span class="sw" style="background:var(--success)"></span>看过 45%</span>
+              </div>
+            </div>
+          </div>
+          <div class="cact"><span class="mini">缓冲整门</span><span class="mini">生成缩略图</span><span class="mini">详情</span></div>
+        </div>
+        <!-- card 2 -->
+        <div class="ccard">
+          <div class="ctop">
+            <svg class="dial" viewBox="0 0 80 80">
+              <circle class="track" cx="40" cy="40" r="34"></circle>
+              <circle class="arc cache" cx="40" cy="40" r="34" stroke-dasharray="213.6 213.6"></circle>
+              <circle class="track" cx="40" cy="40" r="24" style="stroke-width:6"></circle>
+              <circle class="arc watch" cx="40" cy="40" r="24" stroke-dasharray="135.7 150.8" style="stroke-width:6"></circle>
+              <text class="dlabel" x="40" y="40">100%</text>
+              <text class="dsub" x="40" y="52">缓存</text>
+            </svg>
+            <div class="cinfo">
+              <div class="cname">数学一·高数全程</div>
+              <div class="cmeta">36 讲 · 已缓存 36 · 缩略图 36</div>
+              <div class="legend2">
+                <span class="l"><span class="sw" style="background:var(--primary-strong)"></span>缓存 100%</span>
+                <span class="l"><span class="sw" style="background:var(--success)"></span>看过 90%</span>
+              </div>
+            </div>
+          </div>
+          <div class="cact"><span class="mini">缓冲整门</span><span class="mini">生成缩略图</span><span class="mini">详情</span></div>
+        </div>
+        <!-- card 3 -->
+        <div class="ccard">
+          <div class="ctop">
+            <svg class="dial" viewBox="0 0 80 80">
+              <circle class="track" cx="40" cy="40" r="34"></circle>
+              <circle class="arc cache" cx="40" cy="40" r="34" stroke-dasharray="51.3 213.6"></circle>
+              <circle class="track" cx="40" cy="40" r="24" style="stroke-width:6"></circle>
+              <circle class="arc watch" cx="40" cy="40" r="24" stroke-dasharray="15 150.8" style="stroke-width:6"></circle>
+              <text class="dlabel" x="40" y="40">24%</text>
+              <text class="dsub" x="40" y="52">缓存</text>
+            </svg>
+            <div class="cinfo">
+              <div class="cname">政治·马原冲刺</div>
+              <div class="cmeta">18 讲 · 已缓存 4 · 缩略图 2</div>
+              <div class="legend2">
+                <span class="l"><span class="sw" style="background:var(--primary-strong)"></span>缓存 24%</span>
+                <span class="l"><span class="sw" style="background:var(--success)"></span>看过 10%</span>
+              </div>
+            </div>
+          </div>
+          <div class="cact"><span class="mini">缓冲整门</span><span class="mini">生成缩略图</span><span class="mini">详情</span></div>
+        </div>
+      </div>
+    </main>
+  </div>
+</body>
+</html>
