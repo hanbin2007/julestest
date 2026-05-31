@@ -195,9 +195,21 @@ async function main() {
       body: JSON.stringify({ videos: [{ videoId: L3, contentId: LESSONS[2].contentId, cardPackageId: LESSONS[2].cardPackageId, productId: 900001, src: ORIGIN_URL + "/ld/MISSING.m3u8", liveId: null }] }),
     });
     await waitBtn("重试", 20000).catch(() => {});
-    await shot("failed_retry_available");
+    await shot("failed_actions_available");
     log(await has("重试"), "failed-task: 重试 reachable inline (A4 — not buried in read-only history)");
-    if (await has("重试")) { await btn("重试").click(); await grabToast(); await page.waitForTimeout(1000); await shot("failed_retried"); log(true, "failed-task: 重试 clicked"); }
+    const DISMISS = "清除（从失败列表移除）";
+    log(await has(DISMISS), "failed-task: 清除(dismiss) button reachable on the failed row");
+    // DISMISS = the fix for unrecoverable/junk failed tasks (retry can't help a dead src) — mirrors 777000333
+    if (await has(DISMISS)) {
+      await btn(DISMISS).click();
+      const td = await grabToast();
+      await page.getByText("个任务失败", { exact: false }).first().waitFor({ state: "detached", timeout: 8000 }).catch(() => {});
+      await page.waitForTimeout(800);
+      await shot("failed_dismissed");
+      log(!(await has(DISMISS)) && !(await has("重试")), `failed-task: dismiss removed the failed row from the UI (toast "${td}")`);
+      const sd = await gw("/api/status");
+      log((sd.buffer?.perVid?.[String(L3)]?.state ?? null) !== "error", "failed-task: gateway cleared L3 buffer error after dismiss (job/state/error removed)");
+    }
   }
 
   // ── F. kill -9 persistence through the UI (CLAUDE.md cross-restart) ────────

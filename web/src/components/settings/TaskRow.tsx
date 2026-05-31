@@ -8,6 +8,7 @@ import PauseRoundedIcon from "@mui/icons-material/PauseRounded";
 import PlayArrowRoundedIcon from "@mui/icons-material/PlayArrowRounded";
 import ReplayRoundedIcon from "@mui/icons-material/ReplayRounded";
 import CloseRoundedIcon from "@mui/icons-material/CloseRounded";
+import DeleteOutlineRoundedIcon from "@mui/icons-material/DeleteOutlineRounded";
 import type { TaskItem, TaskState, TaskVerb } from "@/types/api";
 
 export const KIND = {
@@ -39,12 +40,12 @@ export function availableVerbs(kind: TaskItem["kind"], state: TaskState): TaskVe
     if (state === "working") return ["pause", "cancel"];
     if (state === "paused") return ["resume", "cancel"];
     if (state === "queued") return ["cancel"];
-    if (state === "error") return ["retry"];
+    if (state === "error") return ["retry", "dismiss"];
     return [];
   }
   // thumb
   if (state === "working" || state === "queued") return ["cancel"];
-  if (state === "error") return ["retry"];
+  if (state === "error") return ["retry", "dismiss"];
   return [];
 }
 
@@ -63,6 +64,7 @@ const VERB_BTN: Record<TaskVerb, { title: string; Icon: typeof PauseRoundedIcon;
   resume: { title: "继续", Icon: PlayArrowRoundedIcon },
   retry: { title: "重试", Icon: ReplayRoundedIcon },
   cancel: { title: "取消", Icon: CloseRoundedIcon, color: "error" },
+  dismiss: { title: "清除（从失败列表移除）", Icon: DeleteOutlineRoundedIcon, color: "error" },
 };
 
 // 历史时间线时间戳格式化:今天显示 HH:mm,跨天显示 MM-DD HH:mm(本地时间)。
@@ -113,7 +115,7 @@ function TaskRow({
     st === "paused" ? "warning.main" : st === "error" ? "error.main" : st === "done" ? "success.main" : "text.disabled";
 
   return (
-    <Box sx={{ display: "flex", alignItems: "center", gap: 1, py: 0.5, px: 0.5 }}>
+    <Box sx={{ display: "flex", alignItems: "center", gap: 1, py: 0.75, px: 1 }}>
       {/* 状态指示：进行中转圈，其余用对应颜色的点 */}
       {working ? (
         <CircularProgress size={14} thickness={6} />
@@ -177,7 +179,7 @@ function TaskRow({
                     color={b.color}
                     disabled={busy}
                     onClick={() => onAction?.(v)}
-                    sx={{ p: 0.25 }}
+                    sx={{ p: 0.5 }}
                     aria-label={aria}
                   >
                     <b.Icon sx={{ fontSize: 16 }} />

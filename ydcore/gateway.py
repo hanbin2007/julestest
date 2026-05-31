@@ -1576,6 +1576,15 @@ class Gateway:
                     self.buf_state[vid] = "queued"
                     self._last_buf_error.pop(vid, None)
                     requeue = job
+            elif verb == "dismiss":
+                # 失败任务清除: 仅 error 态可清除。删除状态/任务/错误并发终态事件,
+                # UI 失败区随即移除该行(无法重试的死链/脏数据靠它彻底清掉,不再永久卡列表)。
+                ok = st == "error"
+                if ok:
+                    self.buf_state.pop(vid, None)
+                    self.buf_jobs.pop(vid, None)
+                    self._last_buf_error.pop(vid, None)
+                    self._emit_task_event("buffer", vid, "cancelled", "已清除")
             else:
                 return {"ok": False, "vid": vid, "kind": "buffer", "state": st, "reason": "bad verb"}
             new_state = self.buf_state.get(vid)
@@ -1608,6 +1617,14 @@ class Gateway:
                     self.thumb_meta[vid] = {"state": "gen", "started_ts": time.time()}
                     self.thumb_session.add(vid)  # 重试也是"本会话任务",否则 UI 会把它从本会话列表丢掉
                     requeue = job
+            elif verb == "dismiss":
+                # 失败任务清除: 仅 error 态可清除(对称 buffer)。删除元数据/任务并发终态事件。
+                ok = st == "error"
+                if ok:
+                    self.thumb_meta.pop(vid, None)
+                    self.thumb_jobs.pop(vid, None)
+                    self.thumb_session.discard(vid)
+                    self._emit_task_event("thumb", vid, "cancelled", "已清除")
             else:
                 return {"ok": False, "vid": vid, "kind": "thumb", "state": st, "reason": "bad verb"}
             new_state = (self.thumb_meta.get(vid) or {}).get("state")
@@ -2143,7 +2160,7 @@ def make_handler(gateway):
             verb = payload.get("verb")
             kind = payload.get("kind")
             vid = str(payload.get("vid") or "")
-            if not vid or verb not in ("pause", "resume", "cancel", "retry"):
+            if not vid or verb not in ("pause", "resume", "cancel", "retry", "dismiss"):
                 self._send_json({"error": "bad params"}, 400)
                 return
             if kind == "buffer":

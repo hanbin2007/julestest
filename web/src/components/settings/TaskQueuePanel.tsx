@@ -71,13 +71,13 @@ function TaskQueuePanel({
 
   return (
     <Box sx={{ display: "flex", flexDirection: "column", minHeight: 0 }}>
-      <Typography variant="subtitle2" sx={{ mb: 0.5 }}>任务队列</Typography>
+      <Typography variant="subtitle2" sx={{ mb: 1 }}>任务队列</Typography>
 
       {/* 失败区：有失败任务时直接把可重试的失败行内联到面板最顶（不再只给数字横幅 + 埋进全屏）。
           每行带「重试」按钮，用户在第一眼能看到的地方就能直接重试。多于上限时折叠到全屏。 */}
       {failedTasks.length > 0 && (
         <Box sx={{ mb: 1 }}>
-          <Alert severity="warning" sx={{ py: 0, mb: 0.5, alignItems: "center" }} icon={false}>
+          <Alert severity="warning" sx={{ py: 0.75, mb: 0.75, alignItems: "center" }} icon={false}>
             {failedTasks.length} 个任务失败 · 点右侧重试
           </Alert>
           <Box
@@ -85,6 +85,7 @@ function TaskQueuePanel({
               border: (t) => `1px solid ${t.palette.warning.light}`,
               borderRadius: (t) => t.radius.md,
               px: 0.5,
+              py: 0.25,
               bgcolor: (t) => t.palette.warning.light + "14", // 极淡警示底色
             }}
           >
@@ -144,6 +145,7 @@ function TaskQueuePanel({
           border: (t) => `1px solid ${t.palette.divider}`,
           borderRadius: (t) => t.radius.md,
           px: 0.5,
+          py: 0.5,
         }}
       >
         {display.length === 0 ? (
@@ -175,7 +177,7 @@ function TaskQueuePanel({
       </Box>
 
       {(queue.thumb > 0 || queue.buffer > 0) && (
-        <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5, fontVariantNumeric: "tabular-nums" }}>
+        <Typography variant="caption" color="text.secondary" sx={{ mt: 1, fontVariantNumeric: "tabular-nums" }}>
           队列深度：缓冲 {queue.buffer} · 缩略图 {queue.thumb}
         </Typography>
       )}

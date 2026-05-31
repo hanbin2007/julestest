@@ -40,6 +40,7 @@ const VERB_DONE: Record<TaskVerb, string> = {
   resume: "已继续",
   cancel: "已取消",
   retry: "已重试",
+  dismiss: "已清除",
 };
 
 // 缩略图源：点播取最低清晰度（解码更快）；直播回放无清晰度档 → 回退到 m3u8 (即 downloadUrl)。
@@ -313,7 +314,7 @@ export default function SettingsView() {
       />
 
       {/* 全局后台缓存开关：一处暂停 buffer/thumb/prefetch 三 worker（网关持久化、跨重启保留）。 */}
-      <Card sx={{ p: 1.5, mb: 2, display: "flex", alignItems: "center", flexWrap: "wrap", gap: 1 }}>
+      <Card sx={{ p: 2, mb: 2, display: "flex", alignItems: "center", flexWrap: "wrap", gap: 1.5 }}>
         <PauseCircleOutlineRoundedIcon
           sx={{ fontSize: 20, color: bgPaused ? "warning.main" : "text.disabled" }}
         />
@@ -385,7 +386,7 @@ export default function SettingsView() {
               </TextField>
             </>
           )}
-          <Stack direction="row" sx={{ ml: { md: "auto" }, flexWrap: "wrap", gap: 1, alignItems: "center" }}>
+          <Stack direction="row" sx={{ ml: { md: "auto" }, flexWrap: "wrap", gap: 1.5, alignItems: "center" }}>
             <ToggleButtonGroup
               size="small"
               exclusive

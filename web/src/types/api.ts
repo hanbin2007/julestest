@@ -165,8 +165,9 @@ export interface CourseStatus {
 }
 // 任务在面板里的呈现态：进行中(working/queued/paused) / 已完成(done/cancelled) / 失败(error)。
 export type TaskState = "working" | "queued" | "paused" | "done" | "cancelled" | "error";
-// 可对任务执行的操作。buffer/thumb 支持全部；prefetch（自动·随播放）支持 pause|resume|cancel（不支持 retry）。
-export type TaskVerb = "pause" | "resume" | "cancel" | "retry";
+// 可对任务执行的操作。dismiss=清除失败任务（仅 error 态，从列表彻底移除死链/脏数据）。
+// prefetch（自动·随播放）支持 pause|resume|cancel（不支持 retry/dismiss）。
+export type TaskVerb = "pause" | "resume" | "cancel" | "retry" | "dismiss";
 
 export interface TaskItem {
   vid: number;
