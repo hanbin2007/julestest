@@ -82,7 +82,12 @@ def asset_bytes(name):
 #   stream.youdao.com    —— m3u8 播放列表 + .ts 分片
 #   live.ydshengxue.com  —— 直播回放 AES 解密 key 接口（/p 的 key 分支会回源到此）
 # 三处校验（buffer 入口/thumb 入口/_proxy）共用此常量，避免各自硬编码漂移。
-_ALLOWED_HOSTS = frozenset({"stream.youdao.com", "live.ydshengxue.com"})
+# 隔离 e2e 专用：YD_EXTRA_ALLOWED_HOSTS（逗号分隔）可临时追加回源主机，默认空。
+# 生产不设此变量 → 与原集合完全一致；仅用于本地隔离测试指向 fake origin，绝不影响线上。
+_ALLOWED_HOSTS = frozenset(
+    {"stream.youdao.com", "live.ydshengxue.com"}
+    | {h.strip().lower() for h in os.environ.get("YD_EXTRA_ALLOWED_HOSTS", "").split(",") if h.strip()}
+)
 
 MAX_BODY = 8 * 1024 * 1024  # 请求体上限 8MB，防超大 POST body 拖垮内存
 
