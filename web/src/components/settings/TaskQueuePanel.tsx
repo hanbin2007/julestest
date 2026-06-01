@@ -3,19 +3,15 @@ import * as React from "react";
 import { Alert, Box, Tab, Tabs, Typography } from "@mui/material";
 import type { TaskItem, TaskVerb } from "@/types/api";
 import TaskRow, { TASK_TABS, taskKey } from "./TaskRow";
-import TaskQueueFullscreenDialog from "./TaskQueueFullscreenDialog";
 
-const PANEL_CAP = 20; // 面板每标签只显示前 20 条，更多走「展开全屏」
-const FAILED_CAP = 5; // 失败区内联只显示前 5 条可重试行，更多走「展开全屏」
-
+// 任务·历史整页面板：失败横幅(内联重试/清除) + 进行中↔操作历史两标签 + 全量列表(页面即全视图)。
+// 有了专属路由后退役了原 240px 小面板 + 全屏弹窗：列表直接铺开，由页面所在内容区滚动。
 function TaskQueuePanel({
   tasks,
   failedTasks,
   allTasks,
   queue,
   onAction,
-  fsOpen,
-  onFsOpenChange,
 }: {
   tasks: TaskItem[];
   failedTasks: TaskItem[];
@@ -23,9 +19,6 @@ function TaskQueuePanel({
   allTasks: TaskItem[];
   queue: { thumb: number; buffer: number };
   onAction: (task: TaskItem, verb: TaskVerb) => Promise<void>;
-  // 全屏弹窗开关：受控，便于顶部状态条徽标也能打开它。
-  fsOpen: boolean;
-  onFsOpenChange: (open: boolean) => void;
 }) {
   const [tab, setTab] = React.useState(0);
   const [busy, setBusy] = React.useState<Set<string>>(new Set());
@@ -48,8 +41,7 @@ function TaskQueuePanel({
     [onAction],
   );
 
-  // 历史标签客户端折叠：每 (kind,vid) 只保留最新一行。API 已按 at desc 返回完整时间线,
-  // 首见即最新。折叠只作用于面板概览;全屏(TaskQueueFullscreenDialog)直接吃 allTasks 全量=完整时间线,不折叠。
+  // 历史标签客户端折叠：每 (kind,vid) 只保留最新一行。API 已按 at desc 返回，首见即最新。
   const collapseLatest = (rows: TaskItem[]) => {
     const seen = new Set<string>();
     const out: TaskItem[] = [];
@@ -65,20 +57,15 @@ function TaskQueuePanel({
   const lists = [tasks, allTasks];
   const current = lists[tab] ?? [];
   const isHistoryTab = tab === 1;
-  // 历史标签(tab===1)在面板里折叠成每任务最新态;进行中标签不折叠。
   const display = isHistoryTab ? collapseLatest(current) : current;
-  const shown = display.slice(0, PANEL_CAP);
 
   return (
     <Box sx={{ display: "flex", flexDirection: "column", minHeight: 0 }}>
-      <Typography variant="subtitle2" sx={{ mb: 1 }}>任务队列</Typography>
-
-      {/* 失败区：有失败任务时直接把可重试的失败行内联到面板最顶（不再只给数字横幅 + 埋进全屏）。
-          每行带「重试」按钮，用户在第一眼能看到的地方就能直接重试。多于上限时折叠到全屏。 */}
+      {/* 失败区：可重试/清除的失败行内联到最顶，第一眼就能操作。 */}
       {failedTasks.length > 0 && (
-        <Box sx={{ mb: 1 }}>
+        <Box sx={{ mb: 1.5 }}>
           <Alert severity="warning" sx={{ py: 0.75, mb: 0.75, alignItems: "center" }} icon={false}>
-            {failedTasks.length} 个任务失败 · 点右侧重试
+            {failedTasks.length} 个任务失败 · 点右侧重试或清除
           </Alert>
           <Box
             sx={{
@@ -86,29 +73,12 @@ function TaskQueuePanel({
               borderRadius: (t) => t.radius.md,
               px: 0.5,
               py: 0.25,
-              bgcolor: (t) => t.palette.warning.light + "14", // 极淡警示底色
+              bgcolor: (t) => t.palette.warning.light + "14",
             }}
           >
-            {failedTasks.slice(0, FAILED_CAP).map((t) => (
-              <TaskRow
-                key={taskKey(t)}
-                task={t}
-                busy={busy.has(taskKey(t))}
-                onAction={(verb) => run(t, verb)}
-              />
+            {failedTasks.map((t) => (
+              <TaskRow key={taskKey(t)} task={t} busy={busy.has(taskKey(t))} onAction={(verb) => run(t, verb)} />
             ))}
-            {failedTasks.length > FAILED_CAP && (
-              <Box sx={{ py: 0.5, textAlign: "center" }}>
-                <Typography
-                  variant="caption"
-                  color="primary"
-                  sx={{ cursor: "pointer" }}
-                  onClick={() => onFsOpenChange(true)}
-                >
-                  还有 {failedTasks.length - FAILED_CAP} 个失败任务，展开全屏查看全部
-                </Typography>
-              </Box>
-            )}
           </Box>
         </Box>
       )}
@@ -135,13 +105,9 @@ function TaskQueuePanel({
         </Typography>
       )}
 
-      {/* 列表（可滚动） */}
+      {/* 列表：全量铺开，页面所在内容区滚动（不再 240px 截断 + 全屏弹窗）。 */}
       <Box
         sx={{
-          flex: 1,
-          minHeight: 0,
-          maxHeight: 240,
-          overflowY: "auto",
           border: (t) => `1px solid ${t.palette.divider}`,
           borderRadius: (t) => t.radius.md,
           px: 0.5,
@@ -149,30 +115,19 @@ function TaskQueuePanel({
         }}
       >
         {display.length === 0 ? (
-          <Box sx={{ height: "100%", minHeight: 80, display: "flex", alignItems: "center", justifyContent: "center" }}>
-            <Typography variant="caption" color="text.disabled">
-              {TASK_TABS[tab].empty}
-            </Typography>
+          <Box sx={{ minHeight: 80, display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <Typography variant="caption" color="text.disabled">{TASK_TABS[tab].empty}</Typography>
           </Box>
         ) : (
-          <>
-            {shown.map((t, i) => (
-              <TaskRow
-                key={isHistoryTab ? `${taskKey(t)}-${i}` : taskKey(t)}
-                task={t}
-                busy={busy.has(taskKey(t))}
-                onAction={(verb) => run(t, verb)}
-                isHistory={isHistoryTab}
-              />
-            ))}
-            {display.length > shown.length && (
-              <Box sx={{ py: 0.5, textAlign: "center" }}>
-                <Typography variant="caption" color="primary" sx={{ cursor: "pointer" }} onClick={() => onFsOpenChange(true)}>
-                  还有 {display.length - shown.length} 条，展开全屏查看全部
-                </Typography>
-              </Box>
-            )}
-          </>
+          display.map((t, i) => (
+            <TaskRow
+              key={isHistoryTab ? `${taskKey(t)}-${i}` : taskKey(t)}
+              task={t}
+              busy={busy.has(taskKey(t))}
+              onAction={(verb) => run(t, verb)}
+              isHistory={isHistoryTab}
+            />
+          ))
         )}
       </Box>
 
@@ -181,16 +136,6 @@ function TaskQueuePanel({
           队列深度：缓冲 {queue.buffer} · 缩略图 {queue.thumb}
         </Typography>
       )}
-
-      <TaskQueueFullscreenDialog
-        open={fsOpen}
-        onClose={() => onFsOpenChange(false)}
-        tasks={tasks}
-        failedTasks={failedTasks}
-        allTasks={allTasks}
-        busy={busy}
-        onAction={run}
-      />
     </Box>
   );
 }
