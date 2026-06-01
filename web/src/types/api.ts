@@ -62,6 +62,8 @@ export interface GwStatus {
     errors: number;
     session?: string[];
     bytes?: number;
+    // 生成的缩略图 JPEG 持久占盘字节（网关 thumb.jpegBytes，区别于临时源段 bytes）。
+    jpegBytes?: number;
     // 仅 error 态附原因（网关 thumb_meta[vid].reason），供 web 写历史/展示失败原因用。
     reasons?: Record<string, string | null>;
   };
@@ -233,6 +235,7 @@ export interface CoursesStatus {
     bufferBytes: number;
     bufferLimit: number;
     thumbBytes: number;
+    thumbJpegBytes: number; // 生成的缩略图 JPEG 持久占盘（来自网关 thumb.jpegBytes）
     lectures: number;
     cachedLectures: number;
     thumbsReady: number;

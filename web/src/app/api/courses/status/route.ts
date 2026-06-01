@@ -201,6 +201,7 @@ async function build(): Promise<CoursesStatus> {
 
   if (!gw) return fallback(courses, byVid, watched);
   const thumbBytes = gw.thumb.bytes ?? 0;
+  const thumbJpegBytes = gw.thumb.jpegBytes ?? 0;
 
   // 镜像进 DB(含 bytes,供网关挂掉时回退) + 同步等任务历史落库:
   // 必须 await,否则 fire-and-forget 下面 findMany allTasks 读不到刚 append 的行,
@@ -379,6 +380,7 @@ async function build(): Promise<CoursesStatus> {
       bufferBytes: gw.buffer.bytes,
       bufferLimit: gw.buffer.limit,
       thumbBytes,
+      thumbJpegBytes,
       lectures: dedupTotals.lectures,
       cachedLectures: dedupTotals.cachedLectures,
       thumbsReady: dedupTotals.thumbsReady,
@@ -650,6 +652,7 @@ async function fallback(
       bufferBytes: totalBytes,
       bufferLimit: 0,
       thumbBytes: 0,
+      thumbJpegBytes: 0,
       lectures: dedupTotals.lectures,
       cachedLectures: dedupTotals.cachedLectures,
       thumbsReady: dedupTotals.thumbsReady,
