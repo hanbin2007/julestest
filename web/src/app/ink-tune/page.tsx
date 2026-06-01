@@ -60,6 +60,7 @@ export default function InkTunePage() {
   const [recording, setRecording] = React.useState(true);
   const recordingRef = React.useRef(true);
   recordingRef.current = recording;
+  const [syncedAt, setSyncedAt] = React.useState<string>(""); // 「存到服务器」时间回显
   const [, force] = React.useReducer((x) => x + 1, 0); // 改 tuning 后驱动控制面板回显
 
   // 把工具/颜色/线宽同步进 api(AnnotationLayer 从 api 读)。
@@ -113,7 +114,21 @@ export default function InkTunePage() {
     renderStage();
   }, [abEnabled, renderStage]);
 
-  // ---- 持久化(debounce) ----
+  // ---- 同步到服务器(iPad 无 clipboard,改服务端落盘供读取) ----
+  const syncToServer = React.useCallback(() => {
+    try {
+      fetch("/api/inktune", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ v: 1, tuning, strokes: strokesRef.current }),
+        keepalive: true,
+      }).catch(() => {});
+    } catch {
+      /* 离线/接口缺失忽略 */
+    }
+  }, []);
+
+  // ---- 持久化(debounce):localStorage + 服务器 ----
   const persistTimer = React.useRef<number | null>(null);
   const persist = React.useCallback(() => {
     if (persistTimer.current != null) clearTimeout(persistTimer.current);
@@ -124,8 +139,9 @@ export default function InkTunePage() {
       } catch {
         /* 配额/隐私模式忽略 */
       }
+      syncToServer();
     }, 250);
-  }, []);
+  }, [syncToServer]);
 
   // ---- stage canvas 尺寸同步(与 AnnotationLayer 同盒) ----
   React.useEffect(() => {
@@ -195,6 +211,8 @@ export default function InkTunePage() {
     }
     renderStage();
     force();
+    // 挂载即把当前候选(含本次从 localStorage 恢复的调好值)同步到服务器 —— 刷新一次即可让 agent 读到。
+    syncToServer();
     return () => {
       // 安全攸关:还原全局 tuning 为出厂默认,防候选在同一 SPA 会话泄漏进真实播放器。
       Object.assign(tuning, structuredClone(BASELINE_TUNING));
@@ -366,6 +384,15 @@ export default function InkTunePage() {
           <button onClick={resetTuning} style={{ flex: 1, padding: 6 }}>重置出厂</button>
           <button onClick={copyParams} style={{ flex: 1, padding: 6 }}>复制参数</button>
         </div>
+        <button
+          onClick={() => {
+            syncToServer();
+            setSyncedAt(new Date().toLocaleTimeString());
+          }}
+          style={{ padding: 6, background: "#1b3a2a", border: "1px solid #2e6b4a", borderRadius: 6, color: "#9ff5c8" }}
+        >
+          存到服务器{syncedAt ? `(已存 ${syncedAt})` : ""}
+        </button>
         <button
           onClick={() => {
             const blob = new Blob([exportBundle()], { type: "application/json" });

@@ -51,7 +51,7 @@ let browser;
 
   try {
     // ---------- §5.1 处理器数学 ----------
-    await page.goto(`${BASE}/ink-tune`, { waitUntil: "networkidle", timeout: 30000 });
+    await page.goto(`${BASE}/ink-tune`, { waitUntil: "domcontentloaded", timeout: 30000 });
     await page.waitForFunction(() => !!window.__inktune?.InkStrokeProcessor, null, { timeout: 15000 });
 
     const r = await page.evaluate(
@@ -90,7 +90,7 @@ let browser;
 
     // ---------- 生产回归:裸 AnnotationLayer 仍 push + 渲染 ----------
     // 用真实鼠标事件(pointerType=mouse,非掌拒;有效指针捕获,避免合成 PointerEvent 的 InvalidPointerId)。
-    await page.goto(`${BASE}/ink-tune/regress`, { waitUntil: "networkidle", timeout: 30000 });
+    await page.goto(`${BASE}/ink-tune/regress`, { waitUntil: "domcontentloaded", timeout: 30000 });
     await page.waitForFunction(() => !!window.__regress, null, { timeout: 15000 });
     const live = page.locator("canvas").last(); // 顶层 live canvas 收指针
     const box = await live.boundingBox();
@@ -115,7 +115,7 @@ let browser;
       await page.screenshot({ path: `${OUT}/inktune_regress.png` });
     }
     // ---------- §5.2 页面像素 / 持久化 / A/B / 卸载还原 ----------
-    await page.goto(`${BASE}/ink-tune`, { waitUntil: "networkidle", timeout: 30000 });
+    await page.goto(`${BASE}/ink-tune`, { waitUntil: "domcontentloaded", timeout: 30000 });
     await page.waitForFunction(() => !!window.__inktune?.importBundle, null, { timeout: 15000 });
     // 干净起点:清两个 key 再导入已知笔画(同 context 内做 reload 持久化断言;跨进程调用天然新 context)。
     await page.evaluate(() => {
@@ -170,7 +170,7 @@ let browser;
     await page.screenshot({ path: `${OUT}/inktune_ab.png` });
 
     // reload 持久化:同 context 刷新 → 笔画数 + 候选参数(pen.thinning=0.95)仍在。
-    await page.reload({ waitUntil: "networkidle" });
+    await page.reload({ waitUntil: "domcontentloaded" });
     await page.waitForFunction(() => !!window.__inktune?.getStrokeCount, null, { timeout: 15000 });
     const cntR = await page.evaluate(() => window.__inktune.getStrokeCount());
     const tR = await page.evaluate(() => window.__inktune.getTuning());
@@ -194,9 +194,10 @@ let browser;
     else {
       await page.waitForTimeout(150); // 让 unmount cleanup 跑完
       const probe = await page.evaluate(() => window.__inkTuningProbe?.()); // 模块级探针,survive 卸载
+      const FACTORY_THINNING = 0.37; // inkTuning.ts pen.thinning 出厂默认(2026-05-30 定稿);改默认须同步此值
       if (!probe) fail("§5.2:__inkTuningProbe 不存在(无法验证卸载还原)");
-      else if (Math.abs(probe.pen.thinning - 0.6) > 1e-6)
-        fail(`§5.2:卸载后全局 tuning.pen.thinning=${probe.pen.thinning}(应还原出厂 0.6)——候选泄漏进生产!`);
+      else if (Math.abs(probe.pen.thinning - FACTORY_THINNING) > 1e-6)
+        fail(`§5.2:卸载后全局 tuning.pen.thinning=${probe.pen.thinning}(应还原出厂 ${FACTORY_THINNING})——候选泄漏进生产!`);
       else ok("§5.2:卸载还原全局 tuning 出厂(候选不泄漏)");
     }
 

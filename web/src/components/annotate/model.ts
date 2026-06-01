@@ -71,7 +71,9 @@ export type AnnObject = InkObject | ShapeObject;
 
 // 工具条提供的 6 色 / 4 档线宽。
 export const COLORS = ["#ff5252", "#ffd54f", "#4fc3f7", "#69f0ae", "#ffffff", "#212121"];
-export const WIDTHS = [0.004, 0.007, 0.012, 0.02] as const;
+// 2026-05-30 用户要求「粗细整体下调一级」：整条档位下移一级——最细比原来更细(0.0024)，
+// 上三档沿用原来的 0.004/0.007/0.012，去掉原最粗 0.02。默认笔宽(WIDTHS[1])随之从 0.007→0.004。
+export const WIDTHS = [0.0024, 0.004, 0.007, 0.012] as const;
 
 // 该墨迹是否含真实压感（任一样本带 p）。决定 perfect-freehand 是否模拟压感。
 export function hasRealPressure(o: InkObject): boolean {
