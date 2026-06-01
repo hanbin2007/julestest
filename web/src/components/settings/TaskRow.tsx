@@ -1,20 +1,21 @@
 "use client";
 import * as React from "react";
 import { Box, Chip, CircularProgress, IconButton, LinearProgress, Tooltip, Typography } from "@mui/material";
-import DownloadRoundedIcon from "@mui/icons-material/DownloadRounded";
-import ImageRoundedIcon from "@mui/icons-material/ImageRounded";
-import BoltRoundedIcon from "@mui/icons-material/BoltRounded";
-import PauseRoundedIcon from "@mui/icons-material/PauseRounded";
-import PlayArrowRoundedIcon from "@mui/icons-material/PlayArrowRounded";
-import ReplayRoundedIcon from "@mui/icons-material/ReplayRounded";
-import CloseRoundedIcon from "@mui/icons-material/CloseRounded";
-import DeleteOutlineRoundedIcon from "@mui/icons-material/DeleteOutlineRounded";
+import FileDownloadOutlinedIcon from "@mui/icons-material/FileDownloadOutlined";
+import ImageOutlinedIcon from "@mui/icons-material/ImageOutlined";
+import BoltOutlinedIcon from "@mui/icons-material/BoltOutlined";
+import PauseOutlinedIcon from "@mui/icons-material/PauseOutlined";
+import PlayArrowOutlinedIcon from "@mui/icons-material/PlayArrowOutlined";
+import ReplayOutlinedIcon from "@mui/icons-material/ReplayOutlined";
+import CloseOutlinedIcon from "@mui/icons-material/CloseOutlined";
+import DeleteOutlinedIcon from "@mui/icons-material/DeleteOutlined";
 import type { TaskItem, TaskState, TaskVerb } from "@/types/api";
+import { TASK_STATE_LABEL } from "./cacheVocab";
 
 export const KIND = {
-  buffer: { label: "缓冲", Icon: DownloadRoundedIcon, color: "primary" as const },
-  thumb: { label: "缩略图", Icon: ImageRoundedIcon, color: "secondary" as const },
-  prefetch: { label: "预缓存", Icon: BoltRoundedIcon, color: "info" as const },
+  buffer: { label: "缓冲", Icon: FileDownloadOutlinedIcon, color: "primary" as const },
+  thumb: { label: "缩略图", Icon: ImageOutlinedIcon, color: "secondary" as const },
+  prefetch: { label: "预缓存", Icon: BoltOutlinedIcon, color: "info" as const },
 };
 
 // 两个标签：进行中(working/queued/paused) + 历史(DB-backed 全部任务,只读冻结快照)。
@@ -50,21 +51,21 @@ export function availableVerbs(kind: TaskItem["kind"], state: TaskState): TaskVe
 }
 
 type ChipColor = "default" | "primary" | "secondary" | "info" | "warning" | "success" | "error";
-const CHIP: Record<TaskState, { label: string; color: ChipColor }> = {
-  working: { label: "进行中", color: "default" }, // working 实际用 kind 色，见下
-  queued: { label: "排队", color: "default" },
-  paused: { label: "已暂停", color: "warning" },
-  done: { label: "完成", color: "success" },
-  cancelled: { label: "已取消", color: "default" },
-  error: { label: "失败", color: "error" },
+const CHIP: Record<TaskState, { color: ChipColor }> = {
+  working: { color: "default" }, // working 实际用 kind 色，见下
+  queued: { color: "default" },
+  paused: { color: "warning" },
+  done: { color: "success" },
+  cancelled: { color: "default" },
+  error: { color: "error" },
 };
 
-const VERB_BTN: Record<TaskVerb, { title: string; Icon: typeof PauseRoundedIcon; color?: "error" }> = {
-  pause: { title: "暂停", Icon: PauseRoundedIcon },
-  resume: { title: "继续", Icon: PlayArrowRoundedIcon },
-  retry: { title: "重试", Icon: ReplayRoundedIcon },
-  cancel: { title: "取消", Icon: CloseRoundedIcon, color: "error" },
-  dismiss: { title: "清除（从失败列表移除）", Icon: DeleteOutlineRoundedIcon, color: "error" },
+const VERB_BTN: Record<TaskVerb, { title: string; Icon: typeof PauseOutlinedIcon; color?: "error" }> = {
+  pause: { title: "暂停", Icon: PauseOutlinedIcon },
+  resume: { title: "继续", Icon: PlayArrowOutlinedIcon },
+  retry: { title: "重试", Icon: ReplayOutlinedIcon },
+  cancel: { title: "取消", Icon: CloseOutlinedIcon, color: "error" },
+  dismiss: { title: "清除（从失败列表移除）", Icon: DeleteOutlinedIcon, color: "error" },
 };
 
 // 历史时间线时间戳格式化:今天显示 HH:mm,跨天显示 MM-DD HH:mm(本地时间)。
@@ -101,13 +102,14 @@ function TaskRow({
 }) {
   // 防御性兜底：历史里可能混入不在 TaskState/KIND 枚举内的网关瞬态(如缩略图 gen),
   // 直接 CHIP[st]/KIND[kind] 取到 undefined 再读 .color 会抛错把整页 unmount(白屏)。
-  const k = KIND[task.kind] ?? { label: task.kind, Icon: DownloadRoundedIcon, color: "primary" as const };
+  const k = KIND[task.kind] ?? { label: task.kind, Icon: FileDownloadOutlinedIcon, color: "primary" as const };
   const st = task.state;
   // 历史是冻结快照:非终态(残留 working)不转圈,降级成静态点(dotColor 落到 text.disabled 灰点)。
   const working = st === "working" && !isHistory;
   const pct = task.cached != null && task.total ? Math.min(100, (task.cached / task.total) * 100) : null;
-  const chip = CHIP[st] ?? { label: String(st), color: "default" as ChipColor };
+  const chip = CHIP[st] ?? { color: "default" as ChipColor };
   const chipColor: ChipColor = working ? k.color : chip.color;
+  const chipLabel = TASK_STATE_LABEL[st] ?? String(st);
   const verbs = onAction && !isHistory ? availableVerbs(task.kind, st) : [];
   const isPrefetch = task.kind === "prefetch";
   const isThumb = task.kind === "thumb";
@@ -125,7 +127,7 @@ function TaskRow({
         </Box>
       )}
       {/* 类型图标 */}
-      <k.Icon sx={{ fontSize: 16, color: `${k.color}.main`, flexShrink: 0 }} />
+      <k.Icon sx={{ fontSize: 18, color: `${k.color}.main`, flexShrink: 0 }} />
       {/* 标题 + 课程名 + 进度条 */}
       <Box sx={{ minWidth: 0, flex: 1 }}>
         <Typography variant="body2" noWrap title={`${k.label}: ${task.title}`}>
@@ -155,7 +157,7 @@ function TaskRow({
         {isPrefetch && (
           <Chip size="small" variant="outlined" color="info" label="自动·随播放" sx={{ height: 22, fontSize: 11 }} />
         )}
-        <Chip size="small" variant="outlined" color={chipColor} label={chip.label} sx={{ height: 22, fontSize: 11 }} />
+        <Chip size="small" variant="outlined" color={chipColor} label={chipLabel} sx={{ height: 22, fontSize: 11 }} />
         {!isThumb && task.cached != null && (
           <Typography variant="caption" color="text.secondary" sx={{ fontVariantNumeric: "tabular-nums" }}>
             {task.cached}
@@ -182,7 +184,7 @@ function TaskRow({
                     sx={{ p: 0.5 }}
                     aria-label={aria}
                   >
-                    <b.Icon sx={{ fontSize: 16 }} />
+                    <b.Icon sx={{ fontSize: 18 }} />
                   </IconButton>
                 </span>
               </Tooltip>
