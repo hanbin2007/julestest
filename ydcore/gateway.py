@@ -197,6 +197,10 @@ class Gateway:
         # 缩略图雪碧图：服务端用 ffmpeg 生成（复用已缓存分片），供 Artplayer 拖动预览。
         self.thumb_dir = THUMB_DIR
         os.makedirs(self.thumb_dir, exist_ok=True)
+        # 生成的缩略图 JPEG（持久占盘，区别于临时的 thumb_seg_cache 源段）：
+        # 节流缓存其总字节，避免每次 /api/status 都 walk thumb_dir。15s 过期重算。
+        self._thumb_jpeg_bytes = 0
+        self._thumb_jpeg_ts = 0.0
         self.thumb_index_path = os.path.join(self.thumb_dir, "index.json")
         # thumb_jobs.json 跟 thumb_index.json 一个目录, 跨重启保留失败/取消任务的重试上下文。
         self.thumb_jobs_path = os.path.join(self.thumb_dir, "thumb_jobs.json")
@@ -628,6 +632,27 @@ class Gateway:
                 self.seg_cache.ok = False  # 掉盘连锁标记
             return False
 
+    def _thumb_jpeg_total(self):
+        # thumb_dir 下所有 *.jpg（每讲一张 sprite，命名 "<vid>.jpg"）字节合计。
+        # 15s 节流：热路径(/api/status 每秒)不重复 walk；冷数据足够新。time.time() 网关已用。
+        now = time.time()
+        if now - self._thumb_jpeg_ts < 15 and self._thumb_jpeg_ts > 0:
+            return self._thumb_jpeg_bytes
+        total = 0
+        try:
+            with os.scandir(self.thumb_dir) as it:
+                for e in it:
+                    if e.is_file() and e.name.endswith(".jpg"):
+                        try:
+                            total += e.stat().st_size
+                        except OSError:
+                            pass
+        except OSError:
+            pass
+        self._thumb_jpeg_bytes = total
+        self._thumb_jpeg_ts = now
+        return total
+
     def _thumb_dir_ok(self):
         """缩略图持久化目录(thumb_dir)当前是否可写 —— 与段盘 seg_cache.ok 完全解耦(#17)。
         thumb_index/thumb_jobs 都落在 thumb_dir(默认 ~/.youdao_course/thumbs, 多在系统盘),
@@ -1039,6 +1064,8 @@ class Gateway:
         self.thumb_lock = threading.Lock()
         self.thumb_q = queue.Queue()
         self.have_ffmpeg = False
+        self._thumb_jpeg_bytes = 0
+        self._thumb_jpeg_ts = 0.0
 
         # 整集缓冲
         self.seg_urls = {}
@@ -1361,6 +1388,7 @@ class Gateway:
                 # [发射点 5] gen->ready 终态落地(thumb 历史的"完成"用 done 表示)。
                 # 在 cancelled 守卫之内: 被取消的不会进这支, 故不与 act cancel 重复(R7)。
                 self._emit_task_event("thumb", vid, "done")
+                self._thumb_jpeg_ts = 0.0  # 失效 JPEG 字节缓存：下次 /api/status 立即重算纳入新图
             else:
                 # rc==0 但文件损坏(半截/非 JPEG) 也算 error: 与启动校验同口径。
                 # 超时单独成因(reason 含 timeout, 供 web 区分"卡死被砍"vs"ffmpeg 真失败")。
@@ -2344,7 +2372,8 @@ def make_handler(gateway):
                           "session": tsession,
                           # 缩略图源段在磁盘的总字节: 直接读独立桶 thumb_seg_cache.size(#1,#8),
                           # 物理分离、不再和播放桶 seg_cache.size 混算(消除 #8 双计)。
-                          "bytes": gw.thumb_seg_cache.size},
+                          "bytes": gw.thumb_seg_cache.size,
+                          "jpegBytes": gw._thumb_jpeg_total()},
                 "buffer": {"perVid": buffer, "bytes": gw.seg_cache.size, "limit": gw.seg_cache.max,
                            "queued": gw.buf_q.qsize(),
                            "working": [k for k, s in bstates.items() if s == "working"],
