@@ -132,7 +132,8 @@ function CourseStatusCard({
         transition: "transform .15s, box-shadow .15s",
         "&:hover": {
           transform: "translateY(-2px)",
-          boxShadow: "0 6px 20px rgba(0,0,0,.18)",
+          boxShadow: 6,
+          bgcolor: "md3.surfaceContainerHigh",
         },
         "&:focus-visible": {
           outline: "2px solid",

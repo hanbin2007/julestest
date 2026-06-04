@@ -86,7 +86,7 @@ export default function NoteCard({
         transition: "transform .15s, box-shadow .15s",
         // 课程色不在卡上重复（与分组标题色点冗余）；仅选中时描边强调
         ...(selected && { outline: `2px solid ${color}`, outlineOffset: "-1px" }),
-        "&:hover": editing ? {} : { transform: "translateY(-2px)", boxShadow: "0 6px 20px rgba(0,0,0,.18)" },
+        "&:hover": editing ? {} : { transform: "translateY(-2px)", boxShadow: 6, bgcolor: "md3.surfaceContainerHigh" },
         "&:focus-visible": { outline: "2px solid", outlineColor: color, outlineOffset: 2 },
       }}
     >

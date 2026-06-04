@@ -30,7 +30,7 @@ export default function SettingsNav() {
         flexShrink: 0,
         p: 1.5,
         borderRight: (t) => `1px solid ${t.palette.divider}`,
-        bgcolor: "md3.surface",
+        bgcolor: "md3.surfaceContainerLow",
         overflowY: "auto",
       }}
     >

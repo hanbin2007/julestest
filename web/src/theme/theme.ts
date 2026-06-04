@@ -30,7 +30,7 @@ function schemePalette(t: Md3Tokens) {
     // info 走 MD3 tertiary、warning 走统一琥珀——不再落到 MUI 默认的蓝/琥珀
     warning: { main: WARNING, contrastText: "#2a1d00" },
     info: { main: t.tertiary, contrastText: t.onTertiary },
-    background: { default: t.background, paper: t.surfaceContainerLow },
+    background: { default: t.background, paper: t.surfaceContainer },
     text: { primary: t.onSurface, secondary: t.onSurfaceVariant },
     divider: t.outlineVariant,
     md3: t,
@@ -89,7 +89,7 @@ export function buildTheme(seed: string = SEED) {
         styleOverrides: {
           root: ({ theme }) => ({
             borderRadius: theme.radius.md,
-            backgroundColor: (theme.vars ?? theme).palette.md3.surfaceContainerLow,
+            backgroundColor: (theme.vars ?? theme).palette.md3.surfaceContainer,
             border: `1px solid ${(theme.vars ?? theme).palette.md3.outlineVariant}`,
           }),
         },

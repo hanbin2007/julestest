@@ -29,6 +29,21 @@ function ThemeModeToggle() {
   );
 }
 
+// 内容滚动时给顶栏加阴影"浮起"(Cloudreve 风)。各页滚动容器不同,用捕获阶段监听任意嵌套滚动源。
+function useScrollElevated() {
+  const [elevated, setElevated] = React.useState(false);
+  React.useEffect(() => {
+    const onScroll = (e: Event) => {
+      const t = e.target as HTMLElement | Document | null;
+      const top = !t || t === document ? window.scrollY : (t as HTMLElement).scrollTop ?? 0;
+      setElevated(top > 4);
+    };
+    window.addEventListener("scroll", onScroll, true);
+    return () => window.removeEventListener("scroll", onScroll, true);
+  }, []);
+  return elevated;
+}
+
 export default function AppTopBar({
   onMenu,
   menuTooltip,
@@ -46,8 +61,17 @@ export default function AppTopBar({
   const onHome = !onSettings && !onNotes && !onChats;
   // 全局活跃指示器:任一 chat 在后台跑 → /chats 图标右上角加 dot,点击进 /chats 看具体哪个。
   const anyStreaming = useAnyChatStreaming();
+  const elevated = useScrollElevated();
   return (
-    <AppBar position="static">
+    <AppBar
+      position="static"
+      elevation={0}
+      sx={{
+        transition: "box-shadow .2s ease, background-color .2s ease",
+        boxShadow: elevated ? 6 : "none",
+        ...(elevated && { backgroundColor: "md3.surfaceContainer" }),
+      }}
+    >
       <Toolbar variant="dense" sx={{ gap: 1 }}>
         {onMenu && (
           <Tooltip title={menuTooltip ?? "目录"}>

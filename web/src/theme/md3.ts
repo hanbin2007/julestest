@@ -69,9 +69,11 @@ function tokensFromScheme(scheme: any, neutral: any, dark: boolean): Md3Tokens {
     onError: H(scheme.onError),
     errorContainer: H(scheme.errorContainer),
     onErrorContainer: H(scheme.onErrorContainer),
-    background: H(scheme.background),
+    // 暗色:不沿用 legacy scheme(它把 background/surface 都给了 tone10,与 surfaceContainerLow 撞色→层次塌陷)。
+    // 改用 neutral tone 6,让容器层(tone10/12…)能从背景上"浮"起来;浅色保持 tone98(MD3 规范)。
+    background: tone(dark ? 6 : 98),
     onBackground: H(scheme.onBackground),
-    surface: H(scheme.surface),
+    surface: tone(dark ? 6 : 98),
     onSurface: H(scheme.onSurface),
     surfaceVariant: H(scheme.surfaceVariant),
     onSurfaceVariant: H(scheme.onSurfaceVariant),
