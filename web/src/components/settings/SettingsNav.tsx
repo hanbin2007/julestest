@@ -8,6 +8,7 @@ import StorageOutlinedIcon from "@mui/icons-material/StorageOutlined";
 import ChecklistRoundedIcon from "@mui/icons-material/ChecklistRounded";
 import TuneRoundedIcon from "@mui/icons-material/TuneRounded";
 import { useSettingsData } from "./SettingsDataContext";
+import { smoothColors } from "@/theme/motion";
 
 // 左侧子导航：4 个真实子路由。MD3 图标 + active pill；缓存管理显示已缓存讲数，任务显示失败数(标红)。
 const ITEMS = [
@@ -45,21 +46,22 @@ export default function SettingsNav() {
             key={href}
             component={Link}
             href={href}
-            sx={{
+            sx={(t) => ({
               display: "flex",
               alignItems: "center",
               gap: 1.25,
               px: 1.75,
               py: 1.1,
               mb: 0.25,
-              borderRadius: (t) => t.radius.full,
+              borderRadius: t.radius.full,
               whiteSpace: "nowrap",
               fontWeight: 600,
               fontSize: 13.5,
               color: active ? "md3.onPrimaryContainer" : "text.secondary",
               bgcolor: active ? "md3.primaryContainer" : "transparent",
+              transition: smoothColors(t, ["background-color", "color"]),
               "&:hover": { bgcolor: active ? "md3.primaryContainer" : "action.hover" },
-            }}
+            })}
           >
             <Icon sx={{ fontSize: 18, flexShrink: 0 }} />
             <Box sx={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis" }}>{label}</Box>

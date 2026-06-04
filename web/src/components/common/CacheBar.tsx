@@ -4,6 +4,7 @@ import { Box, Tooltip, Typography } from "@mui/material";
 import { alpha, keyframes } from "@mui/material/styles";
 import type { SegmentMap } from "@/types/api";
 import { coverageLabel } from "@/components/settings/cacheVocab";
+import { DUR, smoothColors } from "@/theme/motion";
 
 // 缓冲中：一道高光从左扫到右，提示"正在补片"。
 const sweep = keyframes`
@@ -82,6 +83,7 @@ function CacheBar({
         borderRadius: height / 2,
         overflow: "hidden",
         bgcolor: track,
+        transition: (t) => smoothColors(t, ["background-color"]),
         width: "100%",
         display: "flex",
       }}
@@ -95,14 +97,14 @@ function CacheBar({
               flex: 1,
               minWidth: 0,
               bgcolor: (t) => (cov > 0 ? alpha(fill(t), 0.4 + 0.6 * Math.min(cov, 1)) : "transparent"),
-              transition: "background-color .3s ease",
+              transition: (t) => smoothColors(t, ["background-color"]),
             }}
           />
         ))
       ) : knownTotal ? (
         // 模式 2a：比例填充（已知总数）
         <Box sx={{ position: "absolute", inset: 0, width: `${pct}%`, bgcolor: fill,
-          borderRadius: height / 2, transition: "width .4s ease" }} />
+          borderRadius: height / 2, transition: (t) => smoothColors(t, ["width", "background-color"], DUR.long) }} />
       ) : partialUnknown ? (
         // 模式 2b：总数未知但已缓存 → 不确定态斜纹（流动），诚实表达「在缓存、比例未知」。
         // 周期位移 = 条纹周期/cos45°(=25.456px)，整周期对齐 → 无缝循环不抽搐（勿用 background-size 缩放）。

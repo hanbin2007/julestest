@@ -32,7 +32,7 @@ export default function UpNextCountdown({
           initial={{ opacity: 0, y: 16 }}
           animate={{ opacity: 1, y: 0 }}
           exit={{ opacity: 0, y: 16 }}
-          transition={{ type: "spring", stiffness: 380, damping: 30 }}
+          transition={{ type: "tween", duration: 0.2, ease: "easeOut" }}
           style={{ position: "absolute", right: 16, bottom: 16, zIndex: 20 }}
         >
           <Card sx={{ p: 2, width: 300, bgcolor: "md3.surfaceContainerHigh" }}>

@@ -26,6 +26,7 @@ import { useChatStream } from "@/hooks/useChatStream";
 import * as chatStreams from "@/lib/chatStreams";
 import * as api from "@/lib/api";
 import type { EnrichedChat } from "@/lib/store";
+import { smoothColors } from "@/theme/motion";
 
 // 「已 12s · 142 字」label。秒数靠 useNow tick;字数靠 useChatStream 订阅。
 function useNowTick(active: boolean): number {
@@ -87,6 +88,7 @@ function ChatRow({
         py: 1,
         borderRadius: (t) => t.radius.sm,
         cursor: editing ? "default" : "pointer",
+        transition: (t) => smoothColors(t, ["background-color"]),
         "&:hover": { bgcolor: "action.hover" },
         bgcolor: active ? "action.selected" : "transparent",
       }}
@@ -182,7 +184,7 @@ function ChatRow({
               <IconButton
                 size="small"
                 aria-label="delete chat"
-                sx={{ color: "text.disabled", "&:hover": { color: "error.main" } }}
+                sx={{ transition: (t) => smoothColors(t), color: "text.disabled", "&:hover": { color: "error.main" } }}
                 onClick={async (e) => {
                   e.stopPropagation();
                   await api.deleteChat(chat.id);

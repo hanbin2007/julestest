@@ -9,6 +9,7 @@ import ReplayRoundedIcon from "@mui/icons-material/ReplayRounded";
 import { fmtDur } from "@/lib/media";
 import type { Video } from "@/types/api";
 import type { GroupNode } from "./sidebarTree";
+import { DUR, EASE, smoothColors } from "@/theme/motion";
 
 // 板块标题（视频 / 直播回放）。
 export function BoardLabel({
@@ -80,8 +81,9 @@ export function VideoRow({
         "&.Mui-selected": {
           bgcolor: `color-mix(in srgb, ${color} 22%, transparent)`,
         },
-        // 左侧选中指示：圆角药丸，竖直内缩避开行圆角——不再被圆角裁出怪弧
-        "&.Mui-selected::before": {
+        // 左侧选中指示：圆角药丸,竖直内缩避开行圆角——不再被圆角裁出怪弧。
+        // 指示条始终生成(仅 opacity 0/1 切换),否则伪元素「不存在→存在」无法过渡仍会瞬现。
+        "&::before": {
           content: '""',
           position: "absolute",
           left: 0,
@@ -90,15 +92,20 @@ export function VideoRow({
           width: "3px",
           borderRadius: "999px",
           backgroundColor: color,
+          opacity: 0,
+          transition: (t) => smoothColors(t, ["opacity"]),
+        },
+        "&.Mui-selected::before": {
+          opacity: 1,
         },
       }}
     >
       {v.locked ? (
         <LockOutlinedIcon sx={{ fontSize: 16, color: "text.disabled" }} />
       ) : v.kind === "live" ? (
-        <ReplayRoundedIcon sx={{ fontSize: 17, color: active ? color : "text.secondary" }} />
+        <ReplayRoundedIcon sx={{ fontSize: 17, transition: (t) => smoothColors(t, ["color"]), color: active ? color : "text.secondary" }} />
       ) : (
-        <PlayArrowRoundedIcon sx={{ fontSize: 18, color: active ? color : "text.secondary" }} />
+        <PlayArrowRoundedIcon sx={{ fontSize: 18, transition: (t) => smoothColors(t, ["color"]), color: active ? color : "text.secondary" }} />
       )}
       <Typography
         variant="body2"
@@ -136,7 +143,7 @@ export function GroupEl({
     <Box sx={{ ml: 0.5 }}>
       <ListItemButton onClick={() => onToggle(node.key)} sx={{ borderRadius: (t) => t.radius.sm, py: 0.5, gap: 0.5 }}>
         <ChevronRightIcon
-          sx={{ fontSize: 16, transition: ".18s", transform: open ? "rotate(90deg)" : "none", color: "text.secondary" }}
+          sx={{ fontSize: 16, transition: `transform ${DUR.base}ms ${EASE}`, transform: open ? "rotate(90deg)" : "none", color: "text.secondary" }}
         />
         <Typography variant="caption" sx={{ fontWeight: 700, color: "text.secondary" }}>
           {node.name}

@@ -6,6 +6,7 @@ import { useProgressMap } from "@/hooks/persist";
 import { useCourses } from "@/hooks/data";
 import { hashSeed } from "@/lib/color";
 import { fmtDur } from "@/lib/media";
+import { hoverElevate } from "@/theme/motion";
 
 export default function ContinueWatchingRail({
   onResume,
@@ -38,10 +39,10 @@ export default function ContinueWatchingRail({
           const title = e.title ?? `视频 ${videoId}`;
           const ratio = Math.min(1, e.t / e.d);
           return (
-            <motion.div key={`${productId}:${videoId}`} whileHover={{ y: -3 }} style={{ flex: "0 0 auto" }}>
+            <motion.div key={`${productId}:${videoId}`} style={{ flex: "0 0 auto" }}>
               <Card
                 onClick={() => onResume(productId, videoId)}
-                sx={{ width: 240, p: 1.5, cursor: "pointer", borderColor: color }}
+                sx={(t) => ({ ...hoverElevate(t), width: 240, p: 1.5, cursor: "pointer", borderColor: color })}
               >
                 <Box sx={{ display: "flex", alignItems: "center", gap: 1, mb: 1 }}>
                   <PlayCircleFilledRoundedIcon sx={{ color }} />

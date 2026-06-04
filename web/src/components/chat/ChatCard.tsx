@@ -20,6 +20,7 @@ import LinkOffRoundedIcon from "@mui/icons-material/LinkOffRounded";
 import { useChatStream } from "@/hooks/useChatStream";
 import * as chatStreams from "@/lib/chatStreams";
 import { hashSeed } from "@/lib/color";
+import { hoverElevate, smoothColors, DUR, EASE } from "@/theme/motion";
 import type { EnrichedChat } from "@/lib/store";
 
 // 中心页一张聊天卡。订阅自身流态:streaming 时顶部贴 LinearProgress + 角落 Stop;error 显示警告 chip。
@@ -77,7 +78,7 @@ export default function ChatCard({
           onOpen(chat);
         }
       }}
-      sx={{
+      sx={(t) => ({
         position: "relative",
         p: 1.5,
         height: "100%",
@@ -85,14 +86,18 @@ export default function ChatCard({
         flexDirection: "column",
         gap: 1,
         cursor: editing ? "default" : "pointer",
-        transition: "transform 120ms, box-shadow 120ms",
-        outline: streaming ? (t) => `1.5px solid ${t.palette.primary.main}` : "none",
-        "&:hover": editing
-          ? undefined
-          : { transform: "translateY(-2px)", boxShadow: (t) => t.shadows[4] },
+        ...hoverElevate(t),
+        // 始终保留 outline,仅在透明 ↔ primary 之间过渡,使流式描边淡入淡出。
+        outline: `1.5px solid ${streaming ? (t.vars ?? t).palette.primary.main : "transparent"}`,
+        // 在 hoverElevate(background-color/box-shadow)基础上追加 outline-color,统一时长/缓动。
+        transition: t.transitions.create(
+          ["background-color", "box-shadow", "outline-color"],
+          { duration: DUR.base, easing: EASE },
+        ),
+        ...(editing ? { "&:hover": undefined } : {}),
         "&:focus-visible": { outline: `2px solid ${color}`, outlineOffset: 1 },
         overflow: "hidden",
-      }}
+      })}
     >
       {streaming && (
         <LinearProgress
@@ -243,7 +248,12 @@ export default function ChatCard({
               size="small"
               onClick={() => void onDelete(chat.id)}
               aria-label="delete chat"
-              sx={{ color: "text.disabled", "&:hover": { color: "error.main" } }}
+              // color(灰→红)与默认 hover 背景都纳入过渡,避免 0ms 硬切。
+              sx={(t) => ({
+                color: "text.disabled",
+                transition: smoothColors(t),
+                "&:hover": { color: "error.main" },
+              })}
             >
               <DeleteOutlineRoundedIcon sx={{ fontSize: 18 }} />
             </IconButton>

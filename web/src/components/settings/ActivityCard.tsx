@@ -4,6 +4,7 @@ import { Box, Card, Typography } from "@mui/material";
 import { alpha, keyframes } from "@mui/material/styles";
 import ChevronRightRoundedIcon from "@mui/icons-material/ChevronRightRounded";
 import { useSettingsData } from "./SettingsDataContext";
+import { smoothColors } from "@/theme/motion";
 
 // 不确定态斜纹（流动）：周期位移 = 9px/18px·45° 条纹的一个完整周期(25.456px)，无缝循环。
 const flow = keyframes`from { background-position: 0 0; } to { background-position: 25.456px 0; }`;
@@ -54,6 +55,7 @@ export default function ActivityCard() {
           py: 1.25,
           borderRadius: (t) => t.radius.md,
           bgcolor: "md3.surfaceContainerHigh",
+          transition: (t) => smoothColors(t, ["background-color"]),
           "&:hover": { bgcolor: "action.hover" },
         }}
       >

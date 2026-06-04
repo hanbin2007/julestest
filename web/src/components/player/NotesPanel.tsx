@@ -27,6 +27,7 @@ import { hashSeed } from "@/lib/color";
 import { fmtDur } from "@/lib/media";
 import type { EnrichedNote } from "@/lib/store";
 import NotePreview from "@/components/notes/NotePreview";
+import { smoothColors } from "@/theme/motion";
 
 // 分屏时面板宽度（与 ChatPanel 的 CHAT_WIDTH 同类常量，供 page.tsx 算播放器右偏移）。
 export const NOTES_WIDTH = 400;
@@ -313,6 +314,7 @@ function NoteRow({
         gap: 1,
         p: 0.75,
         borderRadius: (t) => t.radius.sm,
+        transition: (t) => smoothColors(t, ["background-color"]),
         "&:hover": { bgcolor: "action.hover" },
       }}
     >

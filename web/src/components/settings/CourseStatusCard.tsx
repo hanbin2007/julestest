@@ -9,6 +9,7 @@ import DownloadRoundedIcon from "@mui/icons-material/DownloadRounded";
 import ImageRoundedIcon from "@mui/icons-material/ImageRounded";
 import { hashSeed } from "@/lib/color";
 import { fmtBytes } from "@/lib/media";
+import { hoverElevate, smoothColors } from "@/theme/motion";
 import type { CourseStatus } from "@/types/api";
 
 // 缓存双环：底轨 + 部分缓存(淡)到 partialRatio + 整集缓存(实)到 fullRatio；内圈=已看。
@@ -122,19 +123,14 @@ function CourseStatusCard({
       aria-label={`打开 ${course.name} 详情`}
       onClick={() => onOpen(course)}
       onKeyDown={handleKeyDown}
-      sx={{
+      sx={(t) => ({
+        ...hoverElevate(t),
         p: 1.5,
         height: "100%",
         display: "flex",
         flexDirection: "column",
         cursor: "pointer",
         position: "relative",
-        transition: "transform .15s, box-shadow .15s",
-        "&:hover": {
-          transform: "translateY(-2px)",
-          boxShadow: 6,
-          bgcolor: "md3.surfaceContainerHigh",
-        },
         "&:focus-visible": {
           outline: "2px solid",
           outlineColor: color,
@@ -143,12 +139,12 @@ function CourseStatusCard({
         // Actions: visible at rest on mobile; subtly visible on desktop, full on hover/focus-within
         "& .card-actions": {
           opacity: { xs: 1, md: 0.55 },
-          transition: "opacity .15s",
+          transition: smoothColors(t, ["opacity"]),
         },
         "&:hover .card-actions, &:focus-within .card-actions": {
           opacity: 1,
         },
-      }}
+      })}
     >
       {/* Header: title (2-line clamp) + optional card-type chip */}
       <Box sx={{ display: "flex", alignItems: "flex-start", gap: 0.5, mb: 1 }}>

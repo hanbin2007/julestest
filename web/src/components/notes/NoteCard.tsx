@@ -11,6 +11,7 @@ import OpenInFullRoundedIcon from "@mui/icons-material/OpenInFullRounded";
 import NotePreview from "./NotePreview";
 import NoteViewer from "./NoteViewer";
 import { fmtDur } from "@/lib/media";
+import { hoverElevate, smoothColors } from "@/theme/motion";
 import type { EnrichedNote } from "@/lib/store";
 
 export default function NoteCard({
@@ -75,19 +76,33 @@ export default function NoteCard({
           cardClick();
         }
       }}
-      sx={{
-        p: 1.5,
-        height: "100%",
-        position: "relative",
-        display: "flex",
-        flexDirection: "column",
-        gap: 1,
-        cursor: editing ? "default" : "pointer",
-        transition: "transform .15s, box-shadow .15s",
-        // 课程色不在卡上重复（与分组标题色点冗余）；仅选中时描边强调
-        ...(selected && { outline: `2px solid ${color}`, outlineOffset: "-1px" }),
-        "&:hover": editing ? {} : { transform: "translateY(-2px)", boxShadow: 6, bgcolor: "md3.surfaceContainerHigh" },
-        "&:focus-visible": { outline: "2px solid", outlineColor: color, outlineOffset: 2 },
+      sx={(t) => {
+        const elevate = hoverElevate(t);
+        return {
+          ...elevate,
+          // hoverElevate 的过渡 + 选中描边色的平滑显隐（outline-style 不可动画，故用常驻透明描边只动色）
+          transition: `${elevate.transition}, ${smoothColors(t, ["outline-color"])}`,
+          p: 1.5,
+          height: "100%",
+          position: "relative",
+          display: "flex",
+          flexDirection: "column",
+          gap: 1,
+          cursor: editing ? "default" : "pointer",
+          // 课程色不在卡上重复（与分组标题色点冗余）；仅选中时描边强调，常驻透明描边使切换可平滑过渡
+          outline: "2px solid transparent",
+          outlineOffset: "-1px",
+          ...(selected && { outlineColor: color }),
+          // 编辑态不响应悬停反馈
+          ...(editing && { "&:hover": {} }),
+          // 焦点环属 a11y，保持瞬时：覆盖 transition 排除 outline-color
+          "&:focus-visible": {
+            outline: "2px solid",
+            outlineColor: color,
+            outlineOffset: 2,
+            transition: elevate.transition,
+          },
+        };
       }}
     >
       {selectMode && (
