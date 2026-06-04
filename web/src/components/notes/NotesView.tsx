@@ -17,6 +17,8 @@ import DownloadRoundedIcon from "@mui/icons-material/DownloadRounded";
 import CloseRoundedIcon from "@mui/icons-material/CloseRounded";
 import NoteAltOutlinedIcon from "@mui/icons-material/NoteAltOutlined";
 import { useAllNotes } from "@/hooks/persist";
+import { DataBoundary } from "@/components/common/DataBoundary";
+import { CardGridSkeleton } from "@/components/common/Skeletons";
 import { useToast } from "@/components/common/Toast";
 import { hashSeed } from "@/lib/color";
 import { fmtDur } from "@/lib/media";
@@ -48,7 +50,7 @@ function StatNum({ n, label }: { n: number; label: string }) {
 export default function NotesView() {
   const router = useRouter();
   const toast = useToast();
-  const { notes, stats, update, remove, removeBatch } = useAllNotes();
+  const { notes, stats, update, remove, removeBatch, error, isLoading, mutate } = useAllNotes();
   const [q, setQ] = React.useState("");
   const [courseId, setCourseId] = React.useState("");
   const [sort, setSort] = React.useState<Sort>("time");
@@ -283,13 +285,24 @@ export default function NotesView() {
       </Card>
 
       {notes.length === 0 ? (
-        <Stack alignItems="center" spacing={1} sx={{ py: 8, color: "text.secondary" }}>
-          <NoteAltOutlinedIcon sx={{ fontSize: 48, opacity: 0.5 }} />
-          <Typography variant="body2">还没有任何笔记。</Typography>
-          <Typography variant="caption">
-            在看课页按 <b>B</b> 记书签，或用右侧「笔记」抽屉记一条。
-          </Typography>
-        </Stack>
+        <DataBoundary
+          loading={isLoading}
+          error={error}
+          isEmpty={!isLoading && !error}
+          onRetry={() => void mutate?.()}
+          skeleton={<CardGridSkeleton />}
+          empty={
+            <Stack alignItems="center" spacing={1} sx={{ py: 8, color: "text.secondary" }}>
+              <NoteAltOutlinedIcon sx={{ fontSize: 48, opacity: 0.5 }} />
+              <Typography variant="body2">还没有任何笔记。</Typography>
+              <Typography variant="caption">
+                在看课页按 <b>B</b> 记书签，或用右侧「笔记」抽屉记一条。
+              </Typography>
+            </Stack>
+          }
+        >
+          {null}
+        </DataBoundary>
       ) : shownCount === 0 ? (
         <Typography variant="body2" color="text.secondary" sx={{ p: 3, textAlign: "center" }}>
           无匹配笔记

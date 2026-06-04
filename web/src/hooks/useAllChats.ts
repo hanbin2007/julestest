@@ -8,7 +8,7 @@ import type { ChatsStats, EnrichedChat } from "@/lib/store";
 // 中心页 /chats 用:全量富化聊天列表 + 统计。变更后顺手扫所有 /api/chats? 变体让切换器同步。
 export function useAllChats() {
   const key = api.chatsListKey(); // "/api/chats"
-  const { data, mutate } = useSWR(key, () => api.getChats(), {
+  const { data, error, isLoading, mutate } = useSWR(key, () => api.getChats(), {
     revalidateOnFocus: true,
   });
   const chats: EnrichedChat[] = data?.chats ?? [];
@@ -46,5 +46,5 @@ export function useAllChats() {
     [refresh],
   );
 
-  return { chats, stats, create, rename, remove };
+  return { chats, stats, create, rename, remove, error, isLoading, refresh };
 }

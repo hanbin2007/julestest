@@ -11,6 +11,16 @@ export function SidebarSkeleton() {
   );
 }
 
+export function CardGridSkeleton({ count = 6 }: { count?: number }) {
+  return (
+    <Box sx={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: 2 }}>
+      {Array.from({ length: count }).map((_, i) => (
+        <Skeleton key={i} variant="rounded" height={150} sx={{ borderRadius: (t) => t.radius.md }} />
+      ))}
+    </Box>
+  );
+}
+
 export function PlayerSkeleton() {
   return (
     <Box sx={{ width: "100%", maxWidth: 1100, mx: "auto" }}>

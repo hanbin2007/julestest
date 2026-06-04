@@ -23,7 +23,7 @@
 | 阶段 | 内容 | 风险 | 状态 |
 |---|---|---|---|
 | **0 · 深度地基** | md3 表面层次 + chrome 滚动浮起 + hover 阴影 | 低代码/全局 | ✅ 已实现+验证 |
-| 1 · 边缘态 | hooks 暴露 error/loading;notes/chats skeleton+error+empty;播放器重试;设置无假红;error.tsx/ErrorBoundary | 中 | 待批设计 |
+| 1 · 边缘态 | hooks 暴露 error/loading;notes/chats skeleton+error+empty;播放器重试;设置无假红;error.tsx/ErrorBoundary | 中 | 🔄 列表+兜底已实现,余播放器/设置假红 |
 | 2 · 动效/反馈 | chat 乐观改名/删除;列表 AnimatePresence;导航 pill 过渡;transitions token | 中 | 待批设计 |
 | 3 · 网格归一 | 间距→×8;排版→variants;抽 StatNum/StatusDot/LiftCard | 低/多文件 | 待批设计 |
 | 4 · AppShell+chrome | 单一 AppShell(统一 maxWidth/对齐);顶栏空洞→实时上下文;返回键→左;双标题;设置密度 | 高/全路由 | 待批设计 |

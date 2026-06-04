@@ -105,7 +105,7 @@ export function useNotes(videoId: number | null, productId: number | null = null
 // 统一管理：全量富化笔记 + 统计。改/删复用单讲端点，删按全局唯一 id 批量。
 // 每次变更顺带重验对应单讲 key(/api/notes?videoId=)，让看课页抽屉同步。
 export function useAllNotes() {
-  const { data, mutate } = useSWR("/api/notes/all", () => api.getAllNotes(), {
+  const { data, error, isLoading, mutate } = useSWR("/api/notes/all", () => api.getAllNotes(), {
     revalidateOnFocus: true,
   });
   const notes: EnrichedNote[] = data?.notes ?? [];
@@ -174,7 +174,7 @@ export function useAllNotes() {
     );
   };
 
-  return { notes, stats, update, remove, removeBatch };
+  return { notes, stats, update, remove, removeBatch, error, isLoading, mutate };
 }
 
 export function usePrefs() {

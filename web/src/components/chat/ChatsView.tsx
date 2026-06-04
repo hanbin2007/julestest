@@ -14,6 +14,8 @@ import {
 import AddRoundedIcon from "@mui/icons-material/AddRounded";
 import ForumOutlinedIcon from "@mui/icons-material/ForumOutlined";
 import { useAllChats } from "@/hooks/useAllChats";
+import { DataBoundary } from "@/components/common/DataBoundary";
+import { CardGridSkeleton } from "@/components/common/Skeletons";
 import { useToast } from "@/components/common/Toast";
 import { hashSeed } from "@/lib/color";
 import type { EnrichedChat } from "@/lib/store";
@@ -47,7 +49,7 @@ export default function ChatsView() {
   const router = useRouter();
   const sp = useSearchParams();
   const toast = useToast();
-  const { chats, stats, create, rename, remove } = useAllChats();
+  const { chats, stats, create, rename, remove, error, isLoading, refresh } = useAllChats();
   const [q, setQ] = React.useState("");
   const [kind, setKind] = React.useState<KindFilter>("all");
   const [courseId, setCourseId] = React.useState("");
@@ -253,13 +255,24 @@ export default function ChatsView() {
       </Card>
 
       {chats.length === 0 ? (
-        <Stack alignItems="center" spacing={1} sx={{ py: 8, color: "text.secondary" }}>
-          <ForumOutlinedIcon sx={{ fontSize: 48, opacity: 0.5 }} />
-          <Typography variant="body2">还没有任何对话。</Typography>
-          <Typography variant="caption">
-            在看课页打开 AI 助教开始一段,或点上方「新建独立对话」。
-          </Typography>
-        </Stack>
+        <DataBoundary
+          loading={isLoading}
+          error={error}
+          isEmpty={!isLoading && !error}
+          onRetry={() => refresh()}
+          skeleton={<CardGridSkeleton />}
+          empty={
+            <Stack alignItems="center" spacing={1} sx={{ py: 8, color: "text.secondary" }}>
+              <ForumOutlinedIcon sx={{ fontSize: 48, opacity: 0.5 }} />
+              <Typography variant="body2">还没有任何对话。</Typography>
+              <Typography variant="caption">
+                在看课页打开 AI 助教开始一段,或点上方「新建独立对话」。
+              </Typography>
+            </Stack>
+          }
+        >
+          {null}
+        </DataBoundary>
       ) : shownCount === 0 ? (
         <Typography variant="body2" color="text.secondary" sx={{ p: 3, textAlign: "center" }}>
           无匹配对话
