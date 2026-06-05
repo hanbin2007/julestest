@@ -77,7 +77,7 @@ export function markRecentAction(): void {
  *  「忙」= 队列有活 / 有任意非终态任务(working|queued|paused) / 刚发起过控制动作。
  *  另外按相邻两次 bufferBytes 差分出下载速率(bytes/s)，给活动面板做迷你折线。 */
 export function useCoursesStatus() {
-  const { data, mutate } = useSWR<CoursesStatus>("/api/courses/status", () => getCoursesStatus(), {
+  const { data, error, mutate } = useSWR<CoursesStatus>("/api/courses/status", () => getCoursesStatus(), {
     revalidateOnFocus: false,
     keepPreviousData: true,
     dedupingInterval: 800,
@@ -112,5 +112,5 @@ export function useCoursesStatus() {
     setBps((s) => ({ bps: rate, series: [...s.series, rate].slice(-30) }));
   }, [data]);
 
-  return { data, refresh: mutate, bps };
+  return { data, error: error as Error | undefined, refresh: mutate, bps };
 }

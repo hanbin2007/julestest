@@ -15,6 +15,8 @@ export default function SettingsChrome() {
   const t = data?.totals;
   const toast = useToast();
   const [busy, setBusy] = React.useState(false);
+  // 首轮轮询前 data 未到：状态点/ffmpeg/新鲜度渲染中性「检测中…」，不要从假值派生红色「网关离线」。
+  const pending = !data;
   const online = !!h?.gatewayOnline;
   const paused = !!h?.bgPaused;
 
@@ -45,11 +47,18 @@ export default function SettingsChrome() {
       }}
     >
       <Box sx={{ display: "flex", alignItems: "center", gap: 0.75 }}>
-        <Box sx={{ width: 8, height: 8, borderRadius: "50%", bgcolor: online ? "success.main" : "error.main" }} />
-        <Typography variant="caption" color="text.secondary">{online ? "网关在线" : "网关离线"}</Typography>
+        <Box
+          sx={{
+            width: 8,
+            height: 8,
+            borderRadius: "50%",
+            bgcolor: pending ? "text.disabled" : online ? "success.main" : "error.main",
+          }}
+        />
+        <Typography variant="caption" color="text.secondary">{pending ? "网关检测中…" : online ? "网关在线" : "网关离线"}</Typography>
       </Box>
-      <Typography variant="caption" color="text.secondary">ffmpeg {h?.ffmpeg ? "✓" : "✗"}</Typography>
-      <Typography variant="caption" color="text.secondary">{h?.stale ? "数据陈旧" : "数据实时"}</Typography>
+      <Typography variant="caption" color="text.secondary">ffmpeg {pending ? "检测中…" : h?.ffmpeg ? "✓" : "✗"}</Typography>
+      <Typography variant="caption" color="text.secondary">{pending ? "数据检测中…" : h?.stale ? "数据陈旧" : "数据实时"}</Typography>
       {t && (
         <Typography variant="caption" color="text.secondary" sx={{ fontVariantNumeric: "tabular-nums" }}>
           播放 {fmtBytes(t.bufferBytes)} / {fmtBytes(t.bufferLimit)}

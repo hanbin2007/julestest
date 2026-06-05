@@ -13,6 +13,8 @@ const flow = keyframes`from { background-position: 0 0; } to { background-positi
 export default function ActivityCard() {
   const { data } = useSettingsData();
   const a = data?.activity;
+  // 首轮轮询前 data 未到：不要把 length ?? 0 派生出的「空闲 · 0 进行中」当真，改中性「检测中…」。
+  const pending = !data;
   const working = data?.tasks.length ?? 0;
   const failed = data?.failedTasks.length ?? 0;
   const dl = a?.downloadingVid != null;
@@ -20,8 +22,12 @@ export default function ActivityCard() {
     <Card sx={{ p: 2.25, height: "100%", display: "flex", flexDirection: "column" }}>
       <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <Typography variant="body2" color="text.secondary">正在缓存</Typography>
-        <Typography variant="body2" sx={{ maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-          {dl ? `${a?.title ?? `第 ${a?.downloadingVid} 讲`} · 进行中` : "空闲"}
+        <Typography
+          variant="body2"
+          color={pending ? "text.disabled" : undefined}
+          sx={{ maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+        >
+          {pending ? "检测中…" : dl ? `${a?.title ?? `第 ${a?.downloadingVid} 讲`} · 进行中` : "空闲"}
         </Typography>
       </Box>
       {dl && (
@@ -39,9 +45,13 @@ export default function ActivityCard() {
       )}
       <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", py: 1 }}>
         <Typography variant="body2" color="text.secondary">队列深度</Typography>
-        <Typography variant="body2" sx={{ fontVariantNumeric: "tabular-nums" }}>
-          缓冲 {a?.queue.buffer ?? 0} · 缩略图 {a?.queue.thumb ?? 0}
-        </Typography>
+        {pending ? (
+          <Typography variant="body2" color="text.disabled">检测中…</Typography>
+        ) : (
+          <Typography variant="body2" sx={{ fontVariantNumeric: "tabular-nums" }}>
+            缓冲 {a?.queue.buffer ?? 0} · 缩略图 {a?.queue.thumb ?? 0}
+          </Typography>
+        )}
       </Box>
       <Box
         component={Link}
@@ -59,11 +69,17 @@ export default function ActivityCard() {
           "&:hover": { bgcolor: "action.hover" },
         }}
       >
-        <Typography variant="body2">
-          {working} 进行中
-          {failed > 0 ? (
-            <Box component="span" sx={{ color: "error.main", fontWeight: 700 }}> · {failed} 失败</Box>
-          ) : null}
+        <Typography variant="body2" color={pending ? "text.disabled" : undefined}>
+          {pending ? (
+            "检测中…"
+          ) : (
+            <>
+              {working} 进行中
+              {failed > 0 ? (
+                <Box component="span" sx={{ color: "error.main", fontWeight: 700 }}> · {failed} 失败</Box>
+              ) : null}
+            </>
+          )}
         </Typography>
         <Box sx={{ ml: "auto", display: "flex", alignItems: "center", color: "text.disabled" }}>
           前往任务页 <ChevronRightRoundedIcon sx={{ fontSize: 18 }} />

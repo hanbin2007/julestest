@@ -2,6 +2,7 @@
 import * as React from "react";
 import { Box, Card, Skeleton, Typography } from "@mui/material";
 import CourseStatusCard from "./CourseStatusCard";
+import { DataBoundary } from "@/components/common/DataBoundary";
 import type { CourseStatus } from "@/types/api";
 
 export type CourseSort = "default" | "cache" | "watched" | "size" | "name";
@@ -32,9 +33,38 @@ function sortCourses(courses: CourseStatus[], sort: CourseSort): CourseStatus[] 
   }
 }
 
+const GridSkeleton = (
+  <Box sx={GRID_SX}>
+    {Array.from({ length: 6 }).map((_, i) => (
+      // Height matches realistic card: 2-line title (~35px) + dial row + chip row + actions
+      <Card key={i} sx={{ p: 1.5, height: 196 }}>
+        {/* Two-line title placeholder to match clamped header */}
+        <Skeleton width="85%" />
+        <Skeleton width="55%" sx={{ mb: 1 }} />
+        <Box sx={{ display: "flex", gap: 1.5 }}>
+          <Skeleton variant="circular" width={76} height={76} />
+          <Box sx={{ flex: 1 }}>
+            <Skeleton />
+            <Skeleton width="80%" />
+            <Skeleton width="60%" />
+          </Box>
+        </Box>
+      </Card>
+    ))}
+  </Box>
+);
+
+const EmptyState = (
+  <Typography variant="body2" color="text.secondary" sx={{ p: 3, textAlign: "center" }}>
+    无匹配课程
+  </Typography>
+);
+
 function CourseStatusGrid({
   courses,
   loading,
+  error,
+  onRetry,
   sort,
   busyIds,
   onOpen,
@@ -43,6 +73,8 @@ function CourseStatusGrid({
 }: {
   courses: CourseStatus[];
   loading: boolean;
+  error?: unknown;
+  onRetry?: () => void;
   sort: CourseSort;
   busyIds: Set<number>;
   onOpen: (c: CourseStatus) => void;
@@ -51,36 +83,19 @@ function CourseStatusGrid({
 }) {
   const sorted = React.useMemo(() => sortCourses(courses, sort), [courses, sort]);
 
-  if (loading && courses.length === 0) {
-    return (
-      <Box sx={GRID_SX}>
-        {Array.from({ length: 6 }).map((_, i) => (
-          // Height matches realistic card: 2-line title (~35px) + dial row + chip row + actions
-          <Card key={i} sx={{ p: 1.5, height: 196 }}>
-            {/* Two-line title placeholder to match clamped header */}
-            <Skeleton width="85%" />
-            <Skeleton width="55%" sx={{ mb: 1 }} />
-            <Box sx={{ display: "flex", gap: 1.5 }}>
-              <Skeleton variant="circular" width={76} height={76} />
-              <Box sx={{ flex: 1 }}>
-                <Skeleton />
-                <Skeleton width="80%" />
-                <Skeleton width="60%" />
-              </Box>
-            </Box>
-          </Card>
-        ))}
-      </Box>
-    );
-  }
-  if (sorted.length === 0) {
-    return (
-      <Typography variant="body2" color="text.secondary" sx={{ p: 3, textAlign: "center" }}>
-        无匹配课程
-      </Typography>
-    );
-  }
+  // 三态收口于 DataBoundary：error(且无可展示数据)→行内重试面板；loading→骨架；
+  // 空(已加载但筛选/无课)→“无匹配课程”。修复原 loading={!data} 在请求出错时骨架永转。
   return (
+    <DataBoundary
+      loading={loading && courses.length === 0}
+      error={error}
+      onRetry={onRetry}
+      isEmpty={sorted.length === 0}
+      skeleton={GridSkeleton}
+      empty={EmptyState}
+      errorTitle="课程状态加载失败"
+      errorHint="无法获取课程缓存状态，请检查网关 / 网络后重试。"
+    >
     <Box>
       {/* 常驻图例：解释卡片上的双环含义(原来只在 hover tooltip 里,发现性差)。 */}
       <Box sx={{ display: "flex", alignItems: "center", gap: 2, mb: 1, px: 0.5, flexWrap: "wrap" }}>
@@ -107,6 +122,7 @@ function CourseStatusGrid({
         ))}
       </Box>
     </Box>
+    </DataBoundary>
   );
 }
 

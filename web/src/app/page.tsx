@@ -8,6 +8,7 @@ import useMediaQuery from "@mui/material/useMediaQuery";
 import type { Theme } from "@mui/material/styles";
 import { ThemeProvider } from "@mui/material/styles";
 import PlayCircleOutlineRoundedIcon from "@mui/icons-material/PlayCircleOutlineRounded";
+import ErrorOutlineRoundedIcon from "@mui/icons-material/ErrorOutlineRounded";
 import AppTopBar from "@/components/common/AppTopBar";
 import CourseSidebar from "@/components/sidebar/CourseSidebar";
 import SidebarShell from "@/components/sidebar/SidebarShell";
@@ -76,6 +77,8 @@ export default function PlayerView() {
   const [cmdOpen, setCmdOpen] = React.useState(false);
   const [scOpen, setScOpen] = React.useState(false);
   const [src, setSrc] = React.useState<string | null>(null);
+  const [streamError, setStreamError] = React.useState<Error | null>(null);
+  const [retryNonce, setRetryNonce] = React.useState(0);
   const [upNext, setUpNext] = React.useState<Video | null>(null);
   const artRef = React.useRef<any>(null);
   const [art, setArt] = React.useState<any>(null); // 渲染用（批注层挂载/门控）
@@ -191,6 +194,7 @@ export default function PlayerView() {
   React.useEffect(() => {
     setSrc(null);
     setUpNext(null);
+    setStreamError(null);
     if (!video) return;
     const m = pickM3u8(video);
     if (!m) {
@@ -200,13 +204,18 @@ export default function PlayerView() {
     let cancelled = false;
     play(video, m)
       .then((r) => !cancelled && setSrc(r.url))
-      .catch((e) => !cancelled && toast("取流失败：" + (e as Error).message, { severity: "error" }));
+      .catch((e) => {
+        if (cancelled) return;
+        setStreamError(e as Error);
+        toast("取流失败：" + (e as Error).message, { severity: "error" });
+      });
     return () => {
       cancelled = true;
     };
     // videoId 跨产品可复用：加 productId 维度，切到同 videoId 的另一产品时重新取流。
+    // retryNonce 入依赖：「重试取流」自增它即可重跑本 effect。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [video?.videoId, video?.productId]);
+  }, [video?.videoId, video?.productId, retryNonce]);
 
   const selectVideo = React.useCallback((v: Video, c: Course) => {
     setSeekOverride(undefined);
@@ -664,6 +673,34 @@ export default function PlayerView() {
                       }}
                       onReady={() => setSeekOverride(undefined)}
                     />
+                  ) : sel && streamError ? (
+                    <Box
+                      sx={{
+                        position: "absolute",
+                        inset: 0,
+                        display: "flex",
+                        flexDirection: "column",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        color: "text.secondary",
+                        gap: 1.5,
+                        px: 2,
+                        textAlign: "center",
+                      }}
+                    >
+                      <ErrorOutlineRoundedIcon sx={{ fontSize: 56, color: "error.main", opacity: 0.85 }} />
+                      <Typography variant="body2">取流失败</Typography>
+                      <Button
+                        variant="outlined"
+                        size="small"
+                        onClick={() => {
+                          setStreamError(null);
+                          setRetryNonce((n) => n + 1);
+                        }}
+                      >
+                        重试取流
+                      </Button>
+                    </Box>
                   ) : (
                     <Box
                       sx={{

@@ -3,7 +3,7 @@ import * as React from "react";
 import { Box, Button, Card, MenuItem, Stack, Tab, Tabs, TextField, ToggleButton, ToggleButtonGroup, Typography } from "@mui/material";
 import ImageOutlinedIcon from "@mui/icons-material/ImageOutlined";
 import FileDownloadOutlinedIcon from "@mui/icons-material/FileDownloadOutlined";
-import { useAllCourseVideos, markRecentAction } from "@/hooks/data";
+import { useAllCourseVideos, markRecentAction, useCoursesStatus } from "@/hooks/data";
 import { usePrefs } from "@/hooks/persist";
 import { useToast } from "@/components/common/Toast";
 import { useSettingsData } from "@/components/settings/SettingsDataContext";
@@ -29,6 +29,10 @@ const MK_BUF = (v: Video) => ({
 export default function CachePage() {
   const toast = useToast();
   const { data, refresh, courses } = useSettingsData();
+  // 订阅 layout 轮询的同一状态源（SWR 按 key 去重，不会多发请求），取其 error。
+  // 用于区分「请求出错」与「数据为空」，修复出错时课程网格骨架永转。仅在 data 缺失（首屏失败）
+  // 时才下传 error；轮询期单次失败仍保留旧数据（keepPreviousData），避免网络抖动把已渲染的网格打回错误面板。
+  const { error: statusError } = useCoursesStatus();
   const { prefs, setPrefs } = usePrefs();
   const [tab, setTab] = React.useState(0);
   const [q, setQ] = React.useState("");
@@ -206,6 +210,8 @@ export default function CachePage() {
         <CourseStatusGrid
           courses={filteredCourses}
           loading={!data}
+          error={data ? undefined : statusError}
+          onRetry={() => refresh()}
           sort={sort}
           busyIds={busyIds}
           onOpen={setDrawer}
