@@ -12,7 +12,7 @@ export default function SettingsLayout({ children }: { children: ReactNode }) {
   return (
     <SettingsDataProvider>
       <Box sx={{ display: "flex", flexDirection: "column", height: "100dvh", minHeight: 0 }}>
-        <AppTopBar />
+        <AppTopBar context="设置" />
         <SettingsChrome />
         <Box sx={{ flex: 1, minHeight: 0, display: "flex" }}>
           <SettingsNav />

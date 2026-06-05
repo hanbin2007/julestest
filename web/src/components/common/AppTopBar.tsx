@@ -48,11 +48,14 @@ export default function AppTopBar({
   onMenu,
   menuTooltip,
   onCommand,
+  context,
 }: {
   onMenu?: () => void;
   // ☰ 按钮的悬停 / a11y 文案:桌面端「折叠 / 展开课程列表」、移动端「目录」。
   menuTooltip?: string;
   onCommand?: () => void;
+  // 顶栏中段的实时上下文(面包屑):首页=当前课程/讲次,其它页=区域名。填补中段空洞、并解决与侧栏「我的课程」的双标题。
+  context?: React.ReactNode;
 }) {
   const pathname = usePathname();
   const onSettings = pathname?.startsWith("/settings");
@@ -80,11 +83,36 @@ export default function AppTopBar({
             </IconButton>
           </Tooltip>
         )}
+        {/* 返回键移到左侧(惯例);与 ☰ 互斥(☰ 仅首页、返回仅非首页) */}
+        {!onHome && (
+          <Tooltip title="返回播放">
+            <IconButton edge={onMenu ? undefined : "start"} component={Link} href="/" aria-label="返回播放">
+              <ArrowBackRoundedIcon />
+            </IconButton>
+          </Tooltip>
+        )}
         <Box sx={{ width: 9, height: 9, borderRadius: "50%", bgcolor: "primary.main", boxShadow: (t) => `0 0 10px ${t.palette.primary.main}` }} />
-        <Typography variant="subtitle1" sx={{ fontWeight: 700, letterSpacing: 0.3 }}>
+        <Typography
+          variant="subtitle1"
+          component={Link}
+          href="/"
+          sx={{ fontWeight: 700, letterSpacing: 0.3, color: "inherit", textDecoration: "none", flexShrink: 0 }}
+        >
           课程
         </Typography>
-        <Box sx={{ flex: 1 }} />
+        {context && (
+          <>
+            <Typography variant="body2" sx={{ color: "text.disabled", mx: 0.5, flexShrink: 0 }}>
+              ›
+            </Typography>
+            <Box
+              sx={{ minWidth: 0, color: "text.secondary", fontSize: 14, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+            >
+              {context}
+            </Box>
+          </>
+        )}
+        <Box sx={{ flex: 1, minWidth: 8 }} />
         {onCommand && (
           <Tooltip title="搜索 / 命令 (⌘K)">
             <IconButton onClick={onCommand}>
@@ -93,13 +121,6 @@ export default function AppTopBar({
           </Tooltip>
         )}
         <ThemeModeToggle />
-        {!onHome && (
-          <Tooltip title="返回播放">
-            <IconButton component={Link} href="/">
-              <ArrowBackRoundedIcon />
-            </IconButton>
-          </Tooltip>
-        )}
         <Tooltip title={anyStreaming ? "对话(有进行中的)" : "对话"}>
           <IconButton component={Link} href="/chats" color={onChats ? "primary" : "default"}>
             <Badge

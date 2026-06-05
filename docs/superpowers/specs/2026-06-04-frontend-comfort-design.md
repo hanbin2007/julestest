@@ -26,7 +26,7 @@
 | 1 · 边缘态 | hooks 暴露 error/loading;notes/chats skeleton+error+empty;播放器重试;设置无假红;error.tsx/ErrorBoundary | 中 | ✅ 1a 列表+兜底 · 1b 播放器重试+设置假态 |
 | 2 · 动效/反馈 | 动效 token + 统一 hoverElevate;去掉卡片悬停位移;补齐未过渡瞬变;弹簧/时长归一 | 中 | ✅ 已实现+验证(workflow 6 任务并行,双阶段评审) |
 | 3 · 网格归一 | 间距→×8;排版→variants;抽 StatNum/StatusDot | 低/多文件 | ✅ 已实现+验证(workflow 4 区并行) |
-| 4 · AppShell+chrome | 单一 AppShell(统一 maxWidth/对齐);顶栏空洞→实时上下文;返回键→左;双标题;设置密度 | 高/全路由 | 待批设计 |
+| 4 · AppShell+chrome | PageContainer 统一内容脊(1200);顶栏空洞→面包屑 context;返回键→左;双标题解决;设置概览去重复状态条 | 高/全路由 | ✅ 已实现+验证(workflow 4 路由并行) |
 
 ---
 

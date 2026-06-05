@@ -25,6 +25,7 @@ import { fmtDur } from "@/lib/media";
 import type { EnrichedNote } from "@/lib/store";
 import { StatNum } from "@/components/common/StatNum";
 import { StatusDot } from "@/components/common/StatusDot";
+import { PageContainer } from "@/components/common/PageContainer";
 import NoteCard from "./NoteCard";
 
 type Sort = "time" | "recent";
@@ -158,7 +159,7 @@ export default function NotesView() {
   };
 
   return (
-    <Box sx={{ maxWidth: 1240, mx: "auto", p: { xs: 1.5, md: 3 } }}>
+    <PageContainer>
       <Stack
         direction={{ xs: "column", sm: "row" }}
         alignItems={{ xs: "flex-start", sm: "baseline" }}
@@ -328,6 +329,6 @@ export default function NotesView() {
           );
         })
       )}
-    </Box>
+    </PageContainer>
   );
 }

@@ -17,6 +17,7 @@ import { useAllChats } from "@/hooks/useAllChats";
 import { DataBoundary } from "@/components/common/DataBoundary";
 import { CardGridSkeleton } from "@/components/common/Skeletons";
 import { useToast } from "@/components/common/Toast";
+import { PageContainer } from "@/components/common/PageContainer";
 import { hashSeed } from "@/lib/color";
 import { StatNum } from "@/components/common/StatNum";
 import { StatusDot } from "@/components/common/StatusDot";
@@ -147,7 +148,7 @@ export default function ChatsView() {
   };
 
   return (
-    <Box sx={{ maxWidth: 1240, mx: "auto", p: { xs: 1.5, md: 3 } }}>
+    <PageContainer>
       <Stack
         direction={{ xs: "column", sm: "row" }}
         alignItems={{ xs: "flex-start", sm: "baseline" }}
@@ -323,6 +324,6 @@ export default function ChatsView() {
         chatId={overlay.chatId}
         onClose={() => setOverlay({ open: false, chatId: null })}
       />
-    </Box>
+    </PageContainer>
   );
 }

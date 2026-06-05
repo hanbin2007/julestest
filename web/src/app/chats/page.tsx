@@ -9,7 +9,7 @@ import ChatsView from "@/components/chat/ChatsView";
 export default function ChatsPage() {
   return (
     <Box sx={{ display: "flex", flexDirection: "column", height: "100dvh" }}>
-      <AppTopBar />
+      <AppTopBar context="对话" />
       <Box sx={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
         <React.Suspense fallback={null}>
           <ChatsView />

@@ -1,5 +1,6 @@
 "use client";
 import * as React from "react";
+import { usePathname } from "next/navigation";
 import { Box, Switch, Tooltip, Typography } from "@mui/material";
 import { fmtBytes } from "@/lib/media";
 import { bgPause } from "@/lib/api";
@@ -14,6 +15,9 @@ export default function SettingsChrome() {
   const { data, refresh } = useSettingsData();
   const h = data?.health;
   const t = data?.totals;
+  // 概览页（/settings 精确）已用卡片展示网关/ffmpeg/播放量，避免重复：仅保留唯一的「暂停所有后台」开关。
+  // 子路由（/settings/cache|tasks|system）无这些卡片，状态条整条保留。
+  const isOverview = usePathname() === "/settings";
   const toast = useToast();
   const [busy, setBusy] = React.useState(false);
   // 首轮轮询前 data 未到：状态点/ffmpeg/新鲜度渲染中性「检测中…」，不要从假值派生红色「网关离线」。
@@ -46,16 +50,20 @@ export default function SettingsChrome() {
         bgcolor: "md3.surfaceContainerLow",
       }}
     >
-      <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-        <StatusDot color={pending ? "text.disabled" : online ? "success.main" : "error.main"} />
-        <Typography variant="caption" color="text.secondary">{pending ? "网关检测中…" : online ? "网关在线" : "网关离线"}</Typography>
-      </Box>
-      <Typography variant="caption" color="text.secondary">ffmpeg {pending ? "检测中…" : h?.ffmpeg ? "✓" : "✗"}</Typography>
-      <Typography variant="caption" color="text.secondary">{pending ? "数据检测中…" : h?.stale ? "数据陈旧" : "数据实时"}</Typography>
-      {t && (
-        <Typography variant="caption" color="text.secondary" sx={{ fontVariantNumeric: "tabular-nums" }}>
-          播放 {fmtBytes(t.bufferBytes)} / {fmtBytes(t.bufferLimit)}
-        </Typography>
+      {!isOverview && (
+        <>
+          <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+            <StatusDot color={pending ? "text.disabled" : online ? "success.main" : "error.main"} />
+            <Typography variant="caption" color="text.secondary">{pending ? "网关检测中…" : online ? "网关在线" : "网关离线"}</Typography>
+          </Box>
+          <Typography variant="caption" color="text.secondary">ffmpeg {pending ? "检测中…" : h?.ffmpeg ? "✓" : "✗"}</Typography>
+          <Typography variant="caption" color="text.secondary">{pending ? "数据检测中…" : h?.stale ? "数据陈旧" : "数据实时"}</Typography>
+          {t && (
+            <Typography variant="caption" color="text.secondary" sx={{ fontVariantNumeric: "tabular-nums" }}>
+              播放 {fmtBytes(t.bufferBytes)} / {fmtBytes(t.bufferLimit)}
+            </Typography>
+          )}
+        </>
       )}
       <Box sx={{ ml: "auto", display: "flex", alignItems: "center", gap: 1 }}>
         <Typography variant="caption" color="text.secondary">暂停所有后台</Typography>

@@ -591,6 +591,11 @@ export default function PlayerView() {
         }}
         menuTooltip={isMdUp ? (sidebarCollapsed ? "展开课程列表" : "折叠课程列表") : "目录"}
         onCommand={() => setCmdOpen(true)}
+        context={
+          video && course
+            ? `${course.name} › ${video.title ?? `视频 ${video.videoId}`}`
+            : undefined
+        }
       />
       {coursesError && !courses.length && !isLoading && (
         <Alert
