@@ -8,6 +8,7 @@ import { useCourseVideos } from "@/hooks/data";
 import { useProgressMap } from "@/hooks/persist";
 import { hashSeed } from "@/lib/color";
 import { SidebarSkeleton } from "@/components/common/Skeletons";
+import { DUR, EASE } from "@/theme/motion";
 import type { Course, Video } from "@/types/api";
 import {
   allGroupKeys,
@@ -150,7 +151,7 @@ export default function CourseItem({
     <Box ref={selfRef} sx={{ mb: 0.5, scrollMarginTop: 8 }}>
       <ListItemButton onClick={onToggle} sx={{ borderRadius: (t) => t.radius.sm, gap: 1 }}>
         <ChevronRightIcon
-          sx={{ fontSize: 18, transition: ".18s", transform: wantOpen ? "rotate(90deg)" : "none", color: "text.secondary" }}
+          sx={{ fontSize: 18, transition: `transform ${DUR.base}ms ${EASE}`, transform: wantOpen ? "rotate(90deg)" : "none", color: "text.secondary" }}
         />
         <Typography
           variant="body2"

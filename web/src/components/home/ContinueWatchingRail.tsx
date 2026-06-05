@@ -1,7 +1,6 @@
 "use client";
 import { Box, Card, LinearProgress, Stack, Typography } from "@mui/material";
 import PlayCircleFilledRoundedIcon from "@mui/icons-material/PlayCircleFilledRounded";
-import { motion } from "framer-motion";
 import { useProgressMap } from "@/hooks/persist";
 import { useCourses } from "@/hooks/data";
 import { hashSeed } from "@/lib/color";
@@ -39,7 +38,7 @@ export default function ContinueWatchingRail({
           const title = e.title ?? `视频 ${videoId}`;
           const ratio = Math.min(1, e.t / e.d);
           return (
-            <motion.div key={`${productId}:${videoId}`} style={{ flex: "0 0 auto" }}>
+            <Box key={`${productId}:${videoId}`} sx={{ flex: "0 0 auto" }}>
               <Card
                 onClick={() => onResume(productId, videoId)}
                 sx={(t) => ({ ...hoverElevate(t), width: 240, p: 2, cursor: "pointer", borderColor: color })}
@@ -65,7 +64,7 @@ export default function ContinueWatchingRail({
                   {fmtDur(e.t)} / {fmtDur(e.d)}
                 </Typography>
               </Card>
-            </motion.div>
+            </Box>
           );
         })}
       </Stack>

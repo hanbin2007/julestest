@@ -6,7 +6,7 @@ import { Box, Fade, Typography } from "@mui/material";
 import { fmtDur, thumbSheetUrl, thumbTile } from "@/lib/media";
 import { noteSnapshotUrl } from "@/lib/api";
 import type { EnrichedNote } from "@/lib/store";
-import { DUR } from "@/theme/motion";
+import { DUR, EASE } from "@/theme/motion";
 
 const PLAIN = "#4f8cff";
 const ANNOTATION = "#ffb300"; // 批注用琥珀色区分
@@ -155,7 +155,7 @@ export default function TimelineMarkers({
                 boxShadow: "0 1px 4px rgba(0,0,0,.6)",
                 pointerEvents: "auto",
                 cursor: "pointer",
-                transition: `transform ${DUR.short}ms ease-out`,
+                transition: `transform ${DUR.short}ms ${EASE}`,
                 "&:hover": { transform: "translate(-50%, -50%) scale(1.25)" },
               }}
             />

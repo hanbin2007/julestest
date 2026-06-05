@@ -182,6 +182,28 @@ async function assertSettingsDetecting() {
   }
 }
 
+// A3:持久取数失败(非延迟)→ 概览给「重试」面板,而非永远「检测中…」/空白。
+async function assertSettingsErrorRetry() {
+  const page = await newDarkPage(browser);
+  try {
+    await page.route(
+      (url) => { try { return new URL(url).pathname === "/api/courses/status"; } catch { return false; } },
+      (route) => route.abort("failed"),
+    );
+    await page.goto(`${BASE}/settings`, { waitUntil: "domcontentloaded", timeout: 60000 });
+    const sawErrorPanel = await waitForText(page, "加载设置数据失败", 8000);
+    const body = (await page.textContent("body")) || "";
+    const stuckDetecting = !sawErrorPanel && body.includes(DETECTING);
+    check(
+      "A3 设置取数失败: 出现「重试」面板、不永远「检测中…」",
+      sawErrorPanel && !stuckDetecting,
+      `sawErrorPanel=${sawErrorPanel} stuckDetecting=${stuckDetecting}`,
+    );
+  } finally {
+    await page.close().catch(() => {});
+  }
+}
+
 const watchdog = setTimeout(() => {
   console.log("FATAL  watchdog 触发(>120s),强制退出");
   process.exitCode = 1;
@@ -192,6 +214,7 @@ try {
   browser = await chromium.launch({ channel: "chrome", headless: true });
   await assertPlayerRetry();
   await assertSettingsDetecting();
+  await assertSettingsErrorRetry();
 } catch (e) {
   check("FATAL", false, e?.message || String(e));
 } finally {

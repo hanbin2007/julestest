@@ -1,5 +1,4 @@
 "use client";
-import * as React from "react";
 import { Box, Typography } from "@mui/material";
 import { markRecentAction } from "@/hooks/data";
 import { useToast } from "@/components/common/Toast";
