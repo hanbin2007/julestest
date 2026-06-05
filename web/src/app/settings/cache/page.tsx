@@ -143,7 +143,7 @@ export default function CachePage() {
   const loadingCourses = flatActive && total > 0 && loaded < total;
 
   return (
-    <Box sx={{ p: 2.5, display: "flex", flexDirection: "column", gap: 2 }}>
+    <Box sx={{ p: 3, display: "flex", flexDirection: "column", gap: 2 }}>
       <Box>
         <Typography variant="h6">缓存管理</Typography>
         <Typography variant="caption" color="text.disabled">浏览课程与讲次的缓存状态，按需缓冲 / 生成缩略图。</Typography>

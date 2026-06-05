@@ -24,7 +24,7 @@ export function BoardLabel({
   return (
     <Box sx={{ display: "flex", alignItems: "center", gap: 0.5, px: 1, pt: 1, pb: 0.5 }}>
       {icon}
-      <Typography variant="caption" sx={{ fontWeight: 800, letterSpacing: 0.5, color: "text.secondary" }}>
+      <Typography variant="caption" sx={{ fontWeight: 700, letterSpacing: 0.5, color: "text.secondary" }}>
         {label}
       </Typography>
       <Typography variant="caption" sx={{ ml: "auto", color: "text.disabled", fontVariantNumeric: "tabular-nums" }}>

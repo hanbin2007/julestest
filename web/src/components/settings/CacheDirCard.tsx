@@ -108,7 +108,7 @@ function CacheDirCard({
             variant="contained"
             onClick={save}
             disabled={saving || !dir.trim()}
-            sx={{ flexShrink: 0, mt: { sm: 0.25 } }}
+            sx={{ flexShrink: 0, mt: { sm: 0.5 } }}
           >
             {saving ? "保存中…" : "保存"}
           </Button>

@@ -59,7 +59,7 @@ export default function NoteViewer({
                 variant="outlined"
                 icon={<GestureRoundedIcon />}
                 label="批注"
-                sx={{ height: 20, "& .MuiChip-label": { px: 0.75, fontSize: 11 } }}
+                sx={{ height: 20, "& .MuiChip-label": { px: 1, fontSize: 11 } }}
               />
             )}
             <Box sx={{ flex: 1, minWidth: 0 }}>

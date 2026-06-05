@@ -82,7 +82,7 @@ export default function NoteCard({
           ...elevate,
           // hoverElevate 的过渡 + 选中描边色的平滑显隐（outline-style 不可动画，故用常驻透明描边只动色）
           transition: `${elevate.transition}, ${smoothColors(t, ["outline-color"])}`,
-          p: 1.5,
+          p: 2,
           height: "100%",
           position: "relative",
           display: "flex",
@@ -115,7 +115,7 @@ export default function NoteCard({
             top: 4,
             left: 4,
             zIndex: 2,
-            p: 0.25,
+            p: 0.5,
             borderRadius: (t) => t.radius.sm,
             bgcolor: "background.paper",
             "&:hover": { bgcolor: "background.paper" },
@@ -152,7 +152,7 @@ export default function NoteCard({
                 variant="outlined"
                 icon={<GestureRoundedIcon />}
                 label="批注"
-                sx={{ height: 20, "& .MuiChip-label": { px: 0.75, fontSize: 11 } }}
+                sx={{ height: 20, "& .MuiChip-label": { px: 1, fontSize: 11 } }}
               />
             )}
           </Stack>

@@ -1,7 +1,6 @@
 "use client";
 import * as React from "react";
 import {
-  Box,
   Card,
   Chip,
   IconButton,
@@ -20,6 +19,7 @@ import LinkOffRoundedIcon from "@mui/icons-material/LinkOffRounded";
 import { useChatStream } from "@/hooks/useChatStream";
 import * as chatStreams from "@/lib/chatStreams";
 import { hashSeed } from "@/lib/color";
+import { StatusDot } from "@/components/common/StatusDot";
 import { hoverElevate, smoothColors, DUR, EASE } from "@/theme/motion";
 import type { EnrichedChat } from "@/lib/store";
 
@@ -80,7 +80,7 @@ export default function ChatCard({
       }}
       sx={(t) => ({
         position: "relative",
-        p: 1.5,
+        p: 2,
         height: "100%",
         display: "flex",
         flexDirection: "column",
@@ -113,15 +113,7 @@ export default function ChatCard({
       )}
 
       <Stack direction="row" alignItems="center" spacing={1} sx={{ minWidth: 0 }}>
-        <Box
-          sx={{
-            width: 10,
-            height: 10,
-            borderRadius: "999px",
-            bgcolor: color,
-            flexShrink: 0,
-          }}
-        />
+        <StatusDot color={color} size={10} />
         {editing ? (
           <TextField
             size="small"
@@ -158,7 +150,7 @@ export default function ChatCard({
             label="独立"
             size="small"
             variant="outlined"
-            sx={{ height: 20, "& .MuiChip-label": { px: 0.75, fontSize: "0.7rem" } }}
+            sx={{ height: 20, "& .MuiChip-label": { px: 1, fontSize: "0.7rem" } }}
           />
         )}
       </Stack>
@@ -182,7 +174,7 @@ export default function ChatCard({
           size="small"
           color="warning"
           label={stream.error}
-          sx={{ alignSelf: "flex-start", height: 20, "& .MuiChip-label": { px: 0.75, fontSize: "0.7rem" } }}
+          sx={{ alignSelf: "flex-start", height: 20, "& .MuiChip-label": { px: 1, fontSize: "0.7rem" } }}
         />
       ) : chat.lastMessage ? (
         <Typography
@@ -218,7 +210,7 @@ export default function ChatCard({
           <ForumOutlinedIcon sx={{ fontSize: 14 }} />
           {chat.messageCount} 条 · {new Date(chat.updatedAt).toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })}
         </Typography>
-        <Stack direction="row" spacing={0.25} onClick={(e) => e.stopPropagation()}>
+        <Stack direction="row" spacing={0.5} onClick={(e) => e.stopPropagation()}>
           {streaming && (
             <Tooltip title="停止">
               <IconButton size="small" onClick={() => chatStreams.stop(chat.id)} aria-label="stop">

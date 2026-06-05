@@ -11,7 +11,7 @@ function Row({ k, children, last }: { k: string; children: ReactNode; last?: boo
         display: "flex",
         alignItems: "center",
         justifyContent: "space-between",
-        py: 1.1,
+        py: 1,
         borderBottom: last ? "none" : (t) => `1px solid ${t.palette.divider}`,
       }}
     >
@@ -33,7 +33,7 @@ export default function HealthCard() {
   const dir = h?.cacheDir || "—";
   const shortDir = dir.length > 28 ? "…" + dir.slice(-26) : dir;
   return (
-    <Card sx={{ p: 2.25, height: "100%" }}>
+    <Card sx={{ p: 2, height: "100%" }}>
       <Row k="网关">
         {pending ? (
           <Chip size="small" color="default" label="检测中…" sx={CHIP_SX} />

@@ -47,7 +47,7 @@ export default function TasksPage() {
   };
 
   return (
-    <Box sx={{ p: 2.5, maxWidth: 960, display: "flex", flexDirection: "column", gap: 2 }}>
+    <Box sx={{ p: 3, maxWidth: 960, display: "flex", flexDirection: "column", gap: 2 }}>
       <Box>
         <Typography variant="h6">任务 · 历史</Typography>
         <Typography variant="caption" color="text.disabled">

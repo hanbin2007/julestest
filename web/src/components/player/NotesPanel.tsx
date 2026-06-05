@@ -27,6 +27,7 @@ import { hashSeed } from "@/lib/color";
 import { fmtDur } from "@/lib/media";
 import type { EnrichedNote } from "@/lib/store";
 import NotePreview from "@/components/notes/NotePreview";
+import { StatusDot } from "@/components/common/StatusDot";
 import { smoothColors } from "@/theme/motion";
 
 // 分屏时面板宽度（与 ChatPanel 的 CHAT_WIDTH 同类常量，供 page.tsx 算播放器右偏移）。
@@ -207,8 +208,8 @@ export default function NotesPanel({
             const color = hashSeed(g.courseName);
             return (
               <Box key={`${g.courseId}:${g.videoId}`} sx={{ mt: 1.5 }}>
-                <Stack direction="row" sx={{ alignItems: "center", gap: 0.75, px: 0.5, mb: 0.5 }}>
-                  <Box sx={{ width: 8, height: 8, borderRadius: "999px", bgcolor: color, flex: "0 0 auto" }} />
+                <Stack direction="row" sx={{ alignItems: "center", gap: 1, px: 0.5, mb: 0.5 }}>
+                  <StatusDot color={color} />
                   <Typography
                     variant="caption"
                     sx={{ fontWeight: 700, minWidth: 0 }}
@@ -219,7 +220,7 @@ export default function NotesPanel({
                     {g.lessonTitle}
                   </Typography>
                   {g.courseId === currentCourseId && g.videoId === currentVideoId && (
-                    <Chip size="small" label="本讲" sx={{ height: 18, "& .MuiChip-label": { px: 0.75, fontSize: 10 } }} />
+                    <Chip size="small" label="本讲" sx={{ height: 18, "& .MuiChip-label": { px: 1, fontSize: 10 } }} />
                   )}
                 </Stack>
                 <Stack spacing={0.5}>
@@ -312,7 +313,7 @@ function NoteRow({
       sx={{
         display: "flex",
         gap: 1,
-        p: 0.75,
+        p: 1,
         borderRadius: (t) => t.radius.sm,
         transition: (t) => smoothColors(t, ["background-color"]),
         "&:hover": { bgcolor: "action.hover" },
@@ -332,7 +333,7 @@ function NoteRow({
           color={color}
         />
       </Box>
-      <Box sx={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 0.25 }}>
+      <Box sx={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 0.5 }}>
         <Stack direction="row" sx={{ alignItems: "center", gap: 0.5 }}>
           <Typography
             variant="caption"
@@ -381,7 +382,7 @@ function NoteRow({
             {note.text}
           </Typography>
         )}
-        <Stack direction="row" sx={{ alignItems: "center", mt: 0.25, ml: -0.5 }}>
+        <Stack direction="row" sx={{ alignItems: "center", mt: 0.5, ml: -0.5 }}>
           {editing ? (
             <>
               <Tooltip title="保存 (Enter)">

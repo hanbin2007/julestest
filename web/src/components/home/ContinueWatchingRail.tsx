@@ -42,7 +42,7 @@ export default function ContinueWatchingRail({
             <motion.div key={`${productId}:${videoId}`} style={{ flex: "0 0 auto" }}>
               <Card
                 onClick={() => onResume(productId, videoId)}
-                sx={(t) => ({ ...hoverElevate(t), width: 240, p: 1.5, cursor: "pointer", borderColor: color })}
+                sx={(t) => ({ ...hoverElevate(t), width: 240, p: 2, cursor: "pointer", borderColor: color })}
               >
                 <Box sx={{ display: "flex", alignItems: "center", gap: 1, mb: 1 }}>
                   <PlayCircleFilledRoundedIcon sx={{ color }} />

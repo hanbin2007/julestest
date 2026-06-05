@@ -18,6 +18,8 @@ import { DataBoundary } from "@/components/common/DataBoundary";
 import { CardGridSkeleton } from "@/components/common/Skeletons";
 import { useToast } from "@/components/common/Toast";
 import { hashSeed } from "@/lib/color";
+import { StatNum } from "@/components/common/StatNum";
+import { StatusDot } from "@/components/common/StatusDot";
 import type { EnrichedChat } from "@/lib/store";
 import ChatCard from "./ChatCard";
 import ChatOverlay from "./ChatOverlay";
@@ -31,19 +33,6 @@ const GRID_SX = {
   gridAutoRows: "1fr",
   gap: 1.5,
 } as const;
-
-function StatNum({ n, label }: { n: number; label: string }) {
-  return (
-    <Box sx={{ display: "flex", alignItems: "baseline", gap: 0.5 }}>
-      <Typography sx={{ fontSize: "1.4rem", fontWeight: 800, fontVariantNumeric: "tabular-nums", lineHeight: 1 }}>
-        {n}
-      </Typography>
-      <Typography variant="caption" color="text.secondary">
-        {label}
-      </Typography>
-    </Box>
-  );
-}
 
 export default function ChatsView() {
   const router = useRouter();
@@ -179,10 +168,10 @@ export default function ChatsView() {
       {/* 统计概览(粘顶) */}
       <Card sx={{ p: 2, mb: 2, position: { md: "sticky" }, top: 8, zIndex: 2 }}>
         <Stack direction="row" spacing={3} sx={{ flexWrap: "wrap", alignItems: "center", rowGap: 1 }}>
-          <StatNum n={stats.total} label="个对话" />
-          <StatNum n={stats.lesson} label="跟讲" />
-          <StatNum n={stats.independent} label="独立" />
-          <StatNum n={stats.courses} label="门课程" />
+          <StatNum value={stats.total} label="个对话" />
+          <StatNum value={stats.lesson} label="跟讲" />
+          <StatNum value={stats.independent} label="独立" />
+          <StatNum value={stats.courses} label="门课程" />
           {shownCount !== stats.total && (
             <Typography variant="caption" color="text.secondary">
               · 当前筛选 {shownCount} 个
@@ -282,7 +271,7 @@ export default function ChatsView() {
           {groups.independents.length > 0 && (
             <Box sx={{ mb: 3 }}>
               <Stack direction="row" sx={{ alignItems: "center", gap: 1, mb: 1.5 }}>
-                <Box sx={{ width: 10, height: 10, borderRadius: "999px", bgcolor: "text.disabled", flex: "0 0 auto" }} />
+                <StatusDot color="text.disabled" size={10} />
                 <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>
                   独立对话
                 </Typography>
@@ -306,7 +295,7 @@ export default function ChatsView() {
             return (
               <Box key={g.courseId} sx={{ mb: 3 }}>
                 <Stack direction="row" sx={{ alignItems: "center", gap: 1, mb: 1.5 }}>
-                  <Box sx={{ width: 10, height: 10, borderRadius: "999px", bgcolor: color, flex: "0 0 auto" }} />
+                  <StatusDot color={color} size={10} />
                   <Typography variant="subtitle1" sx={{ fontWeight: 700, minWidth: 0 }} noWrap title={g.courseName}>
                     {g.courseName}
                   </Typography>

@@ -25,7 +25,7 @@ export default function OverviewPage() {
     }
   };
   return (
-    <Box sx={{ p: 2.5, maxWidth: 920, display: "flex", flexDirection: "column", gap: 2.5 }}>
+    <Box sx={{ p: 3, maxWidth: 920, display: "flex", flexDirection: "column", gap: 2 }}>
       <Box>
         <Typography variant="h6">概览</Typography>
         <Typography variant="caption" color="text.disabled">系统、存储与当前活动一眼掌握。</Typography>
@@ -34,7 +34,7 @@ export default function OverviewPage() {
         <SectionHeader title="存储占用" />
         <StorageCard />
       </Box>
-      <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", md: "1.4fr 1fr" }, gap: 1.75, alignItems: "stretch" }}>
+      <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", md: "1.4fr 1fr" }, gap: 2, alignItems: "stretch" }}>
         <Box sx={{ display: "flex", flexDirection: "column" }}>
           <SectionHeader title="系统健康" />
           <HealthCard />

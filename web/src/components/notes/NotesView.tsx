@@ -23,6 +23,8 @@ import { useToast } from "@/components/common/Toast";
 import { hashSeed } from "@/lib/color";
 import { fmtDur } from "@/lib/media";
 import type { EnrichedNote } from "@/lib/store";
+import { StatNum } from "@/components/common/StatNum";
+import { StatusDot } from "@/components/common/StatusDot";
 import NoteCard from "./NoteCard";
 
 type Sort = "time" | "recent";
@@ -33,19 +35,6 @@ const GRID_SX = {
   gridAutoRows: "1fr",
   gap: 1.5,
 } as const;
-
-function StatNum({ n, label }: { n: number; label: string }) {
-  return (
-    <Box sx={{ display: "flex", alignItems: "baseline", gap: 0.5 }}>
-      <Typography sx={{ fontSize: "1.4rem", fontWeight: 800, fontVariantNumeric: "tabular-nums", lineHeight: 1 }}>
-        {n}
-      </Typography>
-      <Typography variant="caption" color="text.secondary">
-        {label}
-      </Typography>
-    </Box>
-  );
-}
 
 export default function NotesView() {
   const router = useRouter();
@@ -194,9 +183,9 @@ export default function NotesView() {
           spacing={3}
           sx={{ flexWrap: "wrap", alignItems: "center", rowGap: 1 }}
         >
-          <StatNum n={stats.total} label="条笔记" />
-          <StatNum n={stats.videos} label="个讲次" />
-          <StatNum n={stats.courses} label="门课程" />
+          <StatNum value={stats.total} label="条笔记" />
+          <StatNum value={stats.videos} label="个讲次" />
+          <StatNum value={stats.courses} label="门课程" />
           {shownCount !== stats.total && (
             <Typography variant="caption" color="text.secondary">
               · 当前筛选 {shownCount} 条
@@ -313,7 +302,7 @@ export default function NotesView() {
           return (
             <Box key={g.courseId} sx={{ mb: 3 }}>
               <Stack direction="row" sx={{ alignItems: "center", gap: 1, mb: 1.5 }}>
-                <Box sx={{ width: 10, height: 10, borderRadius: "999px", bgcolor: color, flex: "0 0 auto" }} />
+                <StatusDot color={color} size={10} />
                 <Typography variant="subtitle1" sx={{ fontWeight: 700, minWidth: 0 }} noWrap title={g.courseName}>
                   {g.courseName}
                 </Typography>

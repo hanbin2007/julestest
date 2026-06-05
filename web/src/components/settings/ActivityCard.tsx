@@ -19,7 +19,7 @@ export default function ActivityCard() {
   const failed = data?.failedTasks.length ?? 0;
   const dl = a?.downloadingVid != null;
   return (
-    <Card sx={{ p: 2.25, height: "100%", display: "flex", flexDirection: "column" }}>
+    <Card sx={{ p: 2, height: "100%", display: "flex", flexDirection: "column" }}>
       <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <Typography variant="body2" color="text.secondary">正在缓存</Typography>
         <Typography
@@ -62,7 +62,7 @@ export default function ActivityCard() {
           alignItems: "center",
           gap: 1,
           px: 1.5,
-          py: 1.25,
+          py: 1,
           borderRadius: (t) => t.radius.md,
           bgcolor: "md3.surfaceContainerHigh",
           transition: (t) => smoothColors(t, ["background-color"]),

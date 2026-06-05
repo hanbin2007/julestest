@@ -68,7 +68,7 @@ function CacheDial({ course, color }: { course: CourseStatus; color: string }) {
               component="span"
               sx={{
                 fontSize: "0.7rem",
-                fontWeight: 800,
+                fontWeight: 700,
                 fontVariantNumeric: "tabular-nums",
                 lineHeight: 1,
               }}

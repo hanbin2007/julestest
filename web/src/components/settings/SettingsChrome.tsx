@@ -5,6 +5,7 @@ import { fmtBytes } from "@/lib/media";
 import { bgPause } from "@/lib/api";
 import { markRecentAction } from "@/hooks/data";
 import { useToast } from "@/components/common/Toast";
+import { StatusDot } from "@/components/common/StatusDot";
 import { useSettingsData } from "./SettingsDataContext";
 
 // 设置页常驻状态条：在任意子路由都能瞄一眼网关健康 + 存储一览，并随手暂停所有后台缓存。
@@ -37,24 +38,16 @@ export default function SettingsChrome() {
       sx={{
         display: "flex",
         alignItems: "center",
-        gap: 2.25,
-        px: 2.25,
-        py: 1.25,
+        gap: 2,
+        px: 2,
+        py: 1,
         flexWrap: "wrap",
         borderBottom: (th) => `1px solid ${th.palette.divider}`,
         bgcolor: "md3.surfaceContainerLow",
-        fontSize: 13,
       }}
     >
-      <Box sx={{ display: "flex", alignItems: "center", gap: 0.75 }}>
-        <Box
-          sx={{
-            width: 8,
-            height: 8,
-            borderRadius: "50%",
-            bgcolor: pending ? "text.disabled" : online ? "success.main" : "error.main",
-          }}
-        />
+      <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+        <StatusDot color={pending ? "text.disabled" : online ? "success.main" : "error.main"} />
         <Typography variant="caption" color="text.secondary">{pending ? "网关检测中…" : online ? "网关在线" : "网关离线"}</Typography>
       </Box>
       <Typography variant="caption" color="text.secondary">ffmpeg {pending ? "检测中…" : h?.ffmpeg ? "✓" : "✗"}</Typography>
